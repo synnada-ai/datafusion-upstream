@@ -133,6 +133,15 @@ pub trait AggregateExpr: Send + Sync + Debug + PartialEq<dyn Any> {
     fn create_sliding_accumulator(&self) -> Result<Box<dyn Accumulator>> {
         not_impl_err!("Retractable Accumulator hasn't been implemented for {self:?} yet")
     }
+
+    /// Rewrites the aggregate expression with the given expressions.
+    /// The order of the given expressions is taken into account while replacing.
+    fn with_new_expressions(
+        self: Arc<Self>,
+        expressions: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> Option<Arc<dyn AggregateExpr>> {
+        None
+    }
 }
 
 /// Checks whether the given aggregate expression is order-sensitive.
