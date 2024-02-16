@@ -5009,7 +5009,7 @@ mod tests {
     )
     STORED AS CSV
     WITH HEADER ROW
-    LOCATION '/Users/berkaysahin/Desktop/datafusion-upstream/testing/data/csv/aggregate_test_100.csv'",
+    LOCATION '../../testing/data/csv/aggregate_test_100.csv'",
                 )
                 .await?;
 
@@ -5034,6 +5034,34 @@ ORDER BY 1",
         let batches = dataframe.collect().await?;
         let _ = print_plan(&physical_plan);
         let _ = print_batches(&batches);
+        Ok(())
+    }
+
+    /// TODO: Result of this query is wrong, where output schema orders is different what is should be.
+    ///  The problem originates in `AggregateExec: mode=FinalPartitioned` at the top.
+    #[tokio::test]
+    async fn test_trivial2() -> Result<()> {
+        let mut config = SessionConfig::new()
+            .with_target_partitions(2)
+            .with_batch_size(4096);
+        let ctx = SessionContext::with_config(config);
+        let _dataframe = ctx
+            .sql(
+                "CREATE TABLE tab0(col0 INTEGER, col1 INTEGER, col2 INTEGER) as VALUES (83,0,38), (26,0,79), (43,81,24)",
+            )
+            .await?;
+
+        let dataframe = ctx
+            .sql(
+                "SELECT DISTINCT * FROM tab0 AS cor0 GROUP BY cor0.col1, cor0.col2, cor0.col0",
+            )
+            .await?;
+
+        let physical_plan = dataframe.clone().create_physical_plan().await?;
+        let batches = dataframe.collect().await?;
+        let _ = print_plan(&physical_plan);
+        let _ = print_batches(&batches);
+        assert!(false);
         Ok(())
     }
 }
