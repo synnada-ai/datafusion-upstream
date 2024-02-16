@@ -69,12 +69,17 @@ use datafusion_common::DataFusionError;
 use datafusion_common::{internal_err, JoinSide, JoinType};
 use datafusion_physical_expr::expressions::{Column, Literal};
 use datafusion_physical_expr::utils::collect_columns;
-use datafusion_physical_expr::{LexOrdering, Partitioning, PhysicalExpr, PhysicalSortExpr};
+use datafusion_physical_expr::window::WindowExpr;
+use datafusion_physical_expr::{
+    AggregateExpr, LexOrdering, Partitioning, PhysicalExpr, PhysicalSortExpr,
+};
 use datafusion_physical_plan::aggregates::{AggregateExec, PhysicalGroupBy};
 use datafusion_physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::insert::FileSinkExec;
-use datafusion_physical_plan::joins::utils::{ColumnIndex, JoinFilter, JoinOn};
+use datafusion_physical_plan::joins::utils::{
+    ColumnIndex, JoinFilter, JoinOn, JoinOnRef,
+};
 use datafusion_physical_plan::joins::{
     CrossJoinExec, HashJoinExec, NestedLoopJoinExec, SortMergeJoinExec,
     SymmetricHashJoinExec,
@@ -2031,10 +2036,9 @@ impl ProjectionOptimizer {
                     .zip(window_usage.clone())
                     .filter(|(_window_expr, (_window_col, usage))| *usage)
                     .map(|(window_expr, (_window_col, _usage))| {
-                        let new_exprs = update_exprs(&window_expr.expressions(), &schema_mapping);
-                        window_expr.clone().with_new_expressions(
-                            new_exprs,
-                        )
+                        let new_exprs =
+                            update_exprs(&window_expr.expressions(), &schema_mapping);
+                        window_expr.clone().with_new_expressions(new_exprs)
                     })
                     .collect::<Option<Vec<_>>>()
                     .unwrap();
@@ -2121,10 +2125,9 @@ impl ProjectionOptimizer {
                     .zip(window_usage.clone())
                     .filter(|(_window_expr, (_window_col, usage))| *usage)
                     .map(|(window_expr, (_window_col, _usage))| {
-                        let new_exprs = update_exprs(&window_expr.expressions(), &schema_mapping);
-                        window_expr.clone().with_new_expressions(
-                            new_exprs,
-                        )
+                        let new_exprs =
+                            update_exprs(&window_expr.expressions(), &schema_mapping);
+                        window_expr.clone().with_new_expressions(new_exprs)
                     })
                     .collect::<Option<Vec<_>>>()
                     .unwrap();
@@ -3247,7 +3250,10 @@ fn update_expr(
     new_expr.map(|e| (state == RewriteState::RewrittenValid).then_some(e))
 }
 
-fn update_sort_exprs(sort_exprs: &[PhysicalSortExpr], mapping: &HashMap<Column, Column>) -> LexOrdering{
+fn update_sort_exprs(
+    sort_exprs: &[PhysicalSortExpr],
+    mapping: &HashMap<Column, Column>,
+) -> LexOrdering {
     sort_exprs
         .iter()
         .map(|sort_expr| PhysicalSortExpr {
@@ -3256,11 +3262,57 @@ fn update_sort_exprs(sort_exprs: &[PhysicalSortExpr], mapping: &HashMap<Column, 
         })
         .collect::<Vec<_>>()
 }
-fn update_exprs(exprs: &[Arc<dyn PhysicalExpr>], mapping: &HashMap<Column, Column>) -> Vec<Arc<dyn PhysicalExpr>> {
+fn update_exprs(
+    exprs: &[Arc<dyn PhysicalExpr>],
+    mapping: &HashMap<Column, Column>,
+) -> Vec<Arc<dyn PhysicalExpr>> {
     exprs
         .iter()
         .map(|expr| update_column_index(expr, mapping))
         .collect::<Vec<_>>()
+}
+
+fn update_window_exprs(
+    window_exprs: &[Arc<dyn WindowExpr>],
+    mapping: &HashMap<Column, Column>,
+) -> Option<Vec<Arc<dyn WindowExpr>>> {
+    window_exprs
+        .iter()
+        .map(|window_expr| {
+            let new_exprs = update_exprs(&window_expr.expressions(), mapping);
+            window_expr.clone().with_new_expressions(new_exprs)
+        })
+        .collect::<Option<Vec<_>>>()
+}
+
+fn update_aggregate_exprs(
+    aggregate_exprs: &[Arc<dyn AggregateExpr>],
+    mapping: &HashMap<Column, Column>,
+) -> Option<Vec<Arc<dyn AggregateExpr>>> {
+    aggregate_exprs
+        .iter()
+        .map(|aggr_expr| {
+            aggr_expr.clone().with_new_expressions(
+                aggr_expr
+                    .expressions()
+                    .iter()
+                    .map(|expr| update_column_index(expr, mapping))
+                    .collect(),
+            )
+        })
+        .collect::<Option<Vec<_>>>()
+}
+
+fn update_join_on(join_on: JoinOnRef, mapping: &HashMap<Column, Column>) -> JoinOn {
+    join_on
+        .into_iter()
+        .map(|(left, right)| {
+            (
+                update_column_index(&left, mapping),
+                update_column_index(&right, mapping),
+            )
+        })
+        .collect()
 }
 
 /// Given mapping representing the initial and new index values,
@@ -3528,22 +3580,7 @@ fn rewrite_hash_join(
     mapping: &HashMap<Column, Column>,
     left_size: usize,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    let new_on = hj
-        .on()
-        .into_iter()
-        .map(|(left, right)| {
-            (
-                update_column_index(
-                    &left,
-                    &mapping,
-                ),
-                update_column_index(
-                    &right,
-                    &mapping,
-                ),
-            )
-        })
-        .collect();
+    let new_on = update_join_on(hj.on(), mapping);
     let new_filter = hj.filter().map(|filter| {
         JoinFilter::new(
             filter.expression().clone(),
@@ -3643,22 +3680,7 @@ fn rewrite_sort_merge_join(
     mapping: &HashMap<Column, Column>,
     left_size: usize,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    let new_on = smj
-        .on()
-        .into_iter()
-        .map(|(left, right)| {
-            (
-                update_column_index(
-                    &left,
-                    &mapping,
-                ),
-                update_column_index(
-                    &right,
-                    &mapping,
-                ),
-            )
-        })
-        .collect();
+    let new_on = update_join_on(smj.on(), mapping);
     let new_filter = smj.filter.as_ref().map(|filter| {
         JoinFilter::new(
             filter.expression().clone(),
@@ -3710,22 +3732,7 @@ fn rewrite_symmetric_hash_join(
     mapping: &HashMap<Column, Column>,
     left_size: usize,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    let new_on = shj
-        .on()
-        .into_iter()
-        .map(|(left, right)| {
-            (
-                update_column_index(
-                    &left,
-                    &mapping,
-                ),
-                update_column_index(
-                    &right,
-                    &mapping,
-                ),
-            )
-        })
-        .collect();
+    let new_on = update_join_on(shj.on(), mapping);
     let new_filter = shj.filter().map(|filter| {
         JoinFilter::new(
             filter.expression().clone(),
@@ -3791,24 +3798,12 @@ fn rewrite_aggregate(
             .collect(),
         agg.group_expr().groups().to_vec(),
     );
-    let new_agg_expr = if let Some(new_agg_expr) = agg
-        .aggr_expr()
-        .iter()
-        .map(|aggr_expr| {
-            aggr_expr.clone().with_new_expressions(
-                aggr_expr
-                    .expressions()
-                    .iter()
-                    .map(|expr| update_column_index(expr, mapping))
-                    .collect(),
-            )
-        })
-        .collect::<Option<Vec<_>>>()
-    {
-        new_agg_expr
-    } else {
-        return Ok(None);
-    };
+    let new_agg_expr =
+        if let Some(new_agg_expr) = update_aggregate_exprs(agg.aggr_expr(), mapping) {
+            new_agg_expr
+        } else {
+            return Ok(None);
+        };
     let new_filter = agg
         .filter_expr()
         .iter()
@@ -3834,21 +3829,12 @@ fn rewrite_window_aggregate(
     input_plan: Arc<dyn ExecutionPlan>,
     mapping: &HashMap<Column, Column>,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-    let new_window = if let Some(new_window) = w_agg
-        .window_expr()
-        .iter()
-        .map(|window_expr| {
-            let new_exprs = update_exprs(&window_expr.expressions(), mapping);
-            window_expr.clone().with_new_expressions(
-                new_exprs,
-            )
-        })
-        .collect::<Option<Vec<_>>>()
-    {
-        new_window
-    } else {
-        return Ok(None);
-    };
+    let new_window =
+        if let Some(new_window) = update_window_exprs(&w_agg.window_expr(), mapping) {
+            new_window
+        } else {
+            return Ok(None);
+        };
     let new_partition_keys = update_exprs(&w_agg.partition_keys, mapping);
     WindowAggExec::try_new(new_window, input_plan, new_partition_keys)
         .map(|plan| Some(Arc::new(plan) as _))
@@ -3859,21 +3845,12 @@ fn rewrite_bounded_window_aggregate(
     input_plan: Arc<dyn ExecutionPlan>,
     mapping: &HashMap<Column, Column>,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-    let new_window = if let Some(new_window) = bw_agg
-        .window_expr()
-        .iter()
-        .map(|window_expr| {
-            let new_exprs = update_exprs(&window_expr.expressions(), mapping);
-            window_expr.clone().with_new_expressions(
-                new_exprs,
-            )
-        })
-        .collect::<Option<Vec<_>>>()
-    {
-        new_window
-    } else {
-        return Ok(None);
-    };
+    let new_window =
+        if let Some(new_window) = update_window_exprs(&bw_agg.window_expr(), mapping) {
+            new_window
+        } else {
+            return Ok(None);
+        };
     let new_partition_keys = update_exprs(&bw_agg.partition_keys, mapping);
     BoundedWindowAggExec::try_new(
         new_window,
