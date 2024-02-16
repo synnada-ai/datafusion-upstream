@@ -3532,52 +3532,15 @@ fn rewrite_hash_join(
         .on()
         .into_iter()
         .map(|(left, right)| {
-            let mut left_state = RewriteState::Unchanged;
-            let mut right_state = RewriteState::Unchanged;
             (
-                left.clone()
-                    .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
-                        if left_state == RewriteState::RewrittenInvalid {
-                            return Ok(Transformed::No(expr));
-                        }
-                        let Some(column) = expr.as_any().downcast_ref::<Column>() else {
-                            return Ok(Transformed::No(expr));
-                        };
-                        left_state = RewriteState::RewrittenValid;
-                        Ok(Transformed::Yes(Arc::new(
-                            update_column_index(
-                                &(Arc::new(column.clone()) as _),
-                                &mapping,
-                            )
-                            .as_any()
-                            .downcast_ref::<Column>()
-                            .unwrap()
-                            .clone(),
-                        )))
-                    })
-                    .unwrap(),
-                right
-                    .clone()
-                    .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
-                        if right_state == RewriteState::RewrittenInvalid {
-                            return Ok(Transformed::No(expr));
-                        }
-                        let Some(column) = expr.as_any().downcast_ref::<Column>() else {
-                            return Ok(Transformed::No(expr));
-                        };
-                        right_state = RewriteState::RewrittenValid;
-                        Ok(Transformed::Yes(Arc::new(
-                            update_column_index(
-                                &(Arc::new(column.clone()) as _),
-                                &mapping,
-                            )
-                            .as_any()
-                            .downcast_ref::<Column>()
-                            .unwrap()
-                            .clone(),
-                        )))
-                    })
-                    .unwrap(),
+                update_column_index(
+                    &left,
+                    &mapping,
+                ),
+                update_column_index(
+                    &right,
+                    &mapping,
+                ),
             )
         })
         .collect();
@@ -3684,52 +3647,15 @@ fn rewrite_sort_merge_join(
         .on()
         .into_iter()
         .map(|(left, right)| {
-            let mut left_state = RewriteState::Unchanged;
-            let mut right_state = RewriteState::Unchanged;
             (
-                left.clone()
-                    .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
-                        if left_state == RewriteState::RewrittenInvalid {
-                            return Ok(Transformed::No(expr));
-                        }
-                        let Some(column) = expr.as_any().downcast_ref::<Column>() else {
-                            return Ok(Transformed::No(expr));
-                        };
-                        left_state = RewriteState::RewrittenValid;
-                        Ok(Transformed::Yes(Arc::new(
-                            update_column_index(
-                                &(Arc::new(column.clone()) as _),
-                                &mapping,
-                            )
-                            .as_any()
-                            .downcast_ref::<Column>()
-                            .unwrap()
-                            .clone(),
-                        )))
-                    })
-                    .unwrap(),
-                right
-                    .clone()
-                    .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
-                        if right_state == RewriteState::RewrittenInvalid {
-                            return Ok(Transformed::No(expr));
-                        }
-                        let Some(column) = expr.as_any().downcast_ref::<Column>() else {
-                            return Ok(Transformed::No(expr));
-                        };
-                        right_state = RewriteState::RewrittenValid;
-                        Ok(Transformed::Yes(Arc::new(
-                            update_column_index(
-                                &(Arc::new(column.clone()) as _),
-                                &mapping,
-                            )
-                            .as_any()
-                            .downcast_ref::<Column>()
-                            .unwrap()
-                            .clone(),
-                        )))
-                    })
-                    .unwrap(),
+                update_column_index(
+                    &left,
+                    &mapping,
+                ),
+                update_column_index(
+                    &right,
+                    &mapping,
+                ),
             )
         })
         .collect();
@@ -3788,46 +3714,15 @@ fn rewrite_symmetric_hash_join(
         .on()
         .into_iter()
         .map(|(left, right)| {
-            let mut left_state = RewriteState::Unchanged;
-            let mut right_state = RewriteState::Unchanged;
             (
-                left.clone()
-                    .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
-                        if left_state == RewriteState::RewrittenInvalid {
-                            return Ok(Transformed::No(expr));
-                        }
-                        let Some(column) = expr.as_any().downcast_ref::<Column>() else {
-                            return Ok(Transformed::No(expr));
-                        };
-                        left_state = RewriteState::RewrittenValid;
-                        Ok(Transformed::Yes(Arc::new(
-                            update_column_index(&(left.clone()), &mapping)
-                                .as_any()
-                                .downcast_ref::<Column>()
-                                .unwrap()
-                                .clone(),
-                        )))
-                    })
-                    .unwrap(),
-                right
-                    .clone()
-                    .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
-                        if right_state == RewriteState::RewrittenInvalid {
-                            return Ok(Transformed::No(expr));
-                        }
-                        let Some(column) = expr.as_any().downcast_ref::<Column>() else {
-                            return Ok(Transformed::No(expr));
-                        };
-                        right_state = RewriteState::RewrittenValid;
-                        Ok(Transformed::Yes(Arc::new(
-                            update_column_index(&(right.clone()), &mapping)
-                                .as_any()
-                                .downcast_ref::<Column>()
-                                .unwrap()
-                                .clone(),
-                        )))
-                    })
-                    .unwrap(),
+                update_column_index(
+                    &left,
+                    &mapping,
+                ),
+                update_column_index(
+                    &right,
+                    &mapping,
+                ),
             )
         })
         .collect();
@@ -3943,12 +3838,9 @@ fn rewrite_window_aggregate(
         .window_expr()
         .iter()
         .map(|window_expr| {
+            let new_exprs = update_exprs(&window_expr.expressions(), mapping);
             window_expr.clone().with_new_expressions(
-                window_expr
-                    .expressions()
-                    .iter()
-                    .map(|expr| update_column_index(expr, mapping))
-                    .collect(),
+                new_exprs,
             )
         })
         .collect::<Option<Vec<_>>>()
@@ -3957,11 +3849,7 @@ fn rewrite_window_aggregate(
     } else {
         return Ok(None);
     };
-    let new_partition_keys = w_agg
-        .partition_keys
-        .iter()
-        .map(|expr| update_column_index(expr, mapping))
-        .collect();
+    let new_partition_keys = update_exprs(&w_agg.partition_keys, mapping);
     WindowAggExec::try_new(new_window, input_plan, new_partition_keys)
         .map(|plan| Some(Arc::new(plan) as _))
 }
@@ -3975,12 +3863,9 @@ fn rewrite_bounded_window_aggregate(
         .window_expr()
         .iter()
         .map(|window_expr| {
+            let new_exprs = update_exprs(&window_expr.expressions(), mapping);
             window_expr.clone().with_new_expressions(
-                window_expr
-                    .expressions()
-                    .iter()
-                    .map(|expr| update_column_index(expr, mapping))
-                    .collect(),
+                new_exprs,
             )
         })
         .collect::<Option<Vec<_>>>()
@@ -3989,11 +3874,7 @@ fn rewrite_bounded_window_aggregate(
     } else {
         return Ok(None);
     };
-    let new_partition_keys = bw_agg
-        .partition_keys
-        .iter()
-        .map(|expr| update_column_index(expr, mapping))
-        .collect();
+    let new_partition_keys = update_exprs(&bw_agg.partition_keys, mapping);
     BoundedWindowAggExec::try_new(
         new_window,
         input_plan,
