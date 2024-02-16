@@ -2284,21 +2284,7 @@ impl ProjectionOptimizer {
             self.plan.children()[0].clone(),
         )?) as _;
 
-        let mut new_mapping = HashMap::new();
-        for col in self.required_columns.iter() {
-            let mut skipped_columns = 0;
-            for unused_col in unused_columns.iter() {
-                if unused_col.index() < col.index() {
-                    skipped_columns += 1;
-                }
-            }
-            if skipped_columns > 0 {
-                new_mapping.insert(
-                    col.clone(),
-                    Column::new(col.name(), col.index() - skipped_columns),
-                );
-            }
-        }
+        let new_mapping = calculate_column_mapping(&self.required_columns, &unused_columns);
 
         let new_requirements = collect_columns_in_plan_schema(&inserted_projection);
         let inserted_projection = ProjectionOptimizer {
@@ -2346,21 +2332,7 @@ impl ProjectionOptimizer {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let mut new_mapping = HashMap::new();
-        for col in self.required_columns.iter() {
-            let mut skipped_columns = 0;
-            for unused_col in unused_columns.iter() {
-                if unused_col.index() < col.index() {
-                    skipped_columns += 1;
-                }
-            }
-            if skipped_columns > 0 {
-                new_mapping.insert(
-                    col.clone(),
-                    Column::new(col.name(), col.index() - skipped_columns),
-                );
-            }
-        }
+        let new_mapping = calculate_column_mapping(&self.required_columns, &unused_columns);
 
         let new_requirements = inserted_projections
             .iter()
@@ -2413,24 +2385,10 @@ impl ProjectionOptimizer {
 
         let required_columns = projected_exprs
             .iter()
-            .map(|(expr, _alias)| expr.as_any().downcast_ref::<Column>().unwrap())
-            .collect::<Vec<_>>();
+            .map(|(expr, _alias)| expr.as_any().downcast_ref::<Column>().unwrap().clone())
+            .collect::<HashSet<_>>();
 
-        let mut new_mapping = HashMap::new();
-        for col in required_columns.into_iter() {
-            let mut skipped_columns = 0;
-            for unused_col in unused_columns.iter() {
-                if unused_col.index() < col.index() {
-                    skipped_columns += 1;
-                }
-            }
-            if skipped_columns > 0 {
-                new_mapping.insert(
-                    col.clone(),
-                    Column::new(col.name(), col.index() - skipped_columns),
-                );
-            }
-        }
+        let new_mapping = calculate_column_mapping(&required_columns, &unused_columns);
 
         let required_columns = collect_columns_in_plan_schema(&inserted_projection);
         let inserted_projection = ProjectionOptimizer {
@@ -2504,20 +2462,9 @@ impl ProjectionOptimizer {
         let (base, window): (ColumnRequirements, ColumnRequirements) = requirement_map
             .into_iter()
             .partition(|(column, _used)| column.index() < original_schema_len);
-        let mut unused_columns = HashSet::new();
+        let (used_columns, mut unused_columns) = split_column_reqs(&base);
+        let projected_exprs = convert_projection_exprs(used_columns);
 
-        let projected_exprs = base
-            .into_iter()
-            .filter_map(|(col, used)| {
-                if used {
-                    let col_name = col.name().to_string();
-                    Some((Arc::new(col) as Arc<dyn PhysicalExpr>, col_name))
-                } else {
-                    unused_columns.insert(col);
-                    None
-                }
-            })
-            .collect();
         window.iter().for_each(|(col, used)| {
             if !used {
                 unused_columns.insert(col.clone());
@@ -2528,21 +2475,7 @@ impl ProjectionOptimizer {
             self.plan.children()[0].clone(),
         )?) as _;
 
-        let mut new_mapping = HashMap::new();
-        for col in self.required_columns.iter() {
-            let mut skipped_columns = 0;
-            for unused_col in unused_columns.iter().chain(unused_columns.iter()) {
-                if unused_col.index() < col.index() {
-                    skipped_columns += 1;
-                }
-            }
-            if skipped_columns > 0 {
-                new_mapping.insert(
-                    col.clone(),
-                    Column::new(col.name(), col.index() - skipped_columns),
-                );
-            }
-        }
+        let new_mapping = calculate_column_mapping(&self.required_columns, &unused_columns);
 
         let new_requirements = collect_columns_in_plan_schema(&inserted_projection);
         let inserted_projection = ProjectionOptimizer {
@@ -2565,20 +2498,9 @@ impl ProjectionOptimizer {
         let (base, window): (ColumnRequirements, ColumnRequirements) = requirement_map
             .into_iter()
             .partition(|(column, _used)| column.index() < original_schema_len);
-        let mut unused_columns = HashSet::new();
-
-        let projected_exprs = base
-            .into_iter()
-            .filter_map(|(col, used)| {
-                if used {
-                    let col_name = col.name().to_string();
-                    Some((Arc::new(col) as Arc<dyn PhysicalExpr>, col_name))
-                } else {
-                    unused_columns.insert(col);
-                    None
-                }
-            })
-            .collect();
+        // let mut unused_columns = HashSet::new();
+        let (required_cols, mut unused_columns) = split_column_reqs(&base);
+        let projected_exprs = convert_projection_exprs(required_cols);
         window.iter().for_each(|(col, used)| {
             if !used {
                 unused_columns.insert(col.clone());
@@ -2589,21 +2511,7 @@ impl ProjectionOptimizer {
             self.plan.children()[0].clone(),
         )?) as _;
 
-        let mut new_mapping = HashMap::new();
-        for col in self.required_columns.iter() {
-            let mut skipped_columns = 0;
-            for unused_col in unused_columns.iter().chain(unused_columns.iter()) {
-                if unused_col.index() < col.index() {
-                    skipped_columns += 1;
-                }
-            }
-            if skipped_columns > 0 {
-                new_mapping.insert(
-                    col.clone(),
-                    Column::new(col.name(), col.index() - skipped_columns),
-                );
-            }
-        }
+        let new_mapping = calculate_column_mapping(&self.required_columns, &unused_columns);
 
         let new_requirements = collect_columns_in_plan_schema(&inserted_projection);
         let inserted_projection = ProjectionOptimizer {
@@ -3093,6 +3001,46 @@ impl TreeNode for ProjectionOptimizer {
             Ok(self)
         }
     }
+}
+
+fn calculate_column_mapping(required_columns: &HashSet<Column>, unused_columns: &HashSet<Column>) -> HashMap<Column, Column>{
+    let mut new_mapping = HashMap::new();
+    for col in required_columns.iter() {
+        let mut skipped_columns = 0;
+        for unused_col in unused_columns.iter() {
+            if unused_col.index() < col.index() {
+                skipped_columns += 1;
+            }
+        }
+        if skipped_columns > 0 {
+            new_mapping.insert(
+                col.clone(),
+                Column::new(col.name(), col.index() - skipped_columns),
+            );
+        }
+    }
+    new_mapping
+}
+
+fn split_column_reqs(reqs: &ColumnRequirements) -> (HashSet<Column>, HashSet<Column>) {
+    let mut required = HashSet::new();
+    let mut unused = HashSet::new();
+    for (col, is_req) in reqs {
+        if *is_req {
+            required.insert(col.clone());
+        } else {
+            unused.insert(col.clone());
+        }
+    }
+    (required, unused)
+}
+
+fn convert_projection_exprs(cols: HashSet<Column>) -> Vec<(Arc<dyn PhysicalExpr>, String)> {
+    let mut result = cols.into_iter().map(|col| {
+        let name = col.name().to_string();
+        (Arc::new(col) as Arc<dyn PhysicalExpr>, name)
+    }).collect::<Vec<_>>();
+    result
 }
 
 #[derive(Default)]
