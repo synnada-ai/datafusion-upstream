@@ -674,13 +674,7 @@ impl ProjectionOptimizer {
         } else {
             let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
             // Rewrite the hashed expressions if there is any with possibly updated column indices.
-            let new_partitioning =
-                if let Partitioning::Hash(exprs, size) = repartition.partitioning() {
-                    let updated_exprs = update_exprs(exprs, &schema_mapping);
-                    Partitioning::Hash(updated_exprs, *size)
-                } else {
-                    repartition.partitioning().clone()
-                };
+            let new_partitioning = update_partitioning(repartition.partitioning(), &schema_mapping);
             let plan = Arc::new(RepartitionExec::try_new(
                 new_child.plan.clone(),
                 new_partitioning,
@@ -3270,6 +3264,15 @@ fn update_exprs(
         .iter()
         .map(|expr| update_column_index(expr, mapping))
         .collect::<Vec<_>>()
+}
+
+fn update_partitioning(partitioning: &Partitioning, mapping: &HashMap<Column, Column>,) -> Partitioning{
+    if let Partitioning::Hash(exprs, size) = partitioning {
+        let updated_exprs = update_exprs(exprs, mapping);
+        Partitioning::Hash(updated_exprs, *size)
+    } else {
+        partitioning.clone()
+    }
 }
 
 fn update_window_exprs(
