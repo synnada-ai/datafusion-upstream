@@ -2121,12 +2121,9 @@ impl ProjectionOptimizer {
                     .zip(window_usage.clone())
                     .filter(|(_window_expr, (_window_col, usage))| *usage)
                     .map(|(window_expr, (_window_col, _usage))| {
+                        let new_exprs = update_exprs(&window_expr.expressions(), &schema_mapping);
                         window_expr.clone().with_new_expressions(
-                            window_expr
-                                .expressions()
-                                .iter()
-                                .map(|expr| update_column_index(expr, &schema_mapping))
-                                .collect(),
+                            new_exprs,
                         )
                     })
                     .collect::<Option<Vec<_>>>()
@@ -3492,10 +3489,7 @@ fn rewrite_repartition(
     mapping: &HashMap<Column, Column>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let new_partitioning = if let Partitioning::Hash(exprs, size) = partitioning {
-        let new_exprs = exprs
-            .iter()
-            .map(|expr| update_column_index(expr, &mapping))
-            .collect::<Vec<_>>();
+        let new_exprs = update_exprs(exprs, &mapping);
         Partitioning::Hash(new_exprs, *size)
     } else {
         partitioning.clone()
@@ -3508,14 +3502,7 @@ fn rewrite_sort(
     input_plan: Arc<dyn ExecutionPlan>,
     mapping: &HashMap<Column, Column>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    let new_sort_exprs = sort
-        .expr()
-        .iter()
-        .map(|sort_expr| PhysicalSortExpr {
-            expr: update_column_index(&sort_expr.expr, &mapping),
-            options: sort_expr.options,
-        })
-        .collect::<Vec<_>>();
+    let new_sort_exprs = update_sort_exprs(sort.expr(), &mapping);
     Ok(Arc::new(
         SortExec::new(new_sort_exprs, input_plan)
             .with_fetch(sort.fetch())
@@ -3528,14 +3515,7 @@ fn rewrite_sort_preserving_merge(
     input_plan: Arc<dyn ExecutionPlan>,
     mapping: &HashMap<Column, Column>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    let new_sort_exprs = sort
-        .expr()
-        .iter()
-        .map(|sort_expr| PhysicalSortExpr {
-            expr: update_column_index(&sort_expr.expr, &mapping),
-            options: sort_expr.options,
-        })
-        .collect::<Vec<_>>();
+    let new_sort_exprs = update_sort_exprs(sort.expr(), &mapping);
     Ok(Arc::new(
         SortPreservingMergeExec::new(new_sort_exprs, input_plan).with_fetch(sort.fetch()),
     ) as _)
