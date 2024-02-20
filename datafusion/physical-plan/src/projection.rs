@@ -74,7 +74,7 @@ impl ProjectionExec {
         expr = expr
             .iter()
             .enumerate()
-            .map(|(expr_idx, (expression, name))| {
+            .map(|(_expr_idx, (expression, name))| {
                 expression
                     .clone()
                     .transform_down(&|e| match e.as_any().downcast_ref::<Column>() {

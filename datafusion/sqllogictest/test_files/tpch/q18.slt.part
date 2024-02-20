@@ -75,13 +75,13 @@ SortPreservingMergeExec: [o_totalprice@4 DESC,o_orderdate@3 ASC NULLS LAST]
 ----------AggregateExec: mode=Partial, gby=[c_name@1 as c_name, c_custkey@0 as c_custkey, o_orderkey@2 as o_orderkey, o_orderdate@4 as o_orderdate, o_totalprice@3 as o_totalprice], aggr=[SUM(lineitem.l_quantity)]
 ------------CoalesceBatchesExec: target_batch_size=8192
 --------------HashJoinExec: mode=Partitioned, join_type=LeftSemi, on=[(o_orderkey@2, l_orderkey@0)]
-----------------ProjectionExec: expr=[c_custkey@0 as c_custkey, c_name@1 as c_name, o_orderkey@2 as o_orderkey, o_totalprice@3 as o_totalprice, o_orderdate@4 as o_orderdate, l_quantity@6 as l_quantity]
-------------------CoalesceBatchesExec: target_batch_size=8192
+----------------CoalesceBatchesExec: target_batch_size=8192
+------------------ProjectionExec: expr=[c_custkey@0 as c_custkey, c_name@1 as c_name, o_orderkey@2 as o_orderkey, o_totalprice@3 as o_totalprice, o_orderdate@4 as o_orderdate, l_quantity@6 as l_quantity]
 --------------------HashJoinExec: mode=Partitioned, join_type=Inner, on=[(o_orderkey@2, l_orderkey@0)]
 ----------------------CoalesceBatchesExec: target_batch_size=8192
 ------------------------RepartitionExec: partitioning=Hash([o_orderkey@2], 4), input_partitions=4
---------------------------ProjectionExec: expr=[c_custkey@0 as c_custkey, c_name@1 as c_name, o_orderkey@2 as o_orderkey, o_totalprice@4 as o_totalprice, o_orderdate@5 as o_orderdate]
-----------------------------CoalesceBatchesExec: target_batch_size=8192
+--------------------------CoalesceBatchesExec: target_batch_size=8192
+----------------------------ProjectionExec: expr=[c_custkey@0 as c_custkey, c_name@1 as c_name, o_orderkey@2 as o_orderkey, o_totalprice@4 as o_totalprice, o_orderdate@5 as o_orderdate]
 ------------------------------HashJoinExec: mode=Partitioned, join_type=Inner, on=[(c_custkey@0, o_custkey@1)]
 --------------------------------CoalesceBatchesExec: target_batch_size=8192
 ----------------------------------RepartitionExec: partitioning=Hash([c_custkey@0], 4), input_partitions=4
@@ -93,8 +93,8 @@ SortPreservingMergeExec: [o_totalprice@4 DESC,o_orderdate@3 ASC NULLS LAST]
 ----------------------CoalesceBatchesExec: target_batch_size=8192
 ------------------------RepartitionExec: partitioning=Hash([l_orderkey@0], 4), input_partitions=4
 --------------------------CsvExec: file_groups={4 groups: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/tpch/data/lineitem.tbl:0..18561749], [WORKSPACE_ROOT/datafusion/sqllogictest/test_files/tpch/data/lineitem.tbl:18561749..37123498], [WORKSPACE_ROOT/datafusion/sqllogictest/test_files/tpch/data/lineitem.tbl:37123498..55685247], [WORKSPACE_ROOT/datafusion/sqllogictest/test_files/tpch/data/lineitem.tbl:55685247..74246996]]}, projection=[l_orderkey, l_quantity], has_header=false
-----------------ProjectionExec: expr=[l_orderkey@0 as l_orderkey]
-------------------CoalesceBatchesExec: target_batch_size=8192
+----------------CoalesceBatchesExec: target_batch_size=8192
+------------------ProjectionExec: expr=[l_orderkey@0 as l_orderkey]
 --------------------FilterExec: SUM(lineitem.l_quantity)@1 > Some(30000),25,2
 ----------------------AggregateExec: mode=FinalPartitioned, gby=[l_orderkey@0 as l_orderkey], aggr=[SUM(lineitem.l_quantity)]
 ------------------------CoalesceBatchesExec: target_batch_size=8192

@@ -138,7 +138,7 @@ pub trait AggregateExpr: Send + Sync + Debug + PartialEq<dyn Any> {
     /// The order of the given expressions is taken into account while replacing.
     fn with_new_expressions(
         self: Arc<Self>,
-        expressions: Vec<Arc<dyn PhysicalExpr>>,
+        _expressions: Vec<Arc<dyn PhysicalExpr>>,
     ) -> Option<Arc<dyn AggregateExpr>> {
         None
     }

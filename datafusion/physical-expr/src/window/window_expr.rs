@@ -27,9 +27,7 @@ use arrow::compute::kernels::sort::SortColumn;
 use arrow::compute::SortOptions;
 use arrow::datatypes::Field;
 use arrow::record_batch::RecordBatch;
-use datafusion_common::{
-    internal_err, not_impl_err, DataFusionError, Result, ScalarValue,
-};
+use datafusion_common::{internal_err, DataFusionError, Result, ScalarValue};
 use datafusion_expr::window_state::{
     PartitionBatchState, WindowAggState, WindowFrameContext,
 };
@@ -134,7 +132,7 @@ pub trait WindowExpr: Send + Sync + Debug {
     /// The order of the given expressions is taken into account while replacing.
     fn with_new_expressions(
         self: Arc<Self>,
-        expressions: Vec<Arc<dyn PhysicalExpr>>,
+        _expressions: Vec<Arc<dyn PhysicalExpr>>,
     ) -> Option<Arc<dyn WindowExpr>> {
         None
     }

@@ -62,7 +62,6 @@ use crate::physical_plan::projection::ProjectionExec;
 use crate::physical_plan::ExecutionPlan;
 
 use arrow_schema::SchemaRef;
-use chrono::naive;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, VisitRecursion};
 use datafusion_common::DataFusionError;
@@ -91,7 +90,7 @@ use datafusion_physical_plan::sorts::sort_preserving_merge::SortPreservingMergeE
 use datafusion_physical_plan::union::{InterleaveExec, UnionExec};
 use datafusion_physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
 use datafusion_physical_plan::{displayable, get_plan_string};
-use itertools::{Interleave, Itertools};
+use itertools::Itertools;
 
 /// The tree node for the rule of [`OptimizeProjections`]. It stores the necessary
 /// fields for column requirements and changed indices of columns.
@@ -145,14 +144,29 @@ impl ProjectionOptimizer {
             return Ok(self);
         }
 
-        if self.plan.as_any().is::<ProjectionExec>() {
+        let x = if self.plan.as_any().is::<ProjectionExec>() {
             // If the node is a projection, it is analyzed and may be rewritten
             // in a most effective way, or even removed.
             self.optimize_projections()
         } else {
             // If the node corresponds to any other plan, a projection may be inserted to its input.
             self.try_projection_insertion()
-        }
+        }?;
+
+        // print_plan(&x.plan);
+        // println!("self reqs: {:?}", x.required_columns);
+        // println!("self map: {:?}", x.schema_mapping);
+        // x.children_nodes.iter().for_each(|c| {
+        //     print_plan(&c.plan);
+        // });
+        // x.children_nodes
+        //     .iter()
+        //     .for_each(|c| println!("child reqs: {:?}", c.required_columns));
+        // x.children_nodes
+        //     .iter()
+        //     .for_each(|c| println!("child map: {:?}", c.schema_mapping));
+
+        Ok(x)
     }
 
     /// The function tries 4 cases:
@@ -237,7 +251,9 @@ impl ProjectionOptimizer {
 
         let mut projected_exprs = vec![];
         for (expr, alias) in projection.expr() {
-            let Some(expr) = update_expr(expr, child_projection.expr(), true)? else {
+            let Some(expr) =
+                update_expr_with_projection(expr, child_projection.expr(), true)?
+            else {
                 return Ok(Transformed::No(self));
             };
             projected_exprs.push((expr, alias.clone()));
@@ -520,8 +536,9 @@ impl ProjectionOptimizer {
             self.children_nodes[0].required_columns =
                 collect_columns_in_plan_schema(&self.children_nodes[0].plan)
         } else {
-            self.children_nodes[0].required_columns =
-                collect_columns_in_plan_schema(&self.children_nodes[0].plan);
+            self.children_nodes.iter_mut().for_each(|c| {
+                c.required_columns = collect_columns_in_plan_schema(&c.plan)
+            });
             return Ok(self);
         }
         Ok(self)
@@ -674,7 +691,10 @@ impl ProjectionOptimizer {
         } else {
             let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
             // Rewrite the hashed expressions if there is any with possibly updated column indices.
-            let new_partitioning = update_partitioning(repartition.partitioning(), &schema_mapping);
+            let new_partitioning = update_partitioning_expressions(
+                repartition.partitioning(),
+                &schema_mapping,
+            );
             let plan = Arc::new(RepartitionExec::try_new(
                 new_child.plan.clone(),
                 new_partitioning,
@@ -705,7 +725,7 @@ impl ProjectionOptimizer {
         } else {
             let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
             // Rewrite the sort expressions with possibly updated column indices.
-            let new_sort_exprs = update_sort_exprs(sort.expr(), &schema_mapping);
+            let new_sort_exprs = update_sort_expressions(sort.expr(), &schema_mapping);
             let plan = Arc::new(
                 SortExec::new(new_sort_exprs, new_child.plan.clone())
                     .with_preserve_partitioning(sort.preserve_partitioning())
@@ -741,7 +761,8 @@ impl ProjectionOptimizer {
         } else {
             let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
             // Rewrite the sort expressions with possibly updated column indices.
-            let new_sort_exprs = update_sort_exprs(sortp_merge.expr(), &schema_mapping);
+            let new_sort_exprs =
+                update_sort_expressions(sortp_merge.expr(), &schema_mapping);
             let plan = Arc::new(
                 SortPreservingMergeExec::new(new_sort_exprs, new_child.plan.clone())
                     .with_fetch(sortp_merge.fetch()),
@@ -819,7 +840,7 @@ impl ProjectionOptimizer {
             all_columns_required(&analyzed_join_right),
         ) {
             // We need two projections on top of both children.
-            (true, true) => {
+            (false, false) => {
                 let (new_left_child, new_right_child, schema_mapping) = self
                     .insert_multi_projections_below_join(
                         left_size,
@@ -839,7 +860,7 @@ impl ProjectionOptimizer {
                 }
             }
             // Left child needs a projection.
-            (true, false) => {
+            (false, true) => {
                 let right_child = self.children_nodes.swap_remove(1);
                 let (new_left_child, left_schema_mapping) =
                     self.insert_projection_below_single_child(analyzed_join_left, 0)?;
@@ -856,7 +877,7 @@ impl ProjectionOptimizer {
                 }
             }
             // Right child needs a projection.
-            (false, true) => {
+            (true, false) => {
                 let left_child = self.children_nodes[0].clone();
                 let (new_right_child, mut right_schema_mapping) =
                     self.insert_projection_below_single_child(analyzed_join_right, 1)?;
@@ -882,7 +903,7 @@ impl ProjectionOptimizer {
                 }
             }
             // All columns are required.
-            (false, false) => {
+            (true, true) => {
                 self.required_columns = HashSet::new();
                 self.children_nodes.iter_mut().for_each(|c| {
                     c.required_columns = collect_columns_in_plan_schema(&c.plan);
@@ -2030,8 +2051,10 @@ impl ProjectionOptimizer {
                     .zip(window_usage.clone())
                     .filter(|(_window_expr, (_window_col, usage))| *usage)
                     .map(|(window_expr, (_window_col, _usage))| {
-                        let new_exprs =
-                            update_exprs(&window_expr.expressions(), &schema_mapping);
+                        let new_exprs = update_expressions(
+                            &window_expr.expressions(),
+                            &schema_mapping,
+                        );
                         window_expr.clone().with_new_expressions(new_exprs)
                     })
                     .collect::<Option<Vec<_>>>()
@@ -2119,8 +2142,10 @@ impl ProjectionOptimizer {
                     .zip(window_usage.clone())
                     .filter(|(_window_expr, (_window_col, usage))| *usage)
                     .map(|(window_expr, (_window_col, _usage))| {
-                        let new_exprs =
-                            update_exprs(&window_expr.expressions(), &schema_mapping);
+                        let new_exprs = update_expressions(
+                            &window_expr.expressions(),
+                            &schema_mapping,
+                        );
                         window_expr.clone().with_new_expressions(new_exprs)
                     })
                     .collect::<Option<Vec<_>>>()
@@ -2598,7 +2623,8 @@ impl ProjectionOptimizer {
                     hj,
                     self.children_nodes[0].plan.clone(),
                     self.children_nodes[1].plan.clone(),
-                    &new_mapping,
+                    &left_mapping,
+                    &right_mapping,
                     left_size,
                 )?;
                 match hj.join_type() {
@@ -2669,7 +2695,8 @@ impl ProjectionOptimizer {
                     smj,
                     self.children_nodes[0].plan.clone(),
                     self.children_nodes[1].plan.clone(),
-                    &new_mapping,
+                    &left_mapping,
+                    &right_mapping,
                     left_size,
                 )?;
                 all_mappings[0] = match smj.join_type() {
@@ -2699,7 +2726,8 @@ impl ProjectionOptimizer {
                     shj,
                     self.children_nodes[0].plan.clone(),
                     self.children_nodes[1].plan.clone(),
-                    &new_mapping,
+                    &left_mapping,
+                    &right_mapping,
                     left_size,
                 )?;
                 all_mappings[0] = match shj.join_type() {
@@ -2712,6 +2740,15 @@ impl ProjectionOptimizer {
                 };
                 self.update_mapping(all_mappings)
             } else if let Some(agg) = plan_any.downcast_ref::<AggregateExec>() {
+                if agg.aggr_expr().iter().any(|expr| {
+                    expr.clone()
+                        .with_new_expressions(expr.expressions())
+                        .is_none()
+                        && !self.children_nodes[0].schema_mapping.is_empty()
+                }) {
+                    self = preserve_requirements(self)?;
+                    return Ok(Transformed::No(self));
+                }
                 self.plan = if let Some(updated) = rewrite_aggregate(
                     agg,
                     self.children_nodes[0].plan.clone(),
@@ -2721,7 +2758,6 @@ impl ProjectionOptimizer {
                 } else {
                     return Ok(Transformed::No(self));
                 };
-                self.update_mapping(all_mappings)
             } else if let Some(w_agg) = plan_any.downcast_ref::<WindowAggExec>() {
                 self.plan = if let Some(updated) = rewrite_window_aggregate(
                     w_agg,
@@ -2929,69 +2965,62 @@ impl TreeNode for ProjectionOptimizer {
                 .map(transform)
                 .collect::<Result<Vec<_>>>()?;
 
+            // print_plan(&self.plan);
+            // println!("self reqs: {:?}", self.required_columns);
+            // println!("self map: {:?}", self.schema_mapping);
+            // self.children_nodes.iter().for_each(|c| {
+            //     print_plan(&c.plan);
+            // });
+            // self.children_nodes
+            //     .iter()
+            //     .for_each(|c| println!("child reqs: {:?}", c.required_columns));
+            // self.children_nodes
+            //     .iter()
+            //     .for_each(|c| println!("child map: {:?}", c.schema_mapping));
+
             self = match self.index_updater()? {
                 Transformed::Yes(updated) => updated,
                 Transformed::No(not_rewritable) => {
                     ProjectionOptimizer::new_default(not_rewritable.plan)
                 }
             };
+
+            // print_plan(&self.plan);
+            // println!("self reqs: {:?}", self.required_columns);
+            // println!("self map: {:?}", self.schema_mapping);
+            // self.children_nodes.iter().for_each(|c| {
+            //     print_plan(&c.plan);
+            // });
+            // self.children_nodes
+            //     .iter()
+            //     .for_each(|c| println!("child reqs: {:?}", c.required_columns));
+            // self.children_nodes
+            //     .iter()
+            //     .for_each(|c| println!("child map: {:?}", c.schema_mapping));
+
             // After the top-down pass, there may be some unnecessary projections surviving
             // since they assumes themselves as necessary when they are analyzed, but after
             // some optimizations below, they may become unnecessary. This check is done
             // here, and if the projection is regarded as unnecessary, the removal would
             // set a new the mapping on the new node, which is the child of the projection.
             self = self.try_remove_projection_bottom_up()?;
+
+            // print_plan(&self.plan);
+            // println!("self reqs: {:?}", self.required_columns);
+            // println!("self map: {:?}", self.schema_mapping);
+            // self.children_nodes.iter().for_each(|c| {
+            //     print_plan(&c.plan);
+            // });
+            // self.children_nodes
+            //     .iter()
+            //     .for_each(|c| println!("child reqs: {:?}", c.required_columns));
+            // self.children_nodes
+            //     .iter()
+            //     .for_each(|c| println!("child map: {:?}", c.schema_mapping));
+
             Ok(self)
         }
     }
-}
-
-fn calculate_column_mapping(
-    required_columns: &HashSet<Column>,
-    unused_columns: &HashSet<Column>,
-) -> HashMap<Column, Column> {
-    let mut new_mapping = HashMap::new();
-    for col in required_columns.iter() {
-        let mut skipped_columns = 0;
-        for unused_col in unused_columns.iter() {
-            if unused_col.index() < col.index() {
-                skipped_columns += 1;
-            }
-        }
-        if skipped_columns > 0 {
-            new_mapping.insert(
-                col.clone(),
-                Column::new(col.name(), col.index() - skipped_columns),
-            );
-        }
-    }
-    new_mapping
-}
-
-fn split_column_reqs(reqs: &ColumnRequirements) -> (HashSet<Column>, HashSet<Column>) {
-    let mut required = HashSet::new();
-    let mut unused = HashSet::new();
-    for (col, is_req) in reqs {
-        if *is_req {
-            required.insert(col.clone());
-        } else {
-            unused.insert(col.clone());
-        }
-    }
-    (required, unused)
-}
-
-fn convert_projection_exprs(
-    cols: HashSet<Column>,
-) -> Vec<(Arc<dyn PhysicalExpr>, String)> {
-    let mut result = cols
-        .into_iter()
-        .map(|col| {
-            let name = col.name().to_string();
-            (Arc::new(col) as Arc<dyn PhysicalExpr>, name)
-        })
-        .collect::<Vec<_>>();
-    result
 }
 
 #[derive(Default)]
@@ -3015,6 +3044,7 @@ impl PhysicalOptimizerRule for OptimizeProjections {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        print_plan(&plan);
         // Collect initial columns requirements from the plan's schema.
         let initial_requirements = collect_columns_in_plan_schema(&plan);
         let mut optimizer = ProjectionOptimizer::new_default(plan);
@@ -3023,8 +3053,39 @@ impl PhysicalOptimizerRule for OptimizeProjections {
         let mut optimized = optimizer.transform_down(&|o| {
             o.adjust_node_with_requirements().map(Transformed::Yes)
         })?;
+        // print_plan(&optimized.plan);
+        // println!("self reqs: {:?}", optimized.required_columns);
+        // println!("self map: {:?}", optimized.schema_mapping);
+        // optimized
+        //     .children_nodes
+        //     .iter()
+        //     .for_each(|c: &ProjectionOptimizer| {
+        //         print_plan(&c.plan);
+        //     });
+        // optimized
+        //     .children_nodes
+        //     .iter()
+        //     .for_each(|c| println!("child reqs: {:?}", c.required_columns));
+        // optimized
+        //     .children_nodes
+        //     .iter()
+        //     .for_each(|c| println!("child map: {:?}", c.schema_mapping));
         // Ensure the final optimized plan satisfies the initial schema requirements.
         optimized = satisfy_initial_schema(optimized, initial_requirements)?;
+        // print_plan(&optimized.plan);
+        // println!("self reqs: {:?}", optimized.required_columns);
+        // println!("self map: {:?}", optimized.schema_mapping);
+        // optimized.children_nodes.iter().for_each(|c| {
+        //     print_plan(&c.plan);
+        // });
+        // optimized
+        //     .children_nodes
+        //     .iter()
+        //     .for_each(|c| println!("child reqs: {:?}", c.required_columns));
+        // optimized
+        //     .children_nodes
+        //     .iter()
+        //     .for_each(|c| println!("child map: {:?}", c.schema_mapping));
 
         // TODO: Remove this check to tests
         crosscheck_helper(optimized.clone())?;
@@ -3093,6 +3154,53 @@ fn satisfy_initial_schema(
         Ok(ProjectionOptimizer {
             plan: final_projection,
             required_columns: initial_requirements,
+            schema_mapping: HashMap::new(), // Reset schema mapping as we've now satisfied the initial schema
+            children_nodes: vec![po],       // Keep the original node as the child
+        })
+    }
+}
+
+fn preserve_requirements(po: ProjectionOptimizer) -> Result<ProjectionOptimizer> {
+    if po.schema_mapping.is_empty() {
+        // The initial schema is already satisfied, no further action required.
+        Ok(po)
+    } else {
+        // Collect expressions for the final projection to match the initial requirements.
+        let current_fields = collect_columns_in_plan_schema(&po.children_nodes[0].plan);
+        let sorted_current_fields = current_fields
+            .into_iter()
+            .sorted_by_key(|f| f.index())
+            .collect::<Vec<_>>();
+        let mut projected_exprs = vec![];
+        for (idx, field) in po.children_nodes[0]
+            .plan
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+        {
+            let column = Column::new(field.name(), idx);
+            let target = sorted_current_fields[po
+                .schema_mapping
+                .get(&column)
+                .map(|col| col.index())
+                .unwrap_or(idx)]
+            .clone();
+            projected_exprs.push(target);
+        }
+        let projected_exprs = projected_exprs
+            .into_iter()
+            .map(|expr| (Arc::new(expr.clone()) as _, expr.name().to_string()))
+            .collect::<Vec<_>>();
+
+        // Create the final projection to align with the initial schema.
+        let final_projection =
+            Arc::new(ProjectionExec::try_new(projected_exprs, po.plan.clone())?);
+
+        // Return a new ProjectionOptimizer with the final projection, resetting the schema mapping.
+        Ok(ProjectionOptimizer {
+            plan: final_projection,
+            required_columns: po.required_columns.clone(),
             schema_mapping: HashMap::new(), // Reset schema mapping as we've now satisfied the initial schema
             children_nodes: vec![po],       // Keep the original node as the child
         })
@@ -3171,6 +3279,62 @@ fn new_projections_for_columns(
         .collect()
 }
 
+/// When a field in a schema is decided to be redundant and planned to be dropped
+/// since it is not required from the plans above, some of the other fields will
+/// potentially move to the left side by one. That will change the plans above
+/// referring to that field, and they need to update their expressions. This function
+/// calculates those index changes and records old and new column expressions in a map.
+fn calculate_column_mapping(
+    required_columns: &HashSet<Column>,
+    unused_columns: &HashSet<Column>,
+) -> HashMap<Column, Column> {
+    let mut new_mapping = HashMap::new();
+    for col in required_columns.iter() {
+        let mut skipped_columns = 0;
+        for unused_col in unused_columns.iter() {
+            if unused_col.index() < col.index() {
+                skipped_columns += 1;
+            }
+        }
+        if skipped_columns > 0 {
+            new_mapping.insert(
+                col.clone(),
+                Column::new(col.name(), col.index() - skipped_columns),
+            );
+        }
+    }
+    new_mapping
+}
+
+/// Given a `ColumnRequirements`, it separates the required and redundant columns.
+fn split_column_reqs(reqs: &ColumnRequirements) -> (HashSet<Column>, HashSet<Column>) {
+    let mut required = HashSet::new();
+    let mut unused = HashSet::new();
+    for (col, is_req) in reqs {
+        if *is_req {
+            required.insert(col.clone());
+        } else {
+            unused.insert(col.clone());
+        }
+    }
+    (required, unused)
+}
+
+/// Given a set of column expression, constructs a vector having the tuples of `PhysicalExpr`
+/// and string alias to be used in creation of `ProjectionExec`. Aliases are the name of columns.
+fn convert_projection_exprs(
+    cols: HashSet<Column>,
+) -> Vec<(Arc<dyn PhysicalExpr>, String)> {
+    let result = cols
+        .into_iter()
+        .map(|col| {
+            let name = col.name().to_string();
+            (Arc::new(col) as Arc<dyn PhysicalExpr>, name)
+        })
+        .collect::<Vec<_>>();
+    result
+}
+
 #[derive(Debug, PartialEq)]
 enum RewriteState {
     /// The expression is unchanged.
@@ -3199,7 +3363,7 @@ enum RewriteState {
 ///    given the expressions `c@0`, `a@1` and `b@2`, and the [`ProjectionExec`] with
 ///    an output schema of `a, c_new`, then `c@0` becomes `c_new@1`, `a@1` becomes
 ///    `a@0`, but `b@2` results in `None` since the projection does not include `b`.
-fn update_expr(
+fn update_expr_with_projection(
     expr: &Arc<dyn PhysicalExpr>,
     projected_exprs: &[(Arc<dyn PhysicalExpr>, String)],
     sync_with_child: bool,
@@ -3244,7 +3408,19 @@ fn update_expr(
     new_expr.map(|e| (state == RewriteState::RewrittenValid).then_some(e))
 }
 
-fn update_sort_exprs(
+/// Rewrites the expressions with new index values.
+fn update_expressions(
+    exprs: &[Arc<dyn PhysicalExpr>],
+    mapping: &HashMap<Column, Column>,
+) -> Vec<Arc<dyn PhysicalExpr>> {
+    exprs
+        .iter()
+        .map(|expr| update_column_index(expr, mapping))
+        .collect::<Vec<_>>()
+}
+
+/// Rewrites the sort expressions with new index values.
+fn update_sort_expressions(
     sort_exprs: &[PhysicalSortExpr],
     mapping: &HashMap<Column, Column>,
 ) -> LexOrdering {
@@ -3256,25 +3432,22 @@ fn update_sort_exprs(
         })
         .collect::<Vec<_>>()
 }
-fn update_exprs(
-    exprs: &[Arc<dyn PhysicalExpr>],
-    mapping: &HashMap<Column, Column>,
-) -> Vec<Arc<dyn PhysicalExpr>> {
-    exprs
-        .iter()
-        .map(|expr| update_column_index(expr, mapping))
-        .collect::<Vec<_>>()
-}
 
-fn update_partitioning(partitioning: &Partitioning, mapping: &HashMap<Column, Column>,) -> Partitioning{
+/// Updates the expressions subject to hashing of the `Partitioning` according to
+/// the mapping. If it is not a hash partitioning, they remains as they are.
+fn update_partitioning_expressions(
+    partitioning: &Partitioning,
+    mapping: &HashMap<Column, Column>,
+) -> Partitioning {
     if let Partitioning::Hash(exprs, size) = partitioning {
-        let updated_exprs = update_exprs(exprs, mapping);
+        let updated_exprs = update_expressions(exprs, mapping);
         Partitioning::Hash(updated_exprs, *size)
     } else {
         partitioning.clone()
     }
 }
 
+/// Rewrites the window expressions with new index values.
 fn update_window_exprs(
     window_exprs: &[Arc<dyn WindowExpr>],
     mapping: &HashMap<Column, Column>,
@@ -3282,12 +3455,13 @@ fn update_window_exprs(
     window_exprs
         .iter()
         .map(|window_expr| {
-            let new_exprs = update_exprs(&window_expr.expressions(), mapping);
+            let new_exprs = update_expressions(&window_expr.expressions(), mapping);
             window_expr.clone().with_new_expressions(new_exprs)
         })
         .collect::<Option<Vec<_>>>()
 }
 
+/// Rewrites the aggregate expressions with new index values.
 fn update_aggregate_exprs(
     aggregate_exprs: &[Arc<dyn AggregateExpr>],
     mapping: &HashMap<Column, Column>,
@@ -3306,13 +3480,18 @@ fn update_aggregate_exprs(
         .collect::<Option<Vec<_>>>()
 }
 
-fn update_join_on(join_on: JoinOnRef, mapping: &HashMap<Column, Column>) -> JoinOn {
+/// Rewrites the expressions in equivalence condition of a join with new index values.
+fn update_join_on(
+    join_on: JoinOnRef,
+    left_mapping: &HashMap<Column, Column>,
+    right_mapping: &HashMap<Column, Column>,
+) -> JoinOn {
     join_on
         .into_iter()
         .map(|(left, right)| {
             (
-                update_column_index(&left, mapping),
-                update_column_index(&right, mapping),
+                update_column_index(&left, left_mapping),
+                update_column_index(&right, right_mapping),
             )
         })
         .collect()
@@ -3544,7 +3723,7 @@ fn rewrite_repartition(
     mapping: &HashMap<Column, Column>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let new_partitioning = if let Partitioning::Hash(exprs, size) = partitioning {
-        let new_exprs = update_exprs(exprs, &mapping);
+        let new_exprs = update_expressions(exprs, &mapping);
         Partitioning::Hash(new_exprs, *size)
     } else {
         partitioning.clone()
@@ -3557,7 +3736,7 @@ fn rewrite_sort(
     input_plan: Arc<dyn ExecutionPlan>,
     mapping: &HashMap<Column, Column>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    let new_sort_exprs = update_sort_exprs(sort.expr(), &mapping);
+    let new_sort_exprs = update_sort_expressions(sort.expr(), &mapping);
     Ok(Arc::new(
         SortExec::new(new_sort_exprs, input_plan)
             .with_fetch(sort.fetch())
@@ -3570,7 +3749,7 @@ fn rewrite_sort_preserving_merge(
     input_plan: Arc<dyn ExecutionPlan>,
     mapping: &HashMap<Column, Column>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    let new_sort_exprs = update_sort_exprs(sort.expr(), &mapping);
+    let new_sort_exprs = update_sort_expressions(sort.expr(), &mapping);
     Ok(Arc::new(
         SortPreservingMergeExec::new(new_sort_exprs, input_plan).with_fetch(sort.fetch()),
     ) as _)
@@ -3580,10 +3759,11 @@ fn rewrite_hash_join(
     hj: &HashJoinExec,
     left_input_plan: Arc<dyn ExecutionPlan>,
     right_input_plan: Arc<dyn ExecutionPlan>,
-    mapping: &HashMap<Column, Column>,
+    left_mapping: &HashMap<Column, Column>,
+    right_mapping: &HashMap<Column, Column>,
     left_size: usize,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    let new_on = update_join_on(hj.on(), mapping);
+    let new_on = update_join_on(hj.on(), left_mapping, right_mapping);
     let new_filter = hj.filter().map(|filter| {
         JoinFilter::new(
             filter.expression().clone(),
@@ -3592,7 +3772,7 @@ fn rewrite_hash_join(
                 .iter()
                 .map(|col_idx| match col_idx.side {
                     JoinSide::Left => ColumnIndex {
-                        index: mapping
+                        index: left_mapping
                             .iter()
                             .find(|(old_column, _new_column)| {
                                 old_column.index() == col_idx.index
@@ -3602,7 +3782,7 @@ fn rewrite_hash_join(
                         side: JoinSide::Left,
                     },
                     JoinSide::Right => ColumnIndex {
-                        index: mapping
+                        index: right_mapping
                             .iter()
                             .find(|(old_column, _new_column)| {
                                 old_column.index() == col_idx.index + left_size
@@ -3680,10 +3860,11 @@ fn rewrite_sort_merge_join(
     smj: &SortMergeJoinExec,
     left_input_plan: Arc<dyn ExecutionPlan>,
     right_input_plan: Arc<dyn ExecutionPlan>,
-    mapping: &HashMap<Column, Column>,
+    left_mapping: &HashMap<Column, Column>,
+    right_mapping: &HashMap<Column, Column>,
     left_size: usize,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    let new_on = update_join_on(smj.on(), mapping);
+    let new_on = update_join_on(smj.on(), left_mapping, right_mapping);
     let new_filter = smj.filter.as_ref().map(|filter| {
         JoinFilter::new(
             filter.expression().clone(),
@@ -3692,7 +3873,7 @@ fn rewrite_sort_merge_join(
                 .iter()
                 .map(|col_idx| match col_idx.side {
                     JoinSide::Left => ColumnIndex {
-                        index: mapping
+                        index: left_mapping
                             .iter()
                             .find(|(old_column, _new_column)| {
                                 old_column.index() == col_idx.index
@@ -3702,7 +3883,7 @@ fn rewrite_sort_merge_join(
                         side: JoinSide::Left,
                     },
                     JoinSide::Right => ColumnIndex {
-                        index: mapping
+                        index: right_mapping
                             .iter()
                             .find(|(old_column, _new_column)| {
                                 old_column.index() == col_idx.index + left_size
@@ -3732,10 +3913,11 @@ fn rewrite_symmetric_hash_join(
     shj: &SymmetricHashJoinExec,
     left_input_plan: Arc<dyn ExecutionPlan>,
     right_input_plan: Arc<dyn ExecutionPlan>,
-    mapping: &HashMap<Column, Column>,
+    left_mapping: &HashMap<Column, Column>,
+    right_mapping: &HashMap<Column, Column>,
     left_size: usize,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    let new_on = update_join_on(shj.on(), mapping);
+    let new_on = update_join_on(shj.on(), left_mapping, right_mapping);
     let new_filter = shj.filter().map(|filter| {
         JoinFilter::new(
             filter.expression().clone(),
@@ -3744,7 +3926,7 @@ fn rewrite_symmetric_hash_join(
                 .iter()
                 .map(|col_idx| match col_idx.side {
                     JoinSide::Left => ColumnIndex {
-                        index: mapping
+                        index: left_mapping
                             .iter()
                             .find(|(old_column, _new_column)| {
                                 old_column.index() == col_idx.index
@@ -3754,7 +3936,7 @@ fn rewrite_symmetric_hash_join(
                         side: JoinSide::Left,
                     },
                     JoinSide::Right => ColumnIndex {
-                        index: mapping
+                        index: right_mapping
                             .iter()
                             .find(|(old_column, _new_column)| {
                                 old_column.index() == col_idx.index + left_size
@@ -3838,7 +4020,7 @@ fn rewrite_window_aggregate(
         } else {
             return Ok(None);
         };
-    let new_partition_keys = update_exprs(&w_agg.partition_keys, mapping);
+    let new_partition_keys = update_expressions(&w_agg.partition_keys, mapping);
     WindowAggExec::try_new(new_window, input_plan, new_partition_keys)
         .map(|plan| Some(Arc::new(plan) as _))
 }
@@ -3849,12 +4031,12 @@ fn rewrite_bounded_window_aggregate(
     mapping: &HashMap<Column, Column>,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
     let new_window =
-        if let Some(new_window) = update_window_exprs(&bw_agg.window_expr(), mapping) {
+        if let Some(new_window) = update_window_exprs(bw_agg.window_expr(), mapping) {
             new_window
         } else {
             return Ok(None);
         };
-    let new_partition_keys = update_exprs(&bw_agg.partition_keys, mapping);
+    let new_partition_keys = update_expressions(&bw_agg.partition_keys, mapping);
     BoundedWindowAggExec::try_new(
         new_window,
         input_plan,
@@ -3873,7 +4055,7 @@ mod tests {
     use crate::datasource::physical_plan::{CsvExec, FileScanConfig};
     use crate::execution::context::SessionContext;
     use crate::physical_optimizer::optimize_projections::{
-        update_expr, OptimizeProjections,
+        update_expr_with_projection, OptimizeProjections,
     };
     use crate::physical_optimizer::PhysicalOptimizerRule;
     use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -4086,7 +4268,7 @@ mod tests {
             )?),
         ];
         for (expr, expected_expr) in exprs.into_iter().zip(expected_exprs.into_iter()) {
-            assert!(update_expr(&expr, &child, true)?
+            assert!(update_expr_with_projection(&expr, &child, true)?
                 .unwrap()
                 .eq(&expected_expr));
         }
@@ -4220,7 +4402,7 @@ mod tests {
             )?),
         ];
         for (expr, expected_expr) in exprs.into_iter().zip(expected_exprs.into_iter()) {
-            assert!(update_expr(&expr, &projected_exprs, false)?
+            assert!(update_expr_with_projection(&expr, &projected_exprs, false)?
                 .unwrap()
                 .eq(&expected_expr));
         }
@@ -4746,76 +4928,242 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_trivial() -> Result<()> {
-        let mut config = SessionConfig::new()
-            .with_target_partitions(2)
-            .with_batch_size(4096);
-        let ctx = SessionContext::with_config(config);
-        let _dataframe = ctx
-            .sql(
-                "CREATE EXTERNAL TABLE aggregate_test_100 (
-      c1  VARCHAR NOT NULL,
-      c2  TINYINT NOT NULL,
-      c3  SMALLINT NOT NULL,
-      c4  SMALLINT,
-      c5  INT,
-      c6  BIGINT NOT NULL,
-      c7  SMALLINT NOT NULL,
-      c8  INT NOT NULL,
-      c9  BIGINT UNSIGNED NOT NULL,
-      c10 VARCHAR NOT NULL,
-      c11 FLOAT NOT NULL,
-      c12 DOUBLE NOT NULL,
-      c13 VARCHAR NOT NULL
-    )
-    STORED AS CSV
-    WITH HEADER ROW
-    LOCATION '../../testing/data/csv/aggregate_test_100.csv'",
-            )
-            .await?;
+    //     #[tokio::test]
+    //     async fn test_trivial() -> Result<()> {
+    //         let config = SessionConfig::new()
+    //             .with_target_partitions(2)
+    //             .with_batch_size(4096);
+    //         let ctx = SessionContext::with_config(config);
+    //         let _dataframe = ctx
+    //             .sql(
+    //                 "CREATE EXTERNAL TABLE aggregate_test_100 (
+    //       c1  VARCHAR NOT NULL,
+    //       c2  TINYINT NOT NULL,
+    //       c3  SMALLINT NOT NULL,
+    //       c4  SMALLINT,
+    //       c5  INT,
+    //       c6  BIGINT NOT NULL,
+    //       c7  SMALLINT NOT NULL,
+    //       c8  INT NOT NULL,
+    //       c9  BIGINT UNSIGNED NOT NULL,
+    //       c10 VARCHAR NOT NULL,
+    //       c11 FLOAT NOT NULL,
+    //       c12 DOUBLE NOT NULL,
+    //       c13 VARCHAR NOT NULL
+    //     )
+    //     STORED AS CSV
+    //     WITH HEADER ROW
+    //     LOCATION '/Users/berkaysahin/Desktop/datafusion-upstream/datafusion/core/tests/tpch-csv/lineitem.csv'",
+    //             )
+    //             .await?;
 
-        let dataframe = ctx
-            .sql(
-                "WITH indices AS (
-  SELECT 1 AS idx UNION ALL
-  SELECT 2 AS idx UNION ALL
-  SELECT 3 AS idx UNION ALL
-  SELECT 4 AS idx UNION ALL
-  SELECT 5 AS idx
-)
-SELECT data.arr[indices.idx] as element, array_length(data.arr) as array_len, dummy
-FROM (
-  SELECT array_agg(distinct c2) as arr, count(1) as dummy FROM aggregate_test_100
-) data
-  CROSS JOIN indices
-ORDER BY 1",
-            )
-            .await?;
-        let physical_plan = dataframe.clone().create_physical_plan().await?;
-        let batches = dataframe.collect().await?;
-        let _ = print_plan(&physical_plan);
-        let _ = print_batches(&batches);
-        Ok(())
-    }
+    //         let dataframe = ctx
+    //             .sql(
+    //                 "WITH indices AS (
+    //   SELECT 1 AS idx UNION ALL
+    //   SELECT 2 AS idx UNION ALL
+    //   SELECT 3 AS idx UNION ALL
+    //   SELECT 4 AS idx UNION ALL
+    //   SELECT 5 AS idx
+    // )
+    // SELECT data.arr[indices.idx] as element, array_length(data.arr) as array_len, dummy
+    // FROM (
+    //   SELECT array_agg(distinct c2) as arr, count(1) as dummy FROM aggregate_test_100
+    // ) data
+    //   CROSS JOIN indices
+    // ORDER BY 1",
+    //             )
+    //             .await?;
+    //         let physical_plan = dataframe.clone().create_physical_plan().await?;
+    //         let batches = dataframe.collect().await?;
+    //         let _ = print_plan(&physical_plan);
+    //         let _ = print_batches(&batches);
+    //         Ok(())
+    //     }
 
     /// TODO: Result of this query is wrong, where output schema orders is different what is should be.
     ///  The problem originates in `AggregateExec: mode=FinalPartitioned` at the top.
     #[tokio::test]
     async fn test_trivial2() -> Result<()> {
-        let mut config = SessionConfig::new()
-            .with_target_partitions(2)
-            .with_batch_size(4096);
+        let mut config = SessionConfig::new();
         let ctx = SessionContext::with_config(config);
         let _dataframe = ctx
             .sql(
-                "CREATE TABLE tab0(col0 INTEGER, col1 INTEGER, col2 INTEGER) as VALUES (83,0,38), (26,0,79), (43,81,24)",
+                "CREATE TABLE web_sales (
+    ws_sold_date_sk INT NOT NULL,
+    ws_sold_time_sk INT NOT NULL,
+    ws_ship_date_sk INT NOT NULL,
+    ws_item_sk INT NOT NULL,
+    ws_bill_customer_sk INT NOT NULL,
+    ws_bill_cdemo_sk INT NOT NULL,
+    ws_bill_hdemo_sk INT NOT NULL,
+    ws_bill_addr_sk INT NOT NULL,
+    ws_ship_customer_sk INT NOT NULL,
+    ws_ship_cdemo_sk INT NOT NULL,
+    ws_ship_hdemo_sk INT NOT NULL,
+    ws_ship_addr_sk INT NOT NULL,
+    ws_web_page_sk INT NOT NULL,
+    ws_web_site_sk INT NOT NULL,
+    ws_ship_mode_sk INT NOT NULL,
+    ws_warehouse_sk INT NOT NULL,
+    ws_promo_sk INT NOT NULL,
+    ws_order_number BIGINT NOT NULL,
+    ws_quantity INT NOT NULL,
+    ws_wholesale_cost DECIMAL(10,2) NOT NULL,
+    ws_list_price DECIMAL(10,2) NOT NULL,
+    ws_sales_price DECIMAL(10,2) NOT NULL,
+    ws_ext_discount_amt DECIMAL(10,2) NOT NULL,
+    ws_ext_sales_price DECIMAL(10,2) NOT NULL,
+    ws_ext_wholesale_cost DECIMAL(10,2) NOT NULL,
+    ws_ext_list_price DECIMAL(10,2) NOT NULL,
+    ws_ext_tax DECIMAL(10,2) NOT NULL,
+    ws_coupon_amt DECIMAL(10,2) NOT NULL,
+    ws_ext_ship_cost DECIMAL(10,2) NOT NULL,
+    ws_net_paid DECIMAL(10,2) NOT NULL,
+    ws_net_paid_inc_tax DECIMAL(10,2) NOT NULL,
+    ws_net_paid_inc_ship DECIMAL(10,2) NOT NULL,
+    ws_net_paid_inc_ship_tax DECIMAL(10,2) NOT NULL,
+    ws_net_profit DECIMAL(10,2) NOT NULL
+);",
+            )
+            .await?;
+
+        let _dataframe = ctx
+            .sql(
+                "CREATE TABLE catalog_sales (
+    cs_sold_date_sk INT NOT NULL,
+    cs_sold_time_sk INT NOT NULL,
+    cs_ship_date_sk INT NOT NULL,
+    cs_bill_customer_sk INT NOT NULL,
+    cs_bill_cdemo_sk INT NOT NULL,
+    cs_bill_hdemo_sk INT NOT NULL,
+    cs_bill_addr_sk INT NOT NULL,
+    cs_ship_customer_sk INT NOT NULL,
+    cs_ship_cdemo_sk INT NOT NULL,
+    cs_ship_hdemo_sk INT NOT NULL,
+    cs_ship_addr_sk INT NOT NULL,
+    cs_call_center_sk INT NOT NULL,
+    cs_catalog_page_sk INT NOT NULL,
+    cs_ship_mode_sk INT NOT NULL,
+    cs_warehouse_sk INT NOT NULL,
+    cs_item_sk INT NOT NULL,
+    cs_promo_sk INT NOT NULL,
+    cs_order_number BIGINT NOT NULL,
+    cs_quantity INT NOT NULL,
+    cs_wholesale_cost DECIMAL(10,2) NOT NULL,
+    cs_list_price DECIMAL(10,2) NOT NULL,
+    cs_sales_price DECIMAL(10,2) NOT NULL,
+    cs_ext_discount_amt DECIMAL(10,2) NOT NULL,
+    cs_ext_sales_price DECIMAL(10,2) NOT NULL,
+    cs_ext_wholesale_cost DECIMAL(10,2) NOT NULL,
+    cs_ext_list_price DECIMAL(10,2) NOT NULL,
+    cs_ext_tax DECIMAL(10,2) NOT NULL,
+    cs_coupon_amt DECIMAL(10,2) NOT NULL,
+    cs_ext_ship_cost DECIMAL(10,2) NOT NULL,
+    cs_net_paid DECIMAL(10,2) NOT NULL,
+    cs_net_paid_inc_tax DECIMAL(10,2) NOT NULL,
+    cs_net_paid_inc_ship DECIMAL(10,2) NOT NULL,
+    cs_net_paid_inc_ship_tax DECIMAL(10,2) NOT NULL,
+    cs_net_profit DECIMAL(10,2) NOT NULL
+);",
+            )
+            .await?;
+
+        let _dataframe = ctx
+            .sql(
+                "CREATE TABLE date_dim (
+    d_date_sk INT NOT NULL,
+    d_date_id VARCHAR NOT NULL,
+    d_date DATE NOT NULL,
+    d_month_seq INT NOT NULL,
+    d_week_seq INT NOT NULL,
+    d_quarter_seq INT NOT NULL,
+    d_year INT NOT NULL,
+    d_dow INT NOT NULL,
+    d_moy INT NOT NULL,
+    d_dom INT NOT NULL,
+    d_qoy INT NOT NULL,
+    d_fy_year INT NOT NULL,
+    d_fy_quarter_seq INT NOT NULL,
+    d_fy_week_seq INT NOT NULL,
+    d_day_name VARCHAR NOT NULL,
+    d_quarter_name VARCHAR NOT NULL,
+    d_holiday VARCHAR,
+    d_weekend VARCHAR,
+    d_following_holiday VARCHAR,
+    d_first_dom INT NOT NULL,
+    d_last_dom INT NOT NULL,
+    d_same_day_ly INT NOT NULL,
+    d_same_day_lq INT NOT NULL,
+    d_current_day VARCHAR,
+    d_current_week VARCHAR,
+    d_current_month VARCHAR,
+    d_current_quarter VARCHAR,
+    d_current_year VARCHAR
+);
+",
             )
             .await?;
 
         let dataframe = ctx
             .sql(
-                "SELECT DISTINCT * FROM tab0 AS cor0 GROUP BY cor0.col1, cor0.col2, cor0.col0",
+                "with wscs as
+ (select sold_date_sk
+        ,sales_price
+  from (select ws_sold_date_sk sold_date_sk
+              ,ws_ext_sales_price sales_price
+        from web_sales 
+        union all
+        select cs_sold_date_sk sold_date_sk
+              ,cs_ext_sales_price sales_price
+        from catalog_sales)),
+ wswscs as 
+ (select d_week_seq,
+        sum(case when (d_day_name='Sunday') then sales_price else null end) sun_sales,
+        sum(case when (d_day_name='Monday') then sales_price else null end) mon_sales,
+        sum(case when (d_day_name='Tuesday') then sales_price else  null end) tue_sales,
+        sum(case when (d_day_name='Wednesday') then sales_price else null end) wed_sales,
+        sum(case when (d_day_name='Thursday') then sales_price else null end) thu_sales,
+        sum(case when (d_day_name='Friday') then sales_price else null end) fri_sales,
+        sum(case when (d_day_name='Saturday') then sales_price else null end) sat_sales
+ from wscs
+     ,date_dim
+ where d_date_sk = sold_date_sk
+ group by d_week_seq)
+ select d_week_seq1
+       ,round(sun_sales1/sun_sales2,2)
+       ,round(mon_sales1/mon_sales2,2)
+       ,round(tue_sales1/tue_sales2,2)
+       ,round(wed_sales1/wed_sales2,2)
+       ,round(thu_sales1/thu_sales2,2)
+       ,round(fri_sales1/fri_sales2,2)
+       ,round(sat_sales1/sat_sales2,2)
+ from
+ (select wswscs.d_week_seq d_week_seq1
+        ,sun_sales sun_sales1
+        ,mon_sales mon_sales1
+        ,tue_sales tue_sales1
+        ,wed_sales wed_sales1
+        ,thu_sales thu_sales1
+        ,fri_sales fri_sales1
+        ,sat_sales sat_sales1
+  from wswscs,date_dim 
+  where date_dim.d_week_seq = wswscs.d_week_seq and
+        d_year = 2001) y,
+ (select wswscs.d_week_seq d_week_seq2
+        ,sun_sales sun_sales2
+        ,mon_sales mon_sales2
+        ,tue_sales tue_sales2
+        ,wed_sales wed_sales2
+        ,thu_sales thu_sales2
+        ,fri_sales fri_sales2
+        ,sat_sales sat_sales2
+  from wswscs
+      ,date_dim 
+  where date_dim.d_week_seq = wswscs.d_week_seq and
+        d_year = 2001+1) z
+ where d_week_seq1=d_week_seq2-53
+ order by d_week_seq1;",
             )
             .await?;
 
@@ -4823,7 +5171,7 @@ ORDER BY 1",
         let batches = dataframe.collect().await?;
         let _ = print_plan(&physical_plan);
         let _ = print_batches(&batches);
-        assert!(false);
+
         Ok(())
     }
 }
