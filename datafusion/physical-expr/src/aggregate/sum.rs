@@ -156,15 +156,16 @@ impl AggregateExpr for Sum {
 
     fn with_new_expressions(
         self: Arc<Self>,
-        mut expressions: Vec<Arc<dyn PhysicalExpr>>,
+        _expressions: Vec<Arc<dyn PhysicalExpr>>,
     ) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(Self {
-            name: self.name.clone(),
-            data_type: self.data_type.clone(),
-            return_type: self.return_type.clone(),
-            expr: expressions.swap_remove(0),
-            nullable: self.nullable,
-        }))
+        // Some(Arc::new(Self {
+        //     name: self.name.clone(),
+        //     data_type: self.data_type.clone(),
+        //     return_type: self.return_type.clone(),
+        //     expr: expressions.swap_remove(0),
+        //     nullable: self.nullable,
+        // }))
+        None
     }
 }
 

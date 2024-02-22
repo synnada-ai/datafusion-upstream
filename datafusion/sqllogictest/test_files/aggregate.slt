@@ -2644,14 +2644,13 @@ physical_plan
 GlobalLimitExec: skip=10, fetch=3
 --AggregateExec: mode=Final, gby=[c3@0 as c3, c2@1 as c2], aggr=[], lim=[13]
 ----CoalescePartitionsExec
-------AggregateExec: mode=Partial, gby=[c3@0 as c3, c2@1 as c2], aggr=[], lim=[13]
+------AggregateExec: mode=Partial, gby=[c3@1 as c3, c2@0 as c2], aggr=[], lim=[13]
 --------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
-----------ProjectionExec: expr=[c3@1 as c3, c2@0 as c2]
-------------AggregateExec: mode=Final, gby=[c2@0 as c2, c3@1 as c3], aggr=[]
---------------CoalescePartitionsExec
-----------------AggregateExec: mode=Partial, gby=[c2@0 as c2, c3@1 as c3], aggr=[]
-------------------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
---------------------CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/testing/data/csv/aggregate_test_100.csv]]}, projection=[c2, c3], has_header=true
+----------AggregateExec: mode=Final, gby=[c2@0 as c2, c3@1 as c3], aggr=[]
+------------CoalescePartitionsExec
+--------------AggregateExec: mode=Partial, gby=[c2@0 as c2, c3@1 as c3], aggr=[]
+----------------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+------------------CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/testing/data/csv/aggregate_test_100.csv]]}, projection=[c2, c3], has_header=true
 
 query II
 SELECT DISTINCT c3, c2 FROM aggregate_test_100 group by c2, c3 limit 3 offset 10;
