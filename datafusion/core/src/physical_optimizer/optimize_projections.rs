@@ -30,14 +30,14 @@
 //! ---------------
 //! - Traverses the plan from root to leaves. If the node is:
 //!   1. Projection node, it may:
-//!      a) Merge it with its input projection if merge is beneficial.
-//!      b) Remove the projection if it is redundant.
-//!      c) Narrow the Projection if possible.
-//!      d) The projection can be nested into the source.
-//!      e) Do nothing, otherwise.
+//!      a. Merge it with its input projection if merge is beneficial.
+//!      b. Remove the projection if it is redundant.
+//!      c. Narrow the Projection if possible.
+//!      d. The projection can be nested into the source.
+//!      e. Do nothing, otherwise.
 //!   2. Non-Projection node:
-//!      a) Schema needs pruning. Insert the necessary projections to the children.
-//!      b) All fields are required. Do nothing.
+//!      a. Schema needs pruning. Insert the necessary projections to the children.
+//!      b. All fields are required. Do nothing.
 //!
 //! Bottom-up Phase (now resides in map_children() implementation):
 //! ----------------
@@ -172,10 +172,10 @@ impl ProjectionOptimizer {
     }
 
     /// The function tries 4 cases:
-    /// 1) If the input plan is also a projection, they can be merged into one projection.
-    /// 2) The projection can be removed.
-    /// 3) The projection can get narrower.
-    /// 4) The projection can be embedded into the source.
+    /// 1. If the input plan is also a projection, they can be merged into one projection.
+    /// 2. The projection can be removed.
+    /// 3. The projection can get narrower.
+    /// 4. The projection can be embedded into the source.
     /// If none of them is possible, it remains unchanged.
     pub fn optimize_projections(mut self) -> Result<Self> {
         let projection_input = self.plan.children();
@@ -278,8 +278,8 @@ impl ProjectionOptimizer {
 
     /// Tries to remove the [`ProjectionExec`]. When these conditions are satisfied,
     /// the projection can be safely removed:
-    /// 1) Projection must have all column expressions without aliases.
-    /// 2) Projection input is fully required by the projection output requirements.
+    /// 1. Projection must have all column expressions without aliases.
+    /// 2. Projection input is fully required by the projection output requirements.
     fn try_remove_projection(mut self) -> Transformed<ProjectionOptimizer> {
         // It must be a projection
         let projection_exec =
@@ -306,9 +306,14 @@ impl ProjectionOptimizer {
 
         // If all fields of the input are necessary, we can remove the projection.
         let input_columns = collect_columns_in_plan_schema(projection_exec.input());
+        let input_col_names = input_columns
+            .iter()
+            .map(|col| col.name().to_string())
+            .collect::<HashSet<_>>();
         if input_columns
             .iter()
             .all(|input_column| projection_requires.contains(input_column))
+            && input_col_names.len() == input_columns.len()
         {
             let new_mapping = self
                 .required_columns
@@ -2983,9 +2988,14 @@ impl ProjectionOptimizer {
                     expr.as_any().downcast_ref::<Column>().unwrap().clone()
                 })
                 .collect::<Vec<_>>();
+            let child_col_names = child_columns
+                .iter()
+                .map(|col| col.name().to_string())
+                .collect::<HashSet<_>>();
             if child_columns
                 .iter()
                 .all(|child_col| projection_columns.contains(child_col))
+                && child_col_names.len() == child_columns.len()
             {
                 // We need to store the existing node's mapping.
                 let self_mapping = self.schema_mapping;
@@ -3145,7 +3155,6 @@ impl PhysicalOptimizerRule for OptimizeProjections {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        // print_plan(&plan);
         // Collect initial columns requirements from the plan's schema.
         let initial_requirements = collect_columns_in_plan_schema(&plan);
         let mut optimizer = ProjectionOptimizer::new_default(plan);
@@ -3444,14 +3453,14 @@ enum RewriteState {
 
 /// The function operates in two modes:
 ///
-/// 1) When `sync_with_child` is `true`:
+/// 1. When `sync_with_child` is `true`:
 ///
 ///    The function updates the indices of `expr` if the expression resides
 ///    in the input plan. For instance, given the expressions `a@1 + b@2`
 ///    and `c@0` with the input schema `c@2, a@0, b@1`, the expressions are
 ///    updated to `a@0 + b@1` and `c@2`.
 ///
-/// 2) When `sync_with_child` is `false`:
+/// 2. When `sync_with_child` is `false`:
 ///
 ///    The function determines how the expression would be updated if a projection
 ///    was placed before the plan associated with the expression. If the expression
