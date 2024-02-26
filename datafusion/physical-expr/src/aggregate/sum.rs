@@ -153,20 +153,6 @@ impl AggregateExpr for Sum {
         }
         downcast_sum!(self, helper)
     }
-
-    fn with_new_expressions(
-        self: Arc<Self>,
-        _expressions: Vec<Arc<dyn PhysicalExpr>>,
-    ) -> Option<Arc<dyn AggregateExpr>> {
-        // Some(Arc::new(Self {
-        //     name: self.name.clone(),
-        //     data_type: self.data_type.clone(),
-        //     return_type: self.return_type.clone(),
-        //     expr: expressions.swap_remove(0),
-        //     nullable: self.nullable,
-        // }))
-        None
-    }
 }
 
 impl PartialEq<dyn Any> for Sum {

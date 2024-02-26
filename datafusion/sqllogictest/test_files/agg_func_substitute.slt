@@ -43,7 +43,7 @@ Projection: multiple_ordered_table.a, NTH_VALUE(multiple_ordered_table.c,Int64(1
 --Aggregate: groupBy=[[multiple_ordered_table.a]], aggr=[[NTH_VALUE(multiple_ordered_table.c, Int64(1)) ORDER BY [multiple_ordered_table.c ASC NULLS LAST]]]
 ----TableScan: multiple_ordered_table projection=[a, c]
 physical_plan
-ProjectionExec: expr=[a@0 as a, NTH_VALUE(multiple_ordered_table.c,Int64(1)) ORDER BY [multiple_ordered_table.c ASC NULLS LAST]@1 as result]
+ProjectionExec: expr=[a@0 as a, NTH_VALUE(multiple_ordered_table.c,Int64(1))@1 as result]
 --AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[NTH_VALUE(multiple_ordered_table.c,Int64(1))], ordering_mode=Sorted
 ----SortExec: expr=[a@0 ASC NULLS LAST]
 ------CoalesceBatchesExec: target_batch_size=8192
@@ -63,7 +63,7 @@ Projection: multiple_ordered_table.a, NTH_VALUE(multiple_ordered_table.c,Int64(1
 --Aggregate: groupBy=[[multiple_ordered_table.a]], aggr=[[NTH_VALUE(multiple_ordered_table.c, Int64(1)) ORDER BY [multiple_ordered_table.c ASC NULLS LAST]]]
 ----TableScan: multiple_ordered_table projection=[a, c]
 physical_plan
-ProjectionExec: expr=[a@0 as a, NTH_VALUE(multiple_ordered_table.c,Int64(1)) ORDER BY [multiple_ordered_table.c ASC NULLS LAST]@1 as result]
+ProjectionExec: expr=[a@0 as a, NTH_VALUE(multiple_ordered_table.c,Int64(1))@1 as result]
 --AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[NTH_VALUE(multiple_ordered_table.c,Int64(1))], ordering_mode=Sorted
 ----SortExec: expr=[a@0 ASC NULLS LAST]
 ------CoalesceBatchesExec: target_batch_size=8192
