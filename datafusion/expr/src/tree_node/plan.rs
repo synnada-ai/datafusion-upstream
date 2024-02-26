@@ -20,7 +20,7 @@
 use crate::LogicalPlan;
 
 use datafusion_common::tree_node::{
-    Transformed, TransformedIterator, TreeNode, TreeNodeRecursion, TreeNodeVisitor,
+    Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor,
 };
 use datafusion_common::{handle_visit_recursion_down, handle_visit_recursion_up, Result};
 
@@ -85,28 +85,25 @@ impl TreeNode for LogicalPlan {
         F: FnMut(Self) -> Result<Transformed<Self>>,
     {
         let old_children = self.inputs();
-        let t = old_children
+        let new_children = old_children
             .iter()
             .map(|&c| c.clone())
-            .map_till_continue_and_collect(f)?;
-        // TODO: Currently `assert_eq!(t.transformed, t2)` fails as
-        //  `t.transformed` quality comes from if the transformation closures fill the
-        //   field correctly.
-        //  Once we trust `t.transformed` we can remove the additional check in
-        //  `t2`.
-        let t2 = old_children
-            .into_iter()
-            .zip(t.data.iter())
-            .any(|(c1, c2)| c1 != c2);
+            .map(f)
+            .collect::<Result<Vec<_>>>()?;
 
-        // Propagate up `t.transformed` and `t.tnr` along with the node containing
-        // transformed children.
-        if t2 {
-            t.flat_map_data(|new_children| {
-                self.with_new_exprs(self.expressions(), new_children)
-            })
+        // if any changes made, make a new child
+        if old_children
+            .into_iter()
+            .zip(new_children.iter())
+            .any(|(c1, c2)| c1 != &c2.data)
+        {
+            self.with_new_exprs(
+                self.expressions(),
+                new_children.into_iter().map(|child| child.data).collect(),
+            )
+            .map(Transformed::yes)
         } else {
-            Ok(t.map_data(|_| self))
+            Ok(Transformed::no(self))
         }
     }
 }
