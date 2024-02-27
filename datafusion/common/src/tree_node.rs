@@ -173,9 +173,16 @@ pub trait TreeNode: Sized {
         &self,
         visitor: &mut V,
     ) -> Result<TreeNodeRecursion> {
-        handle_visit_recursion_down!(visitor.f_down(self)?);
-        handle_visit_recursion_up!(self.apply_children(&mut |n| n.visit(visitor))?);
-        visitor.f_up(self)
+        match visitor.f_down(self)? {
+            TreeNodeRecursion::Continue => {
+                handle_visit_recursion_up!(
+                    self.apply_children(&mut |n| n.visit(visitor))?
+                );
+                visitor.f_up(self)
+            }
+            TreeNodeRecursion::Jump => visitor.f_up(self),
+            TreeNodeRecursion::Stop => Ok(TreeNodeRecursion::Stop),
+        }
     }
 
     /// Implements the [visitor pattern](https://en.wikipedia.org/wiki/Visitor_pattern) for
