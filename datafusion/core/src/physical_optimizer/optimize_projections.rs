@@ -498,6 +498,17 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
+    /// Attempts to insert a projection node below a `CoalesceBatchesExec` node.
+    ///
+    /// This method checks if there is any redundancy in the execution plan based on the requirements
+    /// of the `CoalesceBatchesExec` node. If all columns are required, it updates the required columns of the child node.
+    /// Otherwise, it inserts a new projection to optimize the plan.
+    ///
+    /// # Arguments
+    /// * `coal_batches`: Reference to a `CoalesceBatchesExec` object.
+    ///
+    /// # Returns
+    /// * `Result<ProjectionOptimizer>`: The modified `ProjectionOptimizer` after potentially inserting a projection.
     fn try_insert_below_coalesce_batches(
         mut self,
         coal_batches: &CoalesceBatchesExec,
@@ -525,6 +536,13 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
+    /// Attempts to insert a projection node below a `CoalescePartitionsExec` node.
+    ///
+    /// Similar to `try_insert_below_coalesce_batches`, this method analyzes the requirements of the
+    /// `CoalescePartitionsExec` node and modifies the execution plan accordingly.
+    ///
+    /// # Returns
+    /// * `Result<ProjectionOptimizer>`: The potentially modified `ProjectionOptimizer`.
     fn try_insert_below_coalesce_partitions(mut self) -> Result<ProjectionOptimizer> {
         // CoalescePartitionsExec does not change requirements. We can directly check whether there is a redundancy.
         let requirement_map = self.analyze_requirements();
@@ -545,9 +563,19 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
+    /// Attempts to insert a projection node below a `GlobalLimitExec` node.
+    ///
+    /// Analyzes the requirements imposed by `GlobalLimitExec` and optimizes the plan by potentially
+    /// inserting a projection node to reduce the number of columns processed.
+    ///
+    /// # Arguments
+    /// * `global_limit`: Reference to a `GlobalLimitExec` object.
+    ///
+    /// # Returns
+    /// * `Result<ProjectionOptimizer>`: The modified `ProjectionOptimizer`.
     fn try_insert_below_global_limit(
         mut self,
-        glimit: &GlobalLimitExec,
+        global_limit: &GlobalLimitExec,
     ) -> Result<ProjectionOptimizer> {
         // GlobalLimitExec does not change requirements. We can directly check whether there is a redundancy.
         let requirement_map = self.analyze_requirements();
@@ -559,8 +587,8 @@ impl ProjectionOptimizer {
             let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
             let plan = Arc::new(GlobalLimitExec::new(
                 new_child.plan.clone(),
-                glimit.skip(),
-                glimit.fetch(),
+                global_limit.skip(),
+                global_limit.fetch(),
             )) as _;
 
             self = ProjectionOptimizer {
@@ -573,9 +601,18 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
+    /// Attempts to insert a projection node below a `LocalLimitExec` node.
+    ///
+    /// Optimizes the plan considering the requirements of `LocalLimitExec`, potentially inserting a projection node.
+    ///
+    /// # Arguments
+    /// * `limit`: Reference to a `LocalLimitExec` object.
+    ///
+    /// # Returns
+    /// * `Result<ProjectionOptimizer>`: The updated `ProjectionOptimizer`.
     fn try_insert_below_local_limit(
         mut self,
-        llimit: &LocalLimitExec,
+        limit: &LocalLimitExec,
     ) -> Result<ProjectionOptimizer> {
         // LocalLimitExec does not change requirements. We can directly check whether there is a redundancy.
         let requirement_map = self.analyze_requirements();
@@ -585,8 +622,7 @@ impl ProjectionOptimizer {
         } else {
             let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
             let plan =
-                Arc::new(LocalLimitExec::new(new_child.plan.clone(), llimit.fetch()))
-                    as _;
+                Arc::new(LocalLimitExec::new(new_child.plan.clone(), limit.fetch())) as _;
 
             self = ProjectionOptimizer {
                 plan,
@@ -598,6 +634,16 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
+    /// Attempts to insert a projection node below a `FilterExec` node.
+    ///
+    /// Extends the required columns with those in the filter's predicate and optimizes the plan, potentially inserting
+    /// a projection node.
+    ///
+    /// # Arguments
+    /// * `filter`: Reference to a `FilterExec` object.
+    ///
+    /// # Returns
+    /// * `Result<ProjectionOptimizer>`: The optimized `ProjectionOptimizer`.
     fn try_insert_below_filter(
         mut self,
         filter: &FilterExec,
@@ -628,6 +674,16 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
+    /// Attempts to insert a projection node below a `RepartitionExec` node.
+    ///
+    /// If `RepartitionExec` involves a hash repartition, it extends the requirements with the columns in the hashed expressions.
+    /// The method then optimizes the execution plan accordingly.
+    ///
+    /// # Arguments
+    /// * `repartition`: Reference to a `RepartitionExec` object.
+    ///
+    /// # Returns
+    /// * `Result<ProjectionOptimizer>`: The potentially updated `ProjectionOptimizer`.
     fn try_insert_below_repartition(
         mut self,
         repartition: &RepartitionExec,
@@ -665,6 +721,16 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
+    /// Attempts to insert a projection node below a `SortExec` node.
+    ///
+    /// Extends the requirements with columns involved in the sort expressions and optimizes the execution plan,
+    /// potentially inserting a projection node.
+    ///
+    /// # Arguments
+    /// * `sort`: Reference to a `SortExec` object.
+    ///
+    /// # Returns
+    /// * `Result<ProjectionOptimizer>`: The optimized `ProjectionOptimizer`.
     fn try_insert_below_sort(mut self, sort: &SortExec) -> Result<ProjectionOptimizer> {
         // SortExec extends the requirements with the columns in its sort expressions.
         self.required_columns.extend(
@@ -697,6 +763,16 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
+    /// Attempts to insert a projection node below a `SortPreservingMergeExec` node.
+    ///
+    /// Similar to `try_insert_below_sort`, it extends the requirements with columns in the sort expressions and
+    /// optimizes the plan accordingly.
+    ///
+    /// # Arguments
+    /// * `sortp_merge`: Reference to a `SortPreservingMergeExec` object.
+    ///
+    /// # Returns
+    /// * `Result<ProjectionOptimizer>`: The modified `ProjectionOptimizer`.
     fn try_insert_below_sort_preserving_merge(
         mut self,
         sortp_merge: &SortPreservingMergeExec,
@@ -733,6 +809,16 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
+    /// Attempts to insert a projection node below a `UnionExec` node in the query execution plan.
+    ///
+    /// This method checks the requirements of the current execution plan to determine if there is any redundancy
+    /// when it comes to column usage in the context of a `UnionExec`. If all columns are required as per the
+    /// requirement map, the method updates the required columns for all child nodes accordingly. If not all
+    /// columns are required, it inserts new projection nodes to optimize the plan, leading to a more efficient
+    /// execution by reducing unnecessary data processing.
+    ///
+    /// # Returns
+    /// * `Result<ProjectionOptimizer>`: The optimized `ProjectionOptimizer` after potentially inserting projection nodes.
     fn try_insert_below_union(mut self) -> Result<ProjectionOptimizer> {
         // UnionExec does not change requirements. We can directly check whether there is a redundancy.
         let requirement_map = self.analyze_requirements();
@@ -758,6 +844,15 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
+    /// Attempts to insert a projection node below an `InterleaveExec` node in the query execution plan.
+    ///
+    /// Similar to `try_insert_below_union`, this method analyzes the requirements of the `InterleaveExec` node and
+    /// modifies the execution plan accordingly. If all columns are required, it updates the required columns for
+    /// each child node. Otherwise, it inserts new projection nodes for optimization. This process can lead to a
+    /// more efficient execution by minimizing the data processed in the context of interleaved execution.
+    ///
+    /// # Returns
+    /// * `Result<ProjectionOptimizer>`: The potentially modified `ProjectionOptimizer` after the optimization process.
     fn try_insert_below_interleave(mut self) -> Result<ProjectionOptimizer> {
         let requirement_map = self.analyze_requirements();
         if all_columns_required(&requirement_map) {
@@ -782,14 +877,31 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
+    /// Attempts to insert projection nodes below a `CrossJoinExec` node in the query execution plan.
+    ///
+    /// This method first analyzes the requirements for both the left and right sides of the cross join. Depending on these
+    /// requirements, it may insert projections on either or both sides of the join. Specifically, if not all columns are
+    /// required on either side, it inserts the necessary projection nodes to streamline the join operation. If all columns
+    /// are required from both sides, it updates the required columns accordingly without adding any projections. This
+    /// optimization is crucial for reducing the computational overhead in cross join operations.
+    ///
+    /// # Arguments
+    /// * `cj`: Reference to the `CrossJoinExec` node in the plan.
+    ///
+    /// # Returns
+    /// * `Result<ProjectionOptimizer>`: The updated `ProjectionOptimizer` after potentially inserting projection nodes.
     fn try_insert_below_cross_join(
         mut self,
         cj: &CrossJoinExec,
     ) -> Result<ProjectionOptimizer> {
         let left_size = cj.left().schema().fields().len();
         // CrossJoinExec does not add new requirements.
-        let (analyzed_join_left, analyzed_join_right) =
-            self.analyze_requirements_of_joins(left_size);
+        let (analyzed_join_left, analyzed_join_right) = analyze_requirements_of_joins(
+            cj.left(),
+            cj.right(),
+            &self.required_columns,
+            left_size,
+        );
         match (
             all_columns_required(&analyzed_join_left),
             all_columns_required(&analyzed_join_right),
@@ -882,6 +994,27 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
+    /// Attempts to insert a projection below a HashJoinExec node in a query plan.
+    ///
+    /// This function modifies the projection optimizer by analyzing and potentially
+    /// inserting new projections below the HashJoinExec node based on the join conditions
+    /// and the required columns in the query. The process involves analyzing both left
+    /// and right sides of the join, updating equivalence and non-equivalence conditions,
+    /// and reorganizing the required columns as needed. This function supports various
+    /// join types, including Inner, Left, Right, Full, LeftAnti, LeftSemi, RightAnti,
+    /// and RightSemi joins.
+    ///
+    /// # Arguments
+    ///
+    /// * `hj`: Reference to a HashJoinExec node representing the join operation in the query plan.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<ProjectionOptimizer>`, which is an updated ProjectionOptimizer
+    /// instance after potentially adding projections below the HashJoinExec node.
+    /// On success, it contains the modified ProjectionOptimizer with new projections
+    /// and updated plan. On failure, it returns an error indicating the issue encountered
+    /// during the operation.
     fn try_insert_below_hash_join(
         mut self,
         hj: &HashJoinExec,
@@ -906,8 +1039,12 @@ impl ProjectionOptimizer {
                 self.children_nodes[0].plan.schema(),
                 self.children_nodes[1].plan.schema(),
             ));
-        let (analyzed_join_left, analyzed_join_right) =
-            self.analyze_requirements_of_joins(left_size);
+        let (analyzed_join_left, analyzed_join_right) = analyze_requirements_of_joins(
+            hj.left(),
+            hj.right(),
+            &self.required_columns,
+            left_size,
+        );
 
         match hj.join_type() {
             JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full => {
@@ -1196,8 +1333,12 @@ impl ProjectionOptimizer {
                 self.children_nodes[0].plan.schema(),
                 self.children_nodes[1].plan.schema(),
             ));
-        let (analyzed_join_left, analyzed_join_right) =
-            self.analyze_requirements_of_joins(left_size);
+        let (analyzed_join_left, analyzed_join_right) = analyze_requirements_of_joins(
+            nlj.left(),
+            nlj.right(),
+            &self.required_columns,
+            left_size,
+        );
 
         match nlj.join_type() {
             JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full => {
@@ -1440,8 +1581,12 @@ impl ProjectionOptimizer {
                 self.children_nodes[0].plan.schema(),
                 self.children_nodes[1].plan.schema(),
             ));
-        let (analyzed_join_left, analyzed_join_right) =
-            self.analyze_requirements_of_joins(left_size);
+        let (analyzed_join_left, analyzed_join_right) = analyze_requirements_of_joins(
+            smj.left(),
+            smj.right(),
+            &self.required_columns,
+            left_size,
+        );
 
         match smj.join_type() {
             JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full => {
@@ -1687,8 +1832,12 @@ impl ProjectionOptimizer {
                 self.children_nodes[0].plan.schema(),
                 self.children_nodes[1].plan.schema(),
             ));
-        let (analyzed_join_left, analyzed_join_right) =
-            self.analyze_requirements_of_joins(left_size);
+        let (analyzed_join_left, analyzed_join_right) = analyze_requirements_of_joins(
+            shj.left(),
+            shj.right(),
+            &self.required_columns,
+            left_size,
+        );
 
         match shj.join_type() {
             JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full => {
@@ -2241,46 +2390,6 @@ impl ProjectionOptimizer {
             requirement_map.insert(col, contains);
         });
         requirement_map
-    }
-
-    /// Compares the columns required from the left/right child and existing columns in the left/right
-    /// child. If there is any redundant field, it returns the mapping of columns whether it is required
-    /// or not. If there is no redundancy, it returns `None` for that child. Caller side must ensure
-    /// that the join node extends its own requirements if the node's plan can introduce new requirements.
-    /// Each column refers to its own table schema index, not to the join output schema.
-    fn analyze_requirements_of_joins(
-        &self,
-        left_size: usize,
-    ) -> (ColumnRequirements, ColumnRequirements) {
-        let columns_in_schema =
-            collect_columns_in_plan_schema(&self.children_nodes[0].plan)
-                .into_iter()
-                .chain(
-                    collect_columns_in_plan_schema(&self.children_nodes[1].plan)
-                        .into_iter()
-                        .map(|col| Column::new(col.name(), col.index() + left_size)),
-                );
-        let requirement_map = columns_in_schema
-            .into_iter()
-            .map(|col| {
-                if self.required_columns.contains(&col) {
-                    (col, true)
-                } else {
-                    (col, false)
-                }
-            })
-            .collect::<HashMap<_, _>>();
-
-        let (requirement_map_left, mut requirement_map_right) = requirement_map
-            .into_iter()
-            .partition::<HashMap<_, _>, _>(|(col, _)| col.index() < left_size);
-
-        requirement_map_right = requirement_map_right
-            .into_iter()
-            .map(|(col, used)| (Column::new(col.name(), col.index() - left_size), used))
-            .collect::<HashMap<_, _>>();
-
-        (requirement_map_left, requirement_map_right)
     }
 
     /// If a node is known to have redundant columns, we need to insert a projection to its input.
@@ -3018,10 +3127,52 @@ impl TreeNode for ProjectionOptimizer {
             // here, and if the projection is regarded as unnecessary, the removal would
             // set a new the mapping on the new node, which is the child of the projection.
             self = self.try_remove_projection_bottom_up()?;
-            
+
             Ok(self)
         }
     }
+}
+
+/// Compares the columns required from the left/right child and existing columns in the left/right
+/// child. If there is any redundant field, it returns the mapping of columns whether it is required
+/// or not. If there is no redundancy, it returns `None` for that child. Caller side must ensure
+/// that the join node extends its own requirements if the node's plan can introduce new requirements.
+/// Each column refers to its own table schema index, not to the join output schema.
+fn analyze_requirements_of_joins(
+    left_child: &Arc<dyn ExecutionPlan>,
+    right_child: &Arc<dyn ExecutionPlan>,
+    required_columns: &HashSet<Column>,
+    left_size: usize,
+) -> (ColumnRequirements, ColumnRequirements) {
+    let columns_in_schema = collect_columns_in_plan_schema(left_child)
+        .into_iter()
+        .chain(
+            collect_columns_in_plan_schema(right_child)
+                .into_iter()
+                .map(|col| Column::new(col.name(), col.index() + left_size)),
+        );
+    let requirement_map = columns_in_schema
+        .into_iter()
+        .map(|col| {
+            if required_columns.contains(&col) {
+                (col, true)
+            } else {
+                (col, false)
+            }
+        })
+        .collect::<HashMap<_, _>>();
+
+    let (requirement_map_left, mut requirement_map_right) =
+        requirement_map
+            .into_iter()
+            .partition::<HashMap<_, _>, _>(|(col, _)| col.index() < left_size);
+
+    requirement_map_right = requirement_map_right
+        .into_iter()
+        .map(|(col, used)| (Column::new(col.name(), col.index() - left_size), used))
+        .collect::<HashMap<_, _>>();
+
+    (requirement_map_left, requirement_map_right)
 }
 
 #[derive(Default)]

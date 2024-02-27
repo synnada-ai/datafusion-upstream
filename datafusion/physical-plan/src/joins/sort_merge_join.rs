@@ -200,16 +200,16 @@ impl SortMergeJoinExec {
         &self.on
     }
 
-    pub fn right(&self) -> &dyn ExecutionPlan {
-        self.right.as_ref()
+    pub fn right(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.right
     }
 
     pub fn join_type(&self) -> JoinType {
         self.join_type
     }
 
-    pub fn left(&self) -> &dyn ExecutionPlan {
-        self.left.as_ref()
+    pub fn left(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.left
     }
 }
 
