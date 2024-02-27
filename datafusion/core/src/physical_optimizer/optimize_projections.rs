@@ -2994,19 +2994,6 @@ impl TreeNode for ProjectionOptimizer {
     where
         F: FnMut(Self) -> Result<Self>,
     {
-        // print_plan(&self.plan);
-        // println!("self reqs: {:?}", self.required_columns);
-        // println!("self map: {:?}", self.schema_mapping);
-        // self.children_nodes.iter().for_each(|c| {
-        //     print_plan(&c.plan);
-        // });
-        // self.children_nodes
-        //     .iter()
-        //     .for_each(|c| println!("child reqs: {:?}", c.required_columns));
-        // self.children_nodes
-        //     .iter()
-        //     .for_each(|c| println!("child map: {:?}", c.schema_mapping));
-
         if self.children_nodes.is_empty() {
             Ok(self)
         } else {
@@ -3016,19 +3003,6 @@ impl TreeNode for ProjectionOptimizer {
                 .map(transform)
                 .collect::<Result<Vec<_>>>()?;
 
-            // print_plan(&self.plan);
-            // println!("self reqs: {:?}", self.required_columns);
-            // println!("self map: {:?}", self.schema_mapping);
-            // self.children_nodes.iter().for_each(|c| {
-            //     print_plan(&c.plan);
-            // });
-            // self.children_nodes
-            //     .iter()
-            //     .for_each(|c| println!("child reqs: {:?}", c.required_columns));
-            // self.children_nodes
-            //     .iter()
-            //     .for_each(|c| println!("child map: {:?}", c.schema_mapping));
-
             self = match self.index_updater()? {
                 Transformed::Yes(updated) => updated,
                 Transformed::No(not_rewritable) => {
@@ -3036,39 +3010,13 @@ impl TreeNode for ProjectionOptimizer {
                 }
             };
 
-            // print_plan(&self.plan);
-            // println!("self reqs: {:?}", self.required_columns);
-            // println!("self map: {:?}", self.schema_mapping);
-            // self.children_nodes.iter().for_each(|c| {
-            //     print_plan(&c.plan);
-            // });
-            // self.children_nodes
-            //     .iter()
-            //     .for_each(|c| println!("child reqs: {:?}", c.required_columns));
-            // self.children_nodes
-            //     .iter()
-            //     .for_each(|c| println!("child map: {:?}", c.schema_mapping));
-
             // After the top-down pass, there may be some unnecessary projections surviving
             // since they assumes themselves as necessary when they are analyzed, but after
             // some optimizations below, they may become unnecessary. This check is done
             // here, and if the projection is regarded as unnecessary, the removal would
             // set a new the mapping on the new node, which is the child of the projection.
             self = self.try_remove_projection_bottom_up()?;
-
-            // print_plan(&self.plan);
-            // println!("self reqs: {:?}", self.required_columns);
-            // println!("self map: {:?}", self.schema_mapping);
-            // self.children_nodes.iter().for_each(|c| {
-            //     print_plan(&c.plan);
-            // });
-            // self.children_nodes
-            //     .iter()
-            //     .for_each(|c| println!("child reqs: {:?}", c.required_columns));
-            // self.children_nodes
-            //     .iter()
-            //     .for_each(|c| println!("child map: {:?}", c.schema_mapping));
-
+            
             Ok(self)
         }
     }
@@ -3098,40 +3046,9 @@ impl PhysicalOptimizerRule for OptimizeProjections {
         let mut optimized = optimizer.transform_down(&|o| {
             o.adjust_node_with_requirements().map(Transformed::Yes)
         })?;
-        // print_plan(&optimized.plan);
-        // println!("self reqs: {:?}", optimized.required_columns);
-        // println!("self map: {:?}", optimized.schema_mapping);
-        // optimized
-        //     .children_nodes
-        //     .iter()
-        //     .for_each(|c: &ProjectionOptimizer| {
-        //         print_plan(&c.plan);
-        //     });
-        // optimized
-        //     .children_nodes
-        //     .iter()
-        //     .for_each(|c| println!("child reqs: {:?}", c.required_columns));
-        // optimized
-        //     .children_nodes
-        //     .iter()
-        //     .for_each(|c| println!("child map: {:?}", c.schema_mapping));
-        // Ensure the final optimized plan satisfies the initial schema requirements.
 
+        // Ensure the final optimized plan satisfies the initial schema requirements.
         optimized = satisfy_initial_schema(optimized, initial_requirements)?;
-        // print_plan(&optimized.plan);
-        // println!("self reqs: {:?}", optimized.required_columns);
-        // println!("self map: {:?}", optimized.schema_mapping);
-        // optimized.children_nodes.iter().for_each(|c| {
-        //     print_plan(&c.plan);
-        // });
-        // optimized
-        //     .children_nodes
-        //     .iter()
-        //     .for_each(|c| println!("child reqs: {:?}", c.required_columns));
-        // optimized
-        //     .children_nodes
-        //     .iter()
-        //     .for_each(|c| println!("child map: {:?}", c.schema_mapping));
 
         // TODO: Remove this check to tests
         crosscheck_helper(optimized.clone())?;
