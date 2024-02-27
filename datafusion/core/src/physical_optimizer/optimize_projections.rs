@@ -2487,10 +2487,8 @@ impl ProjectionOptimizer {
         projected_exprs.sort_by_key(|(expr, _alias)| {
             expr.as_any().downcast_ref::<Column>().unwrap().index()
         });
-        let inserted_projection = Arc::new(ProjectionExec::try_new(
-            projected_exprs.clone(),
-            self.plan.children()[children_index].clone(),
-        )?) as _;
+
+        let child_plan = self.plan.children().remove(children_index);
 
         let required_columns = projected_exprs
             .iter()
@@ -2498,6 +2496,9 @@ impl ProjectionOptimizer {
             .collect::<HashSet<_>>();
 
         let new_mapping = calculate_column_mapping(&required_columns, &unused_columns);
+
+        let inserted_projection =
+            Arc::new(ProjectionExec::try_new(projected_exprs, child_plan)?) as _;
 
         let required_columns = collect_columns_in_plan_schema(&inserted_projection);
 
@@ -3133,11 +3134,26 @@ impl TreeNode for ProjectionOptimizer {
     }
 }
 
-/// Compares the columns required from the left/right child and existing columns in the left/right
-/// child. If there is any redundant field, it returns the mapping of columns whether it is required
-/// or not. If there is no redundancy, it returns `None` for that child. Caller side must ensure
-/// that the join node extends its own requirements if the node's plan can introduce new requirements.
-/// Each column refers to its own table schema index, not to the join output schema.
+/// Analyzes the column requirements for join operations between left and right children plans.
+///
+/// This function compares the required columns from the left and right children with the existing columns in their
+/// respective schemas. It determines if there are any redundant fields and creates a mapping to indicate whether
+/// each column is required. The function returns a pair of `ColumnRequirements`, one for each child.
+///
+/// The caller must ensure that the join node extends its requirements if the node's plan can introduce new columns.
+/// Each column in the requirement maps corresponds to its own table schema index, not to the join output schema.
+///
+/// # Arguments
+/// * `left_child`: Reference to the execution plan of the left child.
+/// * `right_child`: Reference to the execution plan of the right child.
+/// * `required_columns`: Set of columns that are required by the parent plan.
+/// * `left_size`: Size of the left child's schema, used to adjust the index of right child's columns.
+///
+/// # Returns
+/// A tuple containing two `ColumnRequirements`:
+/// - The first element represents the column requirements for the left child.
+/// - The second element represents the column requirements for the right child.
+///
 fn analyze_requirements_of_joins(
     left_child: &Arc<dyn ExecutionPlan>,
     right_child: &Arc<dyn ExecutionPlan>,
@@ -3725,7 +3741,13 @@ fn update_non_equivalence_conditions(
     })
 }
 
-/// Collects all fields of the schema for a given plan in [`Column`] form.
+/// Collects all fields of a schema from a given execution plan and converts them into a [`HashSet`] of [`Column`].
+///
+/// # Arguments
+/// * `plan`: Reference to an Arc of a dynamic ExecutionPlan trait object.
+///
+/// # Returns
+/// A `HashSet<Column>` containing all columns from the plan's schema.
 fn collect_columns_in_plan_schema(plan: &Arc<dyn ExecutionPlan>) -> HashSet<Column> {
     plan.schema()
         .fields()
@@ -3735,8 +3757,18 @@ fn collect_columns_in_plan_schema(plan: &Arc<dyn ExecutionPlan>) -> HashSet<Colu
         .collect()
 }
 
-/// Collects all columns in the join's equivalence and non-equivalence conditions as they are seen at the join output.
-/// This means that columns from left table appear as they are, and right table column indices increased by left table size.
+/// Collects all columns involved in the join's equivalence and non-equivalence conditions,
+/// adjusting the indices for columns from the right table by adding the size of the left table.
+///
+/// # Arguments
+/// * `on`: Slice of tuples representing the equivalence conditions between columns.
+/// * `filter`: Optional reference to a JoinFilter for non-equivalence conditions.
+/// * `left_size`: The number of columns in the left table.
+/// * `join_left_schema`: Schema reference of the left input to the join.
+/// * `join_right_schema`: Schema reference of the right input to the join.
+///
+/// # Returns
+/// A `HashSet<Column>` containing all columns from the join conditions.
 fn collect_columns_in_join_conditions(
     on: &[(PhysicalExprRef, PhysicalExprRef)],
     filter: Option<&JoinFilter>,
@@ -3780,8 +3812,14 @@ fn collect_columns_in_join_conditions(
         .collect()
 }
 
-/// Calculates how many index of the given column decreases becasue of
-/// the removed columns which reside on the left side of that given column.
+/// Calculates the count of removed (unused) columns that precede a given column index.
+///
+/// # Arguments
+/// * `requirement_map`: Reference to a ColumnRequirements map.
+/// * `column_index`: The index of the column in question.
+///
+/// # Returns
+/// The number of removed columns before the given column index.
 fn removed_column_count(
     requirement_map: &ColumnRequirements,
     column_index: usize,
@@ -3805,7 +3843,14 @@ fn removed_column_count(
     left_skipped_columns
 }
 
-/// Downcasts all expression's PhysicalExpr part in a projection. Returns error if any downcast fails.
+/// Downcast all expressions in a projection to their [`Column`] parts, returning an error if any downcast fails.
+///
+/// # Arguments
+/// * `projection`: Reference to a ProjectionExec.
+///
+/// # Returns
+/// A `Result<Vec<Column>>` containing the downcasted columns or an error if downcasting fails.
+///
 fn downcast_projected_exprs_to_columns(
     projection: &ProjectionExec,
 ) -> Result<Vec<Column>> {
@@ -3822,16 +3867,21 @@ fn downcast_projected_exprs_to_columns(
     Ok(columns.into_iter().cloned().collect())
 }
 
-/// Maps the indices of columns which are required from a projection node
-/// such that the projection inserts the same requirements into its child.
-///
-/// Example:
+/// Maps the indices of required columns in a parent projection node to the corresponding indices in its child.
 ///
 /// Projection is required to have columns at "@0:a - @1:b - @2:c"
 ///
 /// Projection does "a@2 as a, b@0 as b, c@1 as c"
 ///
 /// Then, projection inserts requirements into its child with these updated indices: "@0:b - @1:c - @2:a"
+///
+/// # Arguments
+/// * `requirements`: Reference to a `HashSet<Column>` representing the parent's column requirements.
+/// * `projection_columns`: Slice of `Column` representing the columns in the projection.
+///
+/// # Returns
+/// A `HashSet<Column>` with updated column indices reflecting the child's perspective.
+///
 fn map_parent_reqs_to_input_reqs(
     requirements: &HashSet<Column>,
     projection_columns: &[Column],
@@ -3842,8 +3892,15 @@ fn map_parent_reqs_to_input_reqs(
         .collect::<HashSet<_>>()
 }
 
-/// Compares the fields of a projection input schema with projection requirements.
-/// If all input fields are required, then the function returns `true`.
+/// Checks if all columns in the input schema are required by the projection.
+///
+/// # Arguments
+/// * `input_columns`: Reference to a `HashSet<Column>` representing the input columns.
+/// * `projection_requires`: Reference to a `HashSet<Column>` representing the projection requirements.
+///
+/// # Returns
+/// `true` if all input columns are required, otherwise `false`.
+///
 fn all_input_columns_required(
     input_columns: &HashSet<Column>,
     projection_requires: &HashSet<Column>,
@@ -3853,10 +3910,18 @@ fn all_input_columns_required(
         .all(|input_column| projection_requires.contains(input_column))
 }
 
-/// When we remove a redundant projection from a plan, parent operators are informed
-/// about the index changes caused by the removal of this projection. This function
-/// iterates the columns and records the changes for all of them after the removal.
-/// If a change is observed, the old and new index values are inserted into a hashmap.
+/// Calculates the index changes of columns after the removal of a projection.
+///
+/// This function iterates through the columns and records the changes in their indices
+/// after the removal of a projection. It compares the columns with the columns in the
+/// projection and, if a change is observed, maps the old and new index values in a hashmap.
+///
+/// # Arguments
+/// * `columns` - A set of columns before the projection is removed.
+/// * `projection_columns` - A slice of columns as they appear in the projection.
+///
+/// # Returns
+/// A `HashMap` where the key is the original column and the value is the column with updated index.
 fn index_changes_after_projection_removal(
     columns: HashSet<Column>,
     projection_columns: &[Column],
@@ -3874,6 +3939,19 @@ fn index_changes_after_projection_removal(
         .collect()
 }
 
+/// Rewrites a projection execution plan with updated column indices.
+///
+/// This function updates the column indices in a projection based on a provided mapping.
+/// It creates a new `ProjectionExec` with the updated expressions.
+///
+/// # Arguments
+/// * `projection` - The original projection execution plan.
+/// * `input_plan` - The input execution plan on which the projection is applied.
+/// * `mapping` - A hashmap with old and new column index mappings.
+///
+/// # Returns
+/// A `Result` containing the new `ProjectionExec` wrapped in an `Arc`.
+///
 fn rewrite_projection(
     projection: &ProjectionExec,
     input_plan: Arc<dyn ExecutionPlan>,
@@ -3890,6 +3968,18 @@ fn rewrite_projection(
     .map(|plan| Arc::new(plan) as _)
 }
 
+/// Rewrites a filter execution plan with updated column indices.
+///
+/// This function updates the column indices in a filter's predicate based on a provided mapping.
+/// It creates a new `FilterExec` with the updated predicate.
+///
+/// # Arguments
+/// * `predicate` - The predicate expression of the filter.
+/// * `input_plan` - The input execution plan on which the filter is applied.
+/// * `mapping` - A hashmap with old and new column index mappings.
+///
+/// # Returns
+/// A `Result` containing the new `FilterExec` wrapped in an `Arc`.
 fn rewrite_filter(
     predicate: &Arc<dyn PhysicalExpr>,
     input_plan: Arc<dyn ExecutionPlan>,
@@ -3899,6 +3989,18 @@ fn rewrite_filter(
         .map(|plan| Arc::new(plan) as _)
 }
 
+/// Rewrites a repartition execution plan with updated column indices.
+///
+/// Updates the partitioning expressions in a repartition plan based on the provided column index mappings.
+/// Supports updating the `Partitioning::Hash` variant of partitioning.
+///
+/// # Arguments
+/// * `partitioning` - The original partitioning strategy.
+/// * `input_plan` - The input execution plan on which repartitioning is applied.
+/// * `mapping` - A hashmap with old and new column index mappings.
+///
+/// # Returns
+/// A `Result` containing the new `RepartitionExec` wrapped in an `Arc`.
 fn rewrite_repartition(
     partitioning: &Partitioning,
     input_plan: Arc<dyn ExecutionPlan>,
@@ -3913,6 +4015,18 @@ fn rewrite_repartition(
     RepartitionExec::try_new(input_plan, new_partitioning).map(|plan| Arc::new(plan) as _)
 }
 
+/// Rewrites a sort execution plan with updated column indices.
+///
+/// This function updates the column indices in a sort's expressions based on a provided mapping.
+/// It creates a new `SortExec` with the updated expressions.
+///
+/// # Arguments
+/// * `sort` - The original sort execution plan.
+/// * `input_plan` - The input execution plan on which sorting is applied.
+/// * `mapping` - A hashmap with old and new column index mappings.
+///
+/// # Returns
+/// A `Result` containing the new `SortExec` wrapped in an `Arc`.
 fn rewrite_sort(
     sort: &SortExec,
     input_plan: Arc<dyn ExecutionPlan>,
@@ -3926,6 +4040,17 @@ fn rewrite_sort(
     ) as _)
 }
 
+/// Rewrites a sort preserving merge execution plan with updated column indices.
+///
+/// Updates the sort expressions in a sort preserving merge plan based on the provided column index mappings.
+///
+/// # Arguments
+/// * `sort` - The original `SortPreservingMergeExec` plan.
+/// * `input_plan` - The input execution plan to which the sort preserving merge is applied.
+/// * `mapping` - A hashmap with old and new column index mappings.
+///
+/// # Returns
+/// A `Result` containing the new `SortPreservingMergeExec` wrapped in an `Arc`.
 fn rewrite_sort_preserving_merge(
     sort: &SortPreservingMergeExec,
     input_plan: Arc<dyn ExecutionPlan>,
@@ -3937,6 +4062,21 @@ fn rewrite_sort_preserving_merge(
     ) as _)
 }
 
+/// Rewrites a hash join execution plan with updated column indices.
+///
+/// Updates the join conditions and filter expressions in a hash join plan based on provided column index mappings
+/// for both left and right input plans.
+///
+/// # Arguments
+/// * `hj` - The original `HashJoinExec` plan.
+/// * `left_input_plan` - The left input execution plan.
+/// * `right_input_plan` - The right input execution plan.
+/// * `left_mapping` - A hashmap with old and new column index mappings for the left input.
+/// * `right_mapping` - A hashmap with old and new column index mappings for the right input.
+/// * `left_size` - The size of the left input columns set.
+///
+/// # Returns
+/// A `Result` containing the new `HashJoinExec` wrapped in an `Arc`.
 fn rewrite_hash_join(
     hj: &HashJoinExec,
     left_input_plan: Arc<dyn ExecutionPlan>,
@@ -4039,6 +4179,20 @@ fn rewrite_nested_loop_join(
     .map(|plan| Arc::new(plan) as _)
 }
 
+/// Rewrites a sort merge join execution plan.
+///
+/// This function modifies a SortMergeJoinExec plan with new left and right input plans, updating join conditions and filters according to the provided mappings.
+///
+/// # Arguments
+/// * `smj`: The original SortMergeJoinExec to be rewritten.
+/// * `left_input_plan`: The updated execution plan for the left input.
+/// * `right_input_plan`: The updated execution plan for the right input.
+/// * `left_mapping`: Column mapping for the left input.
+/// * `right_mapping`: Column mapping for the right input.
+/// * `left_size`: The size of the left input, necessary for index calculations.
+///
+/// # Returns
+/// A Result containing the rewritten execution plan as an Arc, or an error on failure.
 fn rewrite_sort_merge_join(
     smj: &SortMergeJoinExec,
     left_input_plan: Arc<dyn ExecutionPlan>,
@@ -4092,6 +4246,20 @@ fn rewrite_sort_merge_join(
     .map(|plan| Arc::new(plan) as _)
 }
 
+/// Rewrites a symmetric hash join execution plan.
+///
+/// Adjusts a SymmetricHashJoinExec plan with new input plans and column mappings, maintaining the original join logic but with updated references.
+///
+/// # Arguments
+/// * `shj`: The SymmetricHashJoinExec to be modified.
+/// * `left_input_plan`: New execution plan for the left side.
+/// * `right_input_plan`: New execution plan for the right side.
+/// * `left_mapping`: Mapping for updating left side columns.
+/// * `right_mapping`: Mapping for updating right side columns.
+/// * `left_size`: Size of the left input for index adjustments.
+///
+/// # Returns
+/// A Result containing the updated execution plan within an Arc, or an error if the operation fails.
 fn rewrite_symmetric_hash_join(
     shj: &SymmetricHashJoinExec,
     left_input_plan: Arc<dyn ExecutionPlan>,
@@ -4148,6 +4316,17 @@ fn rewrite_symmetric_hash_join(
     .map(|plan| Arc::new(plan) as _)
 }
 
+/// Rewrites an aggregate execution plan.
+///
+/// This function updates an AggregateExec plan using a new input plan and column mappings. It adjusts group-by expressions, aggregate expressions, and filters.
+///
+/// # Arguments
+/// * `agg`: The original AggregateExec to be rewritten.
+/// * `input_plan`: The new execution plan to use as input.
+/// * `mapping`: A mapping from old to new columns.
+///
+/// # Returns
+/// A Result that either contains an Option with the new execution plan wrapped in an Arc, or None if no rewriting is possible, along with an error on failure.
 fn rewrite_aggregate(
     agg: &AggregateExec,
     input_plan: Arc<dyn ExecutionPlan>,
@@ -4192,6 +4371,17 @@ fn rewrite_aggregate(
     .map(|plan| Some(Arc::new(plan.with_limit(agg.limit())) as _))
 }
 
+/// Rewrites a window aggregate execution plan.
+///
+/// Modifies a WindowAggExec by updating its input plan and expressions based on the provided column mappings, ensuring the window functions are correctly applied to the new plan structure.
+///
+/// # Arguments
+/// * `w_agg`: The WindowAggExec to be updated.
+/// * `input_plan`: The new execution plan to be used.
+/// * `mapping`: Column mapping for updating window expressions.
+///
+/// # Returns
+/// A Result containing either an Option with the updated execution plan in an Arc, or None if rewriting isn't feasible, and an error on failure.
 fn rewrite_window_aggregate(
     w_agg: &WindowAggExec,
     input_plan: Arc<dyn ExecutionPlan>,
@@ -4208,6 +4398,17 @@ fn rewrite_window_aggregate(
         .map(|plan| Some(Arc::new(plan) as _))
 }
 
+/// Rewrites a bounded window aggregate execution plan.
+///
+/// Updates a BoundedWindowAggExec plan with a new input plan and modified window expressions according to provided column mappings, maintaining the logic of bounded window functions.
+///
+/// # Arguments
+/// * `bw_agg`: The original BoundedWindowAggExec to be rewritten.
+/// * `input_plan`: The new execution plan to use.
+/// * `mapping`: Mapping for updating window expressions.
+///
+/// # Returns
+/// A Result containing an Option with the new execution plan wrapped in an Arc, or None if the rewrite is not possible, and an error on failure.
 fn rewrite_bounded_window_aggregate(
     bw_agg: &BoundedWindowAggExec,
     input_plan: Arc<dyn ExecutionPlan>,
