@@ -98,12 +98,14 @@ use itertools::Itertools;
 /// fields for column requirements and changed indices of columns.
 #[derive(Debug, Clone)]
 pub struct ProjectionOptimizer {
+    /// The plan resides in the node
     pub plan: Arc<dyn ExecutionPlan>,
     /// The node above expects it can reach these columns.
     pub required_columns: HashSet<Column>,
-    /// The nodes above will be updated according to these mathces. First element indicates
+    /// The nodes above will be updated according to these matches. First element indicates
     /// the initial column index, and the second element is for the updated version.
     pub schema_mapping: HashMap<Column, Column>,
+    /// Children nodes
     pub children_nodes: Vec<ProjectionOptimizer>,
 }
 
@@ -127,10 +129,10 @@ impl ProjectionOptimizer {
     /// to leaf nodes. It only addresses the self and child node, and make
     /// the necessary changes on them, does not deep dive.
     fn adjust_node_with_requirements(mut self) -> Result<Self> {
-        // If the node is a source provdider, no need a change.
+        // If the node is a source provider, no need a change.
         if self.children_nodes.is_empty() {
             // We also clean the requirements, since we would like
-            // to left a payload-free nodes after the rule finishes.
+            // to leave payload-free nodes after the rule finishes.
             self.required_columns.clear();
             return Ok(self);
         }
