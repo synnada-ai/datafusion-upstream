@@ -538,18 +538,15 @@ impl<T: DynTreeNode + ?Sized> TreeNode for Arc<T> {
     {
         let children = self.arc_children();
         if !children.is_empty() {
-            let t = children.into_iter().map_until_stop_and_collect(f)?;
-            // TODO: Currently `assert_eq!(t.transformed, t2.transformed)` fails as
-            //  `t.transformed` quality comes from if the transformation closures fill the
-            //   field correctly.
-            //  Once we trust `t.transformed` we can remove the additional check in
-            //  `with_new_arc_children()`.
-            let arc_self = Arc::clone(&self);
-            let t2 = self.with_new_arc_children(arc_self, t.data)?;
-
-            // Propagate up `t.transformed` and `t.tnr` along with the node containing
-            // transformed children.
-            Ok(Transformed::new(t2.data, t.transformed, t.tnr))
+            let new_children = children.into_iter().map_until_stop_and_collect(f)?;
+            // Propagate up `new_children.transformed` and `new_children.tnr`
+            // along with the node containing transformed children.
+            if new_children.transformed {
+                let arc_self = Arc::clone(&self);
+                self.with_new_arc_children(arc_self, new_children.data)
+            } else {
+                Ok(Transformed::no(self))
+            }
         } else {
             Ok(Transformed::no(self))
         }
@@ -590,19 +587,12 @@ impl<T: ConcreteTreeNode> TreeNode for T {
     {
         let (new_self, children) = self.take_children();
         if !children.is_empty() {
-            let t = children.into_iter().map_until_stop_and_collect(f)?;
-            // TODO: Currently `assert_eq!(t.transformed, t2.transformed)` fails as
-            //  `t.transformed` quality comes from if the transformation closures fill the
-            //   field correctly.
-            //  Once we trust `t.transformed` we can remove the additional check in
-            //  `with_new_children()`.
-            let t2 = new_self.with_new_children(t.data)?;
-
-            // Propagate up `t.transformed` and `t.tnr` along with the node containing
-            // transformed children.
-            Ok(Transformed::new(t2.data, t.transformed, t.tnr))
+            let new_children = children.into_iter().map_until_stop_and_collect(f)?;
+            // Propagate up `t.transformed` and `t.tnr` along with
+            // the node containing transformed children.
+            new_self.with_new_children(new_children.data)
         } else {
-            Ok(Transformed::no(new_self))
+            Ok(Transformed::no(new_self.with_new_children(children)?.data))
         }
     }
 }

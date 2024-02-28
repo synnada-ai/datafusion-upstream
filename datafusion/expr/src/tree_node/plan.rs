@@ -20,7 +20,7 @@
 use crate::LogicalPlan;
 
 use datafusion_common::tree_node::{
-    Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor,
+    Transformed, TransformedIterator, TreeNode, TreeNodeRecursion, TreeNodeVisitor,
 };
 use datafusion_common::{handle_visit_recursion_down, handle_visit_recursion_up, Result};
 
@@ -62,10 +62,20 @@ impl TreeNode for LogicalPlan {
     ) -> Result<TreeNodeRecursion> {
         // Compared to the default implementation, we need to invoke
         // [`Self::visit_subqueries`] before visiting its children
-        handle_visit_recursion_down!(visitor.f_down(self)?);
-        self.visit_subqueries(visitor)?;
-        handle_visit_recursion_up!(self.apply_children(&mut |n| n.visit(visitor))?);
-        visitor.f_up(self)
+        match visitor.f_down(self)? {
+            TreeNodeRecursion::Continue => {
+                self.visit_subqueries(visitor)?;
+                handle_visit_recursion_up!(
+                    self.apply_children(&mut |n| n.visit(visitor))?
+                );
+                visitor.f_up(self)
+            }
+            TreeNodeRecursion::Jump => {
+                self.visit_subqueries(visitor)?;
+                visitor.f_up(self)
+            }
+            TreeNodeRecursion::Stop => Ok(TreeNodeRecursion::Stop),
+        }
     }
 
     fn apply_children<F: FnMut(&Self) -> Result<TreeNodeRecursion>>(
@@ -88,22 +98,15 @@ impl TreeNode for LogicalPlan {
         let new_children = old_children
             .iter()
             .map(|&c| c.clone())
-            .map(f)
-            .collect::<Result<Vec<_>>>()?;
-
-        // if any changes made, make a new child
-        if old_children
-            .into_iter()
-            .zip(new_children.iter())
-            .any(|(c1, c2)| c1 != &c2.data)
-        {
-            self.with_new_exprs(
-                self.expressions(),
-                new_children.into_iter().map(|child| child.data).collect(),
-            )
-            .map(Transformed::yes)
+            .map_until_stop_and_collect(f)?;
+        // Propagate up `new_children.transformed` and `new_children.tnr`
+        // along with the node containing transformed children.
+        if new_children.transformed {
+            new_children.map_data(|new_children| {
+                self.with_new_exprs(self.expressions(), new_children)
+            })
         } else {
-            Ok(Transformed::no(self))
+            Ok(new_children.update_data(|_| self))
         }
     }
 }
