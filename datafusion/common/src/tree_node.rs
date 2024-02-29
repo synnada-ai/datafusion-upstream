@@ -300,6 +300,11 @@ pub trait TreeNode: Sized {
     /// Transforms the tree using `f_down` while traversing the tree top-down
     /// (pre-preorder) and using `f_up` while traversing the tree bottom-up (post-order).
     ///
+    /// Use this method if you want to start the `f_up` process right where `f_down` jumps.
+    /// This can make the whole process faster by reducing the number of `f_up` steps.
+    /// If you don't need this, it's just like using `transform_down_mut` followed by
+    /// `transform_up_mut` on the same tree.
+    ///
     /// E.g. for an tree such as:
     /// ```text
     /// ParentNode
@@ -320,7 +325,67 @@ pub trait TreeNode: Sized {
     /// See [`TreeNodeRecursion`] for more details on how the traversal can be controlled.
     ///
     /// If `f_down` or `f_up` returns [`Err`], recursion is stopped immediately.
-    fn transform_down_up_with_control<FD, FU>(
+    ///
+    /// Example:
+    /// ```text
+    ///                                               |   +---+                      
+    ///                                               |   | J |                      
+    ///                                               |   +---+                      
+    ///                                               |     |                        
+    ///                                               |   +---+                      
+    ///                  TreeNodeRecursion::Continue  |   | I |                      
+    ///                                               |   +---+                      
+    ///                                               |     |                        
+    ///                                               |   +---+                      
+    ///                                              \|/  | F |                      
+    ///                                               '   +---+                      
+    ///                                                  /     \ ___________________                    
+    ///                  When `f_down` is           +---+                           \ ---+                
+    ///                  applied on node "E",       | E |                            | G |                
+    ///                  it returns with "jump".    +---+                            +---+                
+    ///                                               |                                |                  
+    ///                                             +---+                            +---+                
+    ///                                             | C |                            | H |                
+    ///                                             +---+                            +---+                
+    ///                                             /   \                            
+    ///                                        +---+     +---+                       
+    ///                                        | B |     | D |                       
+    ///                                        +---+     +---+                       
+    ///                                                    |                         
+    ///                                                  +---+                       
+    ///                                                  | A |                       
+    ///                                                  +---+  
+    ///
+    /// Instead of starting from leaf nodes, `f_up` starts from the node "E".      
+    ///                                                   +---+                      
+    ///                                               |   | J |                      
+    ///                                               |   +---+                      
+    ///                                               |     |                        
+    ///                                               |   +---+                      
+    ///                                               |   | I |                      
+    ///                                               |   +---+                      
+    ///                                               |     |                        
+    ///                                              /    +---+                      
+    ///                                            /      | F |                      
+    ///                                          /        +---+                      
+    ///                                        /         /     \ ______________________                    
+    ///                                       |     +---+   .                          \ ---+                
+    ///                                       |     | E |  /|\  After `f_down` jumps    | G |                
+    ///                                       |     +---+   |   on node E, `f_up`       +---+                
+    ///                                        \------| ---/   if applied on node E.      |                  
+    ///                                             +---+                               +---+                
+    ///                                             | C |                               | H |                
+    ///                                             +---+                               +---+                
+    ///                                             /   \                            
+    ///                                        +---+     +---+                       
+    ///                                        | B |     | D |                       
+    ///                                        +---+     +---+                       
+    ///                                                    |                         
+    ///                                                  +---+                       
+    ///                                                  | A |                       
+    ///                                                  +---+      
+    /// ```               
+    fn transform_down_up<FD, FU>(
         self,
         f_down: &mut FD,
         f_up: &mut FU,
@@ -331,7 +396,7 @@ pub trait TreeNode: Sized {
     {
         handle_transform_recursion!(
             f_down(self),
-            |c| c.transform_down_up_with_control(f_down, f_up),
+            |c| c.transform_down_up(f_down, f_up),
             f_up
         )
     }
@@ -1352,7 +1417,7 @@ mod tests {
             fn $NAME() -> Result<()> {
                 let tree = test_tree();
                 assert_eq!(
-                    tree.transform_down_up_with_control(&mut $F_DOWN, &mut $F_UP,)?,
+                    tree.transform_down_up(&mut $F_DOWN, &mut $F_UP,)?,
                     $EXPECTED_TREE
                 );
 
