@@ -320,7 +320,7 @@ pub trait TreeNode: Sized {
     /// See [`TreeNodeRecursion`] for more details on how the traversal can be controlled.
     ///
     /// If `f_down` or `f_up` returns [`Err`], recursion is stopped immediately.
-    fn transform<FD, FU>(
+    fn transform_down_up_with_control<FD, FU>(
         self,
         f_down: &mut FD,
         f_up: &mut FU,
@@ -329,7 +329,11 @@ pub trait TreeNode: Sized {
         FD: FnMut(Self) -> Result<Transformed<Self>>,
         FU: FnMut(Self) -> Result<Transformed<Self>>,
     {
-        handle_transform_recursion!(f_down(self), |c| c.transform(f_down, f_up), f_up)
+        handle_transform_recursion!(
+            f_down(self),
+            |c| c.transform_down_up_with_control(f_down, f_up),
+            f_up
+        )
     }
 
     /// Apply the closure `F` to the node's children
@@ -599,7 +603,10 @@ impl<T: DynTreeNode + ?Sized> TreeNode for Arc<T> {
             // along with the node containing transformed children.
             if new_children.transformed {
                 let arc_self = Arc::clone(&self);
-                self.with_new_arc_children(arc_self, new_children.data)
+                new_children.map_data(|children| {
+                    self.with_new_arc_children(arc_self, children)
+                        .map(|new| new.data)
+                })
             } else {
                 Ok(Transformed::no(self))
             }
@@ -644,11 +651,19 @@ impl<T: ConcreteTreeNode> TreeNode for T {
         let (new_self, children) = self.take_children();
         if !children.is_empty() {
             let new_children = children.into_iter().map_until_stop_and_collect(f)?;
-            // Propagate up `t.transformed` and `t.tnr` along with
-            // the node containing transformed children.
-            new_self.with_new_children(new_children.data)
+            if new_children.transformed {
+                // Propagate up `t.transformed` and `t.tnr` along with
+                // the node containing transformed children.
+                new_children.map_data(|children| {
+                    new_self.with_new_children(children).map(|new| new.data)
+                })
+            } else {
+                Ok(Transformed::no(
+                    new_self.with_new_children(new_children.data)?.data,
+                ))
+            }
         } else {
-            Ok(Transformed::no(new_self.with_new_children(children)?.data))
+            Ok(Transformed::no(new_self))
         }
     }
 }
@@ -1336,7 +1351,10 @@ mod tests {
             #[test]
             fn $NAME() -> Result<()> {
                 let tree = test_tree();
-                assert_eq!(tree.transform(&mut $F_DOWN, &mut $F_UP,)?, $EXPECTED_TREE);
+                assert_eq!(
+                    tree.transform_down_up_with_control(&mut $F_DOWN, &mut $F_UP,)?,
+                    $EXPECTED_TREE
+                );
 
                 Ok(())
             }
