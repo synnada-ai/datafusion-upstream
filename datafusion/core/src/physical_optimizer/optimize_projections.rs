@@ -3280,6 +3280,7 @@ impl PhysicalOptimizerRule for OptimizeProjections {
         // Collect initial columns requirements from the plan's schema.
         let initial_requirements = collect_columns_in_plan_schema(&plan);
         let mut optimizer = ProjectionOptimizer::new_default(plan);
+
         // Insert the initial requirements to the root node, and run the rule.
         optimizer.required_columns = initial_requirements.clone();
         let mut optimized = optimizer.transform_down(&|o| {
