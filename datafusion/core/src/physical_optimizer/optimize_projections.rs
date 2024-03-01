@@ -3287,7 +3287,9 @@ impl PhysicalOptimizerRule for OptimizeProjections {
             o.adjust_node_with_requirements().map(Transformed::Yes)
         })?;
 
-        // Ensure the final optimized plan satisfies the initial schema requirements.
+        // When some projections are removed after the rule, we know that all columns of
+        // the initial schema still exist, but their order may be changed. Ensure the final
+        // optimized plan satisfies the initial schema order.
         optimized = satisfy_initial_schema(optimized, initial_requirements)?;
 
         Ok(optimized.plan)
@@ -3306,7 +3308,7 @@ impl PhysicalOptimizerRule for OptimizeProjections {
 /// If the `schema_mapping` of `po` indicates that some columns have been re-mapped,
 /// a new projection is added to restore the initial column order and indices.
 fn satisfy_initial_schema(
-    po: ProjectionOptimizer,
+    mut po: ProjectionOptimizer,
     initial_requirements: HashSet<Column>,
 ) -> Result<ProjectionOptimizer> {
     if collect_columns_in_plan_schema(&po.plan) == initial_requirements
@@ -3315,18 +3317,17 @@ fn satisfy_initial_schema(
         // The initial schema is already satisfied, no further action required.
         Ok(po)
     } else {
-        // Collect expressions for the final projection to match the initial requirements.
-        let mut initial_requirements_vec =
+        let mut initial_requirements_ordered =
             initial_requirements.clone().into_iter().collect_vec();
-        initial_requirements_vec.sort_by_key(|expr| expr.index());
-        let projected_exprs = initial_requirements_vec
-            .iter()
+        initial_requirements_ordered.sort_by_key(|expr| expr.index());
+        let projected_exprs = initial_requirements_ordered
+            .into_iter()
             .map(|col| {
                 // If there is a change, get the new index.
-                let column_index = po.schema_mapping.get(col).unwrap_or(col).index();
-                let new_col = Arc::new(Column::new(col.name(), column_index))
-                    as Arc<dyn PhysicalExpr>;
-                (new_col, col.name().to_string())
+                let final_column = po.schema_mapping.remove(&col).unwrap_or(col);
+                let final_column_name = final_column.name().to_string();
+                let new_col = Arc::new(final_column) as Arc<dyn PhysicalExpr>;
+                (new_col, final_column_name)
             })
             .collect::<Vec<_>>();
 
@@ -3337,7 +3338,7 @@ fn satisfy_initial_schema(
         // Return a new ProjectionOptimizer with the final projection, resetting the schema mapping.
         Ok(ProjectionOptimizer {
             plan: final_projection,
-            required_columns: initial_requirements,
+            required_columns: HashSet::new(),
             schema_mapping: HashMap::new(), // Reset schema mapping as we've now satisfied the initial schema
             children_nodes: vec![po],       // Keep the original node as the child
         })
