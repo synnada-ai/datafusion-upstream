@@ -2633,9 +2633,11 @@ impl JoinConstraint {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum ScalarFunction {
-    Abs = 0,
-    Acos = 1,
-    Asin = 2,
+    ///   0 was Abs before
+    ///   The first enum value must be zero for open enums
+    Unknown = 0,
+    ///   1 was Acos
+    ///   2 was Asin
     Atan = 3,
     Ascii = 4,
     Ceil = 5,
@@ -2654,7 +2656,7 @@ pub enum ScalarFunction {
     Tan = 18,
     Trunc = 19,
     Array = 20,
-    RegexpMatch = 21,
+    /// RegexpMatch = 21;
     BitLength = 22,
     Btrim = 23,
     CharacterLength = 24,
@@ -2753,7 +2755,7 @@ pub enum ScalarFunction {
     ArrayIntersect = 119,
     ArrayUnion = 120,
     OverLay = 121,
-    Range = 122,
+    /// / 122 is Range
     ArrayExcept = 123,
     ArrayPopFront = 124,
     Levenshtein = 125,
@@ -2768,6 +2770,7 @@ pub enum ScalarFunction {
     ArrayReverse = 134,
     RegexpLike = 135,
     ToChar = 136,
+    ToDate = 137,
 }
 impl ScalarFunction {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -2776,9 +2779,7 @@ impl ScalarFunction {
     /// (if the ProtoBuf definition does not change) and safe for programmatic use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
-            ScalarFunction::Abs => "Abs",
-            ScalarFunction::Acos => "Acos",
-            ScalarFunction::Asin => "Asin",
+            ScalarFunction::Unknown => "unknown",
             ScalarFunction::Atan => "Atan",
             ScalarFunction::Ascii => "Ascii",
             ScalarFunction::Ceil => "Ceil",
@@ -2797,7 +2798,6 @@ impl ScalarFunction {
             ScalarFunction::Tan => "Tan",
             ScalarFunction::Trunc => "Trunc",
             ScalarFunction::Array => "Array",
-            ScalarFunction::RegexpMatch => "RegexpMatch",
             ScalarFunction::BitLength => "BitLength",
             ScalarFunction::Btrim => "Btrim",
             ScalarFunction::CharacterLength => "CharacterLength",
@@ -2893,7 +2893,6 @@ impl ScalarFunction {
             ScalarFunction::ArrayIntersect => "ArrayIntersect",
             ScalarFunction::ArrayUnion => "ArrayUnion",
             ScalarFunction::OverLay => "OverLay",
-            ScalarFunction::Range => "Range",
             ScalarFunction::ArrayExcept => "ArrayExcept",
             ScalarFunction::ArrayPopFront => "ArrayPopFront",
             ScalarFunction::Levenshtein => "Levenshtein",
@@ -2908,14 +2907,13 @@ impl ScalarFunction {
             ScalarFunction::ArrayReverse => "ArrayReverse",
             ScalarFunction::RegexpLike => "RegexpLike",
             ScalarFunction::ToChar => "ToChar",
+            ScalarFunction::ToDate => "ToDate",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
-            "Abs" => Some(Self::Abs),
-            "Acos" => Some(Self::Acos),
-            "Asin" => Some(Self::Asin),
+            "unknown" => Some(Self::Unknown),
             "Atan" => Some(Self::Atan),
             "Ascii" => Some(Self::Ascii),
             "Ceil" => Some(Self::Ceil),
@@ -2934,7 +2932,6 @@ impl ScalarFunction {
             "Tan" => Some(Self::Tan),
             "Trunc" => Some(Self::Trunc),
             "Array" => Some(Self::Array),
-            "RegexpMatch" => Some(Self::RegexpMatch),
             "BitLength" => Some(Self::BitLength),
             "Btrim" => Some(Self::Btrim),
             "CharacterLength" => Some(Self::CharacterLength),
@@ -3030,7 +3027,6 @@ impl ScalarFunction {
             "ArrayIntersect" => Some(Self::ArrayIntersect),
             "ArrayUnion" => Some(Self::ArrayUnion),
             "OverLay" => Some(Self::OverLay),
-            "Range" => Some(Self::Range),
             "ArrayExcept" => Some(Self::ArrayExcept),
             "ArrayPopFront" => Some(Self::ArrayPopFront),
             "Levenshtein" => Some(Self::Levenshtein),
@@ -3045,6 +3041,7 @@ impl ScalarFunction {
             "ArrayReverse" => Some(Self::ArrayReverse),
             "RegexpLike" => Some(Self::RegexpLike),
             "ToChar" => Some(Self::ToChar),
+            "ToDate" => Some(Self::ToDate),
             _ => None,
         }
     }
