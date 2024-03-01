@@ -194,6 +194,7 @@ impl ProjectionOptimizer {
                 Transformed::No(no_change) => no_change,
             }
         }
+        // TODO: Other source execs can be implemented here if projection can be applied within the scope of them.
 
         // If none of them possible, we will continue to next node. Output requirements
         // of the projection in terms of projection input are inserted to child node.
@@ -578,7 +579,7 @@ impl ProjectionOptimizer {
     ) -> Result<ProjectionOptimizer> {
         // GlobalLimitExec does not change requirements. We can directly check whether there is a redundancy.
         let requirement_map = self.analyze_requirements();
-        if true {
+        if all_columns_required(&requirement_map) {
             // if all_columns_required(&requirement_map) {
             self.children_nodes[0].required_columns =
                 mem::take(&mut self.required_columns);
