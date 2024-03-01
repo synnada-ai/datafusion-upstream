@@ -64,7 +64,6 @@ use crate::physical_plan::ExecutionPlan;
 use arrow_schema::SchemaRef;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, VisitRecursion};
-use datafusion_common::DataFusionError;
 use datafusion_common::{JoinSide, JoinType};
 use datafusion_physical_expr::expressions::{Column, Literal};
 use datafusion_physical_expr::utils::collect_columns;
@@ -73,10 +72,11 @@ use datafusion_physical_expr::{
     AggregateExpr, LexOrdering, Partitioning, PhysicalExpr, PhysicalExprRef,
     PhysicalSortExpr,
 };
-use datafusion_physical_plan::aggregates::{AggregateExec, PhysicalGroupBy};
+use datafusion_physical_plan::aggregates::{
+    AggregateExec, AggregateMode, PhysicalGroupBy,
+};
 use datafusion_physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion_physical_plan::get_plan_string;
 use datafusion_physical_plan::insert::FileSinkExec;
 use datafusion_physical_plan::joins::utils::{
     ColumnIndex, JoinFilter, JoinOn, JoinOnRef,
@@ -154,11 +154,10 @@ impl ProjectionOptimizer {
     /// 4. The projection can be embedded into the source.
     /// If none of them is possible, it remains unchanged.
     fn optimize_projections(mut self) -> Result<Self> {
-        let projection_input = self.plan.children();
-        let projection_input = projection_input[0].as_any();
+        let projection_input = &self.plan.children()[0];
 
         // We first need to check having 2 sequential projections in case of merging them.
-        if projection_input.is::<ProjectionExec>() {
+        if projection_input.as_any().is::<ProjectionExec>() {
             self = match self.try_unifying_projections()? {
                 Transformed::Yes(unified_plans) => {
                     // We need to re-run the rule on the new node since it may need further optimizations.
@@ -171,7 +170,7 @@ impl ProjectionOptimizer {
 
         // The projection can be removed. To avoid making unnecessary operations,
         // try_remove should be called before try_narrow.
-        self = match self.try_remove_projection() {
+        self = match self.try_remove_projection()? {
             Transformed::Yes(removed) => {
                 // We need to re-run the rule on the current node. It is
                 // a new plan node and may need optimizations for sure.
@@ -189,7 +188,7 @@ impl ProjectionOptimizer {
         };
 
         // Source providers:
-        if projection_input.is::<CsvExec>() {
+        if projection_input.as_any().is::<CsvExec>() {
             self = match self.try_projected_csv() {
                 Transformed::Yes(new_csv) => return Ok(new_csv),
                 Transformed::No(no_change) => no_change,
@@ -198,27 +197,36 @@ impl ProjectionOptimizer {
 
         // If none of them possible, we will continue to next node. Output requirements
         // of the projection in terms of projection input are inserted to child node.
-        let projection_plan =
-            self.plan.as_any().downcast_ref::<ProjectionExec>().unwrap();
-        self.children_nodes[0].required_columns = self
-            .required_columns
-            .iter()
-            .flat_map(|e| collect_columns(&projection_plan.expr()[e.index()].0))
-            .collect::<HashSet<_>>();
+        self.children_nodes[0].required_columns = if let Some(projection_plan) =
+            self.plan.as_any().downcast_ref::<ProjectionExec>()
+        {
+            self.required_columns
+                .iter()
+                .flat_map(|e| collect_columns(&projection_plan.expr()[e.index()].0))
+                .collect::<HashSet<_>>()
+        } else {
+            // If the method is used with a non-projection plan, we must sustain the execution safely.
+            collect_columns_in_plan_schema(projection_input)
+        };
+
         Ok(self)
     }
 
     /// If it is beneficial. unifies the projection and its input, which is also a [`ProjectionExec`].
     fn try_unifying_projections(mut self) -> Result<Transformed<Self>> {
         // These are known to be a ProjectionExec.
-        let projection = self.plan.as_any().downcast_ref::<ProjectionExec>().unwrap();
-        let child_projection = self.children_nodes[0]
+        let Some(projection) = self.plan.as_any().downcast_ref::<ProjectionExec>() else {
+            return Ok(Transformed::No(self));
+        };
+        let Some(child_projection) = self.children_nodes[0]
             .plan
             .as_any()
             .downcast_ref::<ProjectionExec>()
-            .unwrap();
+        else {
+            return Ok(Transformed::No(self));
+        };
 
-        if caching_projections(projection, child_projection) {
+        if caching_projections(projection, child_projection)? {
             return Ok(Transformed::No(self));
         }
 
@@ -249,18 +257,18 @@ impl ProjectionOptimizer {
     /// the projection can be safely removed:
     /// 1. Projection must have all column expressions without aliases.
     /// 2. Projection input is fully required by the projection output requirements.
-    fn try_remove_projection(mut self) -> Transformed<Self> {
+    fn try_remove_projection(mut self) -> Result<Transformed<Self>> {
         // It must be a projection
-        let projection_exec =
-            self.plan.as_any().downcast_ref::<ProjectionExec>().unwrap();
-        // The projection must have all column expressions without aliases.
-        if !all_alias_free_columns(projection_exec.expr()) {
-            return Transformed::No(self);
-        }
+        let Some(projection_exec) = self.plan.as_any().downcast_ref::<ProjectionExec>()
+        else {
+            return Ok(Transformed::No(self));
+        };
 
-        // The expressions are known to be all columns.
-        let projection_columns =
-            downcast_projected_exprs_to_columns(projection_exec).unwrap();
+        // The projection must have all column expressions without aliases.
+        let Some(projection_columns) = collect_alias_free_columns(projection_exec.expr())
+        else {
+            return Ok(Transformed::No(self));
+        };
 
         // Input requirements of the projection in terms of projection's parent requirements:
         let projection_requires =
@@ -274,14 +282,14 @@ impl ProjectionOptimizer {
                 &projection_columns,
             );
             let new_current_node = self.children_nodes.swap_remove(0);
-            Transformed::Yes(ProjectionOptimizer {
+            Ok(Transformed::Yes(ProjectionOptimizer {
                 plan: new_current_node.plan,
                 required_columns: projection_requires,
                 schema_mapping,
                 children_nodes: new_current_node.children_nodes,
-            })
+            }))
         } else {
-            Transformed::No(self)
+            Ok(Transformed::No(self))
         }
     }
 
@@ -289,8 +297,10 @@ impl ProjectionOptimizer {
     /// rewritten with a narrower schema, it is done so. Otherwise, it returns `None`.
     fn try_narrow_projection(self) -> Result<Transformed<ProjectionOptimizer>> {
         // It must be a projection.
-        let projection_exec =
-            self.plan.as_any().downcast_ref::<ProjectionExec>().unwrap();
+        let Some(projection_exec) = self.plan.as_any().downcast_ref::<ProjectionExec>()
+        else {
+            return Ok(Transformed::No(self));
+        };
 
         let requirement_map = self.analyze_requirements();
         let (used_columns, unused_columns) = split_column_requirements(&requirement_map);
@@ -347,47 +357,43 @@ impl ProjectionOptimizer {
     /// Tries to embed [`ProjectionExec`] into its input [`CsvExec`].
     fn try_projected_csv(self) -> Transformed<ProjectionOptimizer> {
         // These plans are known.
-        let projection = self.plan.as_any().downcast_ref::<ProjectionExec>().unwrap();
-        let csv = projection
-            .input()
-            .as_any()
-            .downcast_ref::<CsvExec>()
-            .unwrap();
+        let Some(projection) = self.plan.as_any().downcast_ref::<ProjectionExec>() else {
+            return Transformed::No(self);
+        };
+        let Some(csv) = projection.input().as_any().downcast_ref::<CsvExec>() else {
+            return Transformed::No(self);
+        };
         // If there is any non-column or alias-carrier expression, Projection should not be removed.
         // This process can be moved into CsvExec, but it could be a conflict of their responsibility.
-        if all_alias_free_columns(projection.expr()) {
-            let mut file_scan = csv.base_config().clone();
-            let projection_columns = projection
-                .expr()
-                .iter()
-                .map(|(expr, _alias)| expr.as_any().downcast_ref::<Column>().unwrap())
-                .collect::<Vec<_>>();
+        let Some(projection_columns) = collect_alias_free_columns(projection.expr())
+        else {
+            return Transformed::No(self);
+        };
 
-            let new_projections = new_projections_for_columns(
-                &projection_columns,
-                &file_scan
-                    .projection
-                    .unwrap_or((0..csv.schema().fields().len()).collect()),
-            );
+        let mut file_scan = csv.base_config().clone();
 
-            file_scan.projection = Some(new_projections);
+        let new_projections = new_projections_for_columns(
+            &projection_columns,
+            &file_scan
+                .projection
+                .unwrap_or((0..csv.schema().fields().len()).collect()),
+        );
 
-            Transformed::Yes(ProjectionOptimizer {
-                plan: Arc::new(CsvExec::new(
-                    file_scan,
-                    csv.has_header(),
-                    csv.delimiter(),
-                    csv.quote(),
-                    csv.escape(),
-                    csv.file_compression_type,
-                )) as _,
-                required_columns: HashSet::new(),
-                schema_mapping: HashMap::new(), // Sources cannot have a mapping.
-                children_nodes: vec![],
-            })
-        } else {
-            Transformed::No(self)
-        }
+        file_scan.projection = Some(new_projections);
+
+        Transformed::Yes(ProjectionOptimizer {
+            plan: Arc::new(CsvExec::new(
+                file_scan,
+                csv.has_header(),
+                csv.delimiter(),
+                csv.quote(),
+                csv.escape(),
+                csv.file_compression_type,
+            )) as _,
+            required_columns: HashSet::new(),
+            schema_mapping: HashMap::new(), // Sources cannot have a mapping.
+            children_nodes: vec![],
+        })
     }
 
     /// If the node plan can be rewritten with a narrower schema, a projection is inserted
@@ -399,15 +405,8 @@ impl ProjectionOptimizer {
     fn try_projection_insertion(mut self) -> Result<Self> {
         let plan = self.plan.clone();
 
-        if let Some(_projection) = plan.as_any().downcast_ref::<ProjectionExec>() {
-            panic!(
-                "\"try_projection_insertion\" subrule cannot be used on ProjectionExec's."
-            );
-        } else if let Some(_csv) = plan.as_any().downcast_ref::<CsvExec>() {
-            panic!("\"try_projection_insertion\" subrule cannot be used on plans with no child.")
-        }
         // These plans preserve the input schema, and do not add new requirements.
-        else if let Some(coal_b) = plan.as_any().downcast_ref::<CoalesceBatchesExec>() {
+        if let Some(coal_b) = plan.as_any().downcast_ref::<CoalesceBatchesExec>() {
             self = self.try_insert_below_coalesce_batches(coal_b)?;
         } else if plan
             .as_any()
@@ -928,12 +927,11 @@ impl ProjectionOptimizer {
             }
             // Left child needs a projection.
             (false, true) => {
+                let required_columns = self.required_columns.clone();
                 let mut right_child = self.children_nodes.swap_remove(1);
-                let (new_left_child, left_schema_mapping) = self
-                    .clone()
-                    .insert_projection_below_single_child(analyzed_join_left, 0)?;
-                right_child.required_columns = self
-                    .required_columns
+                let (new_left_child, left_schema_mapping) =
+                    self.insert_projection_below_left_child(analyzed_join_left)?;
+                right_child.required_columns = required_columns
                     .iter()
                     .filter(|col| col.index() >= left_size)
                     .map(|col| Column::new(col.name(), col.index() - left_size))
@@ -952,10 +950,10 @@ impl ProjectionOptimizer {
             }
             // Right child needs a projection.
             (true, false) => {
-                let mut left_child = self.children_nodes[0].clone();
-                let (new_right_child, mut right_schema_mapping) = self
-                    .clone()
-                    .insert_projection_below_single_child(analyzed_join_right, 1)?;
+                let required_columns = self.required_columns.clone();
+                let mut left_child = self.children_nodes.swap_remove(0);
+                let (new_right_child, mut right_schema_mapping) =
+                    self.insert_projection_below_right_child(analyzed_join_right)?;
                 right_schema_mapping = right_schema_mapping
                     .into_iter()
                     .map(|(old, new)| {
@@ -965,8 +963,7 @@ impl ProjectionOptimizer {
                         )
                     })
                     .collect();
-                left_child.required_columns = self
-                    .required_columns
+                left_child.required_columns = required_columns
                     .iter()
                     .filter(|col| col.index() < left_size)
                     .cloned()
@@ -1089,6 +1086,7 @@ impl ProjectionOptimizer {
                         }
                     }
                     (false, true) => {
+                        let required_columns = self.required_columns.clone();
                         let mut right_child = self.children_nodes.swap_remove(1);
                         let new_on = update_equivalence_conditions(
                             hj.on(),
@@ -1101,12 +1099,8 @@ impl ProjectionOptimizer {
                             &HashMap::new(),
                         );
                         let (new_left_child, mut left_schema_mapping) =
-                            self.clone().insert_projection_below_single_child(
-                                analyzed_join_left,
-                                0,
-                            )?;
-                        right_child.required_columns = self
-                            .required_columns
+                            self.insert_projection_below_left_child(analyzed_join_left)?;
+                        right_child.required_columns = required_columns
                             .iter()
                             .filter(|col| col.index() >= left_size)
                             .map(|col| Column::new(col.name(), col.index() - left_size))
@@ -1145,7 +1139,8 @@ impl ProjectionOptimizer {
                         }
                     }
                     (true, false) => {
-                        let mut left_child = self.children_nodes[0].clone();
+                        let mut left_child = self.children_nodes.swap_remove(0);
+                        let required_columns = self.required_columns.clone();
                         let new_on = update_equivalence_conditions(
                             hj.on(),
                             &HashMap::new(),
@@ -1156,11 +1151,8 @@ impl ProjectionOptimizer {
                             &HashMap::new(),
                             &analyzed_join_right,
                         );
-                        let (new_right_child, mut right_schema_mapping) =
-                            self.clone().insert_projection_below_single_child(
-                                analyzed_join_right,
-                                1,
-                            )?;
+                        let (new_right_child, mut right_schema_mapping) = self
+                            .insert_projection_below_right_child(analyzed_join_right)?;
                         right_schema_mapping = right_schema_mapping
                             .into_iter()
                             .map(|(old, new)| {
@@ -1170,8 +1162,7 @@ impl ProjectionOptimizer {
                                 )
                             })
                             .collect();
-                        left_child.required_columns = self
-                            .required_columns
+                        left_child.required_columns = required_columns
                             .iter()
                             .filter(|col| col.index() < left_size)
                             .cloned()
@@ -1219,10 +1210,7 @@ impl ProjectionOptimizer {
                         );
 
                         let (new_left_child, left_schema_mapping) =
-                            self.clone().insert_projection_below_single_child(
-                                analyzed_join_left,
-                                0,
-                            )?;
+                            self.insert_projection_below_left_child(analyzed_join_left)?;
 
                         let plan = Arc::new(HashJoinExec::try_new(
                             new_left_child.plan.clone(),
@@ -1262,7 +1250,7 @@ impl ProjectionOptimizer {
             JoinType::RightAnti | JoinType::RightSemi => {
                 match all_columns_required(&analyzed_join_right) {
                     false => {
-                        let mut left_child = self.children_nodes[0].clone();
+                        let mut left_child = self.children_nodes.swap_remove(0);
                         let new_on = update_equivalence_conditions(
                             hj.on(),
                             &HashMap::new(),
@@ -1275,10 +1263,7 @@ impl ProjectionOptimizer {
                         );
 
                         let (new_right_child, right_schema_mapping) = self
-                            .insert_projection_below_single_child(
-                                analyzed_join_right,
-                                1,
-                            )?;
+                            .insert_projection_below_right_child(analyzed_join_right)?;
 
                         let plan = Arc::new(HashJoinExec::try_new(
                             left_child.plan.clone(),
@@ -1374,6 +1359,7 @@ impl ProjectionOptimizer {
                         }
                     }
                     (false, true) => {
+                        let required_columns = self.required_columns.clone();
                         let mut right_child = self.children_nodes.swap_remove(1);
                         let new_filter = update_non_equivalence_conditions(
                             nlj.filter(),
@@ -1381,12 +1367,8 @@ impl ProjectionOptimizer {
                             &HashMap::new(),
                         );
                         let (new_left_child, mut left_schema_mapping) =
-                            self.clone().insert_projection_below_single_child(
-                                analyzed_join_left,
-                                0,
-                            )?;
-                        right_child.required_columns = self
-                            .required_columns
+                            self.insert_projection_below_left_child(analyzed_join_left)?;
+                        right_child.required_columns = required_columns
                             .iter()
                             .filter(|col| col.index() >= left_size)
                             .map(|col| Column::new(col.name(), col.index() - left_size))
@@ -1422,17 +1404,15 @@ impl ProjectionOptimizer {
                         }
                     }
                     (true, false) => {
-                        let mut left_child = self.children_nodes[0].clone();
+                        let required_columns = self.required_columns.clone();
+                        let mut left_child = self.children_nodes.swap_remove(0);
                         let new_filter = update_non_equivalence_conditions(
                             nlj.filter(),
                             &HashMap::new(),
                             &analyzed_join_right,
                         );
-                        let (new_right_child, mut right_schema_mapping) =
-                            self.clone().insert_projection_below_single_child(
-                                analyzed_join_right,
-                                1,
-                            )?;
+                        let (new_right_child, mut right_schema_mapping) = self
+                            .insert_projection_below_right_child(analyzed_join_right)?;
                         right_schema_mapping = right_schema_mapping
                             .into_iter()
                             .map(|(old, new)| {
@@ -1442,8 +1422,7 @@ impl ProjectionOptimizer {
                                 )
                             })
                             .collect();
-                        left_child.required_columns = self
-                            .required_columns
+                        left_child.required_columns = required_columns
                             .iter()
                             .filter(|col| col.index() < left_size)
                             .cloned()
@@ -1520,17 +1499,14 @@ impl ProjectionOptimizer {
             JoinType::RightAnti | JoinType::RightSemi => {
                 match all_columns_required(&analyzed_join_right) {
                     false => {
-                        let mut left_child = self.children_nodes[0].clone();
+                        let mut left_child = self.children_nodes.swap_remove(0);
                         let new_filter = update_non_equivalence_conditions(
                             nlj.filter(),
                             &HashMap::new(),
                             &analyzed_join_right,
                         );
                         let (new_right_child, right_schema_mapping) = self
-                            .insert_projection_below_single_child(
-                                analyzed_join_right,
-                                1,
-                            )?;
+                            .insert_projection_below_right_child(analyzed_join_right)?;
                         let plan = Arc::new(NestedLoopJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -1664,7 +1640,7 @@ impl ProjectionOptimizer {
                         }
                     }
                     (true, false) => {
-                        let left_child = self.children_nodes[0].clone();
+                        let left_child = self.children_nodes.swap_remove(0);
                         let new_on = update_equivalence_conditions(
                             smj.on(),
                             &HashMap::new(),
@@ -1676,10 +1652,7 @@ impl ProjectionOptimizer {
                             &analyzed_join_right,
                         );
                         let (new_right_child, right_schema_mapping) = self
-                            .insert_projection_below_single_child(
-                                analyzed_join_right,
-                                1,
-                            )?;
+                            .insert_projection_below_right_child(analyzed_join_right)?;
                         let plan = Arc::new(SortMergeJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -1763,7 +1736,7 @@ impl ProjectionOptimizer {
             JoinType::RightAnti | JoinType::RightSemi => {
                 match all_columns_required(&analyzed_join_right) {
                     false => {
-                        let mut left_child = self.children_nodes[0].clone();
+                        let mut left_child = self.children_nodes.swap_remove(0);
                         let new_on = update_equivalence_conditions(
                             smj.on(),
                             &HashMap::new(),
@@ -1775,10 +1748,7 @@ impl ProjectionOptimizer {
                             &analyzed_join_right,
                         );
                         let (new_right_child, right_schema_mapping) = self
-                            .insert_projection_below_single_child(
-                                analyzed_join_right,
-                                1,
-                            )?;
+                            .insert_projection_below_right_child(analyzed_join_right)?;
                         let plan = Arc::new(SortMergeJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -1921,7 +1891,7 @@ impl ProjectionOptimizer {
                         }
                     }
                     (true, false) => {
-                        let left_child = self.children_nodes[0].clone();
+                        let left_child = self.children_nodes.swap_remove(0);
                         let new_on = update_equivalence_conditions(
                             shj.on(),
                             &HashMap::new(),
@@ -1933,10 +1903,7 @@ impl ProjectionOptimizer {
                             &analyzed_join_right,
                         );
                         let (new_right_child, right_schema_mapping) = self
-                            .insert_projection_below_single_child(
-                                analyzed_join_right,
-                                1,
-                            )?;
+                            .insert_projection_below_right_child(analyzed_join_right)?;
                         let plan = Arc::new(SymmetricHashJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -2024,7 +1991,7 @@ impl ProjectionOptimizer {
             JoinType::RightAnti | JoinType::RightSemi => {
                 match all_columns_required(&analyzed_join_right) {
                     false => {
-                        let mut left_child = self.children_nodes[0].clone();
+                        let mut left_child = self.children_nodes.swap_remove(0);
                         let new_on = update_equivalence_conditions(
                             shj.on(),
                             &HashMap::new(),
@@ -2036,10 +2003,7 @@ impl ProjectionOptimizer {
                             &analyzed_join_right,
                         );
                         let (new_right_child, right_schema_mapping) = self
-                            .insert_projection_below_single_child(
-                                analyzed_join_right,
-                                1,
-                            )?;
+                            .insert_projection_below_right_child(analyzed_join_right)?;
                         let plan = Arc::new(SymmetricHashJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -2133,23 +2097,23 @@ impl ProjectionOptimizer {
             self.required_columns = HashSet::new();
         } else {
             match agg.mode() {
-                datafusion_physical_plan::aggregates::AggregateMode::Final
-                | datafusion_physical_plan::aggregates::AggregateMode::FinalPartitioned =>
-                {
+                AggregateMode::Final | AggregateMode::FinalPartitioned => {
                     let mut group_expr_len = agg.group_expr().expr().iter().count();
                     let aggr_columns = agg
                         .aggr_expr()
                         .iter()
                         .flat_map(|e| {
-                            e.state_fields()
-                                .unwrap()
-                                .iter()
-                                .map(|field| {
-                                    group_expr_len += 1;
-                                    Column::new(field.name(), group_expr_len - 1)
-                                })
-                                .collect::<Vec<_>>()
+                            e.state_fields().map(|field| {
+                                field
+                                    .iter()
+                                    .map(|field| {
+                                        group_expr_len += 1;
+                                        Column::new(field.name(), group_expr_len - 1)
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
                         })
+                        .flatten()
                         .collect::<Vec<_>>();
                     let group_columns = agg
                         .group_expr()
@@ -2227,11 +2191,27 @@ impl ProjectionOptimizer {
                 w_agg.input().schema().fields().len(),
                 &requirement_map,
             ) {
-                let (new_child, schema_mapping, window_usage) = self
-                    .clone()
-                    .insert_projection_below_window(w_agg, requirement_map)?;
+                if w_agg
+                    .window_expr()
+                    .iter()
+                    .any(|expr| expr.clone().with_new_expressions(vec![]).is_none())
+                {
+                    self.children_nodes[0].required_columns = self
+                        .required_columns
+                        .iter()
+                        .filter(|col| {
+                            col.index()
+                                < w_agg.schema().fields().len()
+                                    - w_agg.window_expr().len()
+                        })
+                        .cloned()
+                        .collect();
+                    return Ok(self);
+                }
+                let (new_child, schema_mapping, window_usage) =
+                    self.insert_projection_below_window(w_agg, requirement_map)?;
                 // Rewrite the sort expressions with possibly updated column indices.
-                let new_window_exprs = w_agg
+                let Some(new_window_exprs) = w_agg
                     .window_expr()
                     .iter()
                     .zip(window_usage.clone())
@@ -2239,12 +2219,16 @@ impl ProjectionOptimizer {
                     .map(|(window_expr, (_window_col, _usage))| {
                         let new_exprs = update_expressions(
                             &window_expr.expressions(),
-                            &schema_mapping,
+                            &HashMap::new(),
                         );
                         window_expr.clone().with_new_expressions(new_exprs)
                     })
                     .collect::<Option<Vec<_>>>()
-                    .unwrap();
+                else {
+                    return Err(datafusion_common::DataFusionError::Internal(
+                        "".to_string(),
+                    ));
+                };
 
                 let new_keys = w_agg
                     .partition_keys
@@ -2314,11 +2298,27 @@ impl ProjectionOptimizer {
                 bw_agg.input().schema().fields().len(),
                 &requirement_map,
             ) {
-                let (new_child, schema_mapping, window_usage) = self
-                    .clone()
-                    .insert_projection_below_bounded_window(bw_agg, requirement_map)?;
+                if bw_agg
+                    .window_expr()
+                    .iter()
+                    .any(|expr| expr.clone().with_new_expressions(vec![]).is_none())
+                {
+                    self.children_nodes[0].required_columns = self
+                        .required_columns
+                        .iter()
+                        .filter(|col| {
+                            col.index()
+                                < bw_agg.schema().fields().len()
+                                    - bw_agg.window_expr().len()
+                        })
+                        .cloned()
+                        .collect();
+                    return Ok(self);
+                }
+                let (new_child, schema_mapping, window_usage) =
+                    self.insert_projection_below_bounded_window(bw_agg, requirement_map)?;
                 // Rewrite the sort expressions with possibly updated column indices.
-                let new_window_exprs = bw_agg
+                let Some(new_window_exprs) = bw_agg
                     .window_expr()
                     .iter()
                     .zip(window_usage.clone())
@@ -2331,7 +2331,11 @@ impl ProjectionOptimizer {
                         window_expr.clone().with_new_expressions(new_exprs)
                     })
                     .collect::<Option<Vec<_>>>()
-                    .unwrap();
+                else {
+                    return Err(datafusion_common::DataFusionError::Internal(
+                        "".to_string(),
+                    ));
+                };
 
                 let new_keys = bw_agg
                     .partition_keys
@@ -2403,10 +2407,7 @@ impl ProjectionOptimizer {
         // During the iteration, we construct the ProjectionExec with required columns as the new child,
         // and also collect the unused columns to store the index changes after removal of some columns.
         let (used_columns, unused_columns) = split_column_requirements(&requirement_map);
-        let mut projected_exprs = convert_projection_exprs(used_columns);
-        projected_exprs.sort_by_key(|(expr, _alias)| {
-            expr.as_any().downcast_ref::<Column>().unwrap().index()
-        });
+        let projected_exprs = convert_projection_exprs(used_columns);
         let inserted_projection = Arc::new(ProjectionExec::try_new(
             projected_exprs,
             self.plan.children()[0].clone(),
@@ -2434,10 +2435,8 @@ impl ProjectionOptimizer {
         // During the iteration, we construct the ProjectionExec's with required columns as the new children,
         // and also collect the unused columns to store the index changes after removal of some columns.
         let (used_columns, unused_columns) = split_column_requirements(&requirement_map);
-        let mut projected_exprs = convert_projection_exprs(used_columns);
-        projected_exprs.sort_by_key(|(expr, _alias)| {
-            expr.as_any().downcast_ref::<Column>().unwrap().index()
-        });
+        let projected_exprs = convert_projection_exprs(used_columns);
+
         let inserted_projections = self
             .plan
             .children()
@@ -2475,7 +2474,7 @@ impl ProjectionOptimizer {
 
     /// Single child version of `insert_projection` for joins.
     fn insert_projection_below_single_child(
-        self,
+        mut self,
         requirement_map_left: ColumnRequirements,
         children_index: usize,
     ) -> Result<(Self, HashMap<Column, Column>)> {
@@ -2483,30 +2482,116 @@ impl ProjectionOptimizer {
         // and also collect the unused columns to store the index changes after removal of some columns.
         let (used_columns, unused_columns) =
             split_column_requirements(&requirement_map_left);
-        let mut projected_exprs = convert_projection_exprs(used_columns);
-        projected_exprs.sort_by_key(|(expr, _alias)| {
-            expr.as_any().downcast_ref::<Column>().unwrap().index()
-        });
-
         let child_plan = self.plan.children().remove(children_index);
-
-        let required_columns = projected_exprs
-            .iter()
-            .map(|(expr, _alias)| expr.as_any().downcast_ref::<Column>().unwrap().clone())
-            .collect::<HashSet<_>>();
-
-        let new_mapping = calculate_column_mapping(&required_columns, &unused_columns);
-
+        let new_mapping = calculate_column_mapping(&used_columns, &unused_columns);
+        let projected_exprs = convert_projection_exprs(used_columns);
         let inserted_projection =
             Arc::new(ProjectionExec::try_new(projected_exprs, child_plan)?) as _;
 
         let required_columns = collect_columns_in_plan_schema(&inserted_projection);
-
         let inserted_projection = ProjectionOptimizer {
             plan: inserted_projection,
             required_columns,
             schema_mapping: HashMap::new(),
-            children_nodes: vec![self.children_nodes[children_index].clone()],
+            children_nodes: vec![self.children_nodes.swap_remove(children_index)],
+        };
+        Ok((inserted_projection, new_mapping))
+    }
+
+    /// Single child version of `insert_projection` for joins.
+    #[allow(clippy::type_complexity)]
+    fn insert_projection_below_multi_child(
+        mut self,
+        requirement_map_left: ColumnRequirements,
+        requirement_map_right: ColumnRequirements,
+    ) -> Result<(Self, Self, HashMap<Column, Column>, HashMap<Column, Column>)> {
+        // During the iteration, we construct the ProjectionExec with required columns as the new child,
+        // and also collect the unused columns to store the index changes after removal of some columns.
+        let (used_columns, unused_columns) =
+            split_column_requirements(&requirement_map_left);
+        let child_plan = self.plan.children().remove(0);
+        let new_left_mapping = calculate_column_mapping(&used_columns, &unused_columns);
+        let projected_exprs = convert_projection_exprs(used_columns);
+        let inserted_projection =
+            Arc::new(ProjectionExec::try_new(projected_exprs, child_plan)?) as _;
+
+        let required_columns = collect_columns_in_plan_schema(&inserted_projection);
+        let left_inserted_projection = ProjectionOptimizer {
+            plan: inserted_projection,
+            required_columns,
+            schema_mapping: HashMap::new(),
+            children_nodes: vec![self.children_nodes.swap_remove(0)],
+        };
+
+        let (used_columns, unused_columns) =
+            split_column_requirements(&requirement_map_right);
+        let child_plan = self.plan.children().remove(1);
+        let new_right_mapping = calculate_column_mapping(&used_columns, &unused_columns);
+        let projected_exprs = convert_projection_exprs(used_columns);
+        let inserted_projection =
+            Arc::new(ProjectionExec::try_new(projected_exprs, child_plan)?) as _;
+
+        let required_columns = collect_columns_in_plan_schema(&inserted_projection);
+        let right_inserted_projection = ProjectionOptimizer {
+            plan: inserted_projection,
+            required_columns,
+            schema_mapping: HashMap::new(),
+            children_nodes: vec![self.children_nodes.swap_remove(0)],
+        };
+        Ok((
+            left_inserted_projection,
+            right_inserted_projection,
+            new_left_mapping,
+            new_right_mapping,
+        ))
+    }
+
+    /// Left child version of `insert_projection` for joins.
+    fn insert_projection_below_left_child(
+        mut self,
+        requirement_map_left: ColumnRequirements,
+    ) -> Result<(Self, HashMap<Column, Column>)> {
+        // During the iteration, we construct the ProjectionExec with required columns as the new child,
+        // and also collect the unused columns to store the index changes after removal of some columns.
+        let (used_columns, unused_columns) =
+            split_column_requirements(&requirement_map_left);
+        let child_plan = self.plan.children().remove(0);
+        let new_mapping = calculate_column_mapping(&used_columns, &unused_columns);
+        let projected_exprs = convert_projection_exprs(used_columns);
+        let inserted_projection =
+            Arc::new(ProjectionExec::try_new(projected_exprs, child_plan)?) as _;
+
+        let required_columns = collect_columns_in_plan_schema(&inserted_projection);
+        let inserted_projection = ProjectionOptimizer {
+            plan: inserted_projection,
+            required_columns,
+            schema_mapping: HashMap::new(),
+            children_nodes: vec![self.children_nodes.swap_remove(0)],
+        };
+        Ok((inserted_projection, new_mapping))
+    }
+
+    /// Right child version of `insert_projection` for joins.
+    fn insert_projection_below_right_child(
+        mut self,
+        requirement_map_right: ColumnRequirements,
+    ) -> Result<(Self, HashMap<Column, Column>)> {
+        // During the iteration, we construct the ProjectionExec with required columns as the new child,
+        // and also collect the unused columns to store the index changes after removal of some columns.
+        let (used_columns, unused_columns) =
+            split_column_requirements(&requirement_map_right);
+        let child_plan = self.plan.children().remove(1);
+        let new_mapping = calculate_column_mapping(&used_columns, &unused_columns);
+        let projected_exprs = convert_projection_exprs(used_columns);
+        let inserted_projection =
+            Arc::new(ProjectionExec::try_new(projected_exprs, child_plan)?) as _;
+
+        let required_columns = collect_columns_in_plan_schema(&inserted_projection);
+        let inserted_projection = ProjectionOptimizer {
+            plan: inserted_projection,
+            required_columns,
+            schema_mapping: HashMap::new(),
+            children_nodes: vec![self.children_nodes.swap_remove(0)],
         };
         Ok((inserted_projection, new_mapping))
     }
@@ -2519,11 +2604,15 @@ impl ProjectionOptimizer {
         requirement_map_right: ColumnRequirements,
     ) -> Result<(Self, Self, HashMap<Column, Column>)> {
         let original_right = self.children_nodes[1].plan.clone();
-        let (new_left_child, mut left_schema_mapping) = self
-            .clone()
-            .insert_projection_below_single_child(requirement_map_left, 0)?;
-        let (new_right_child, right_schema_mapping) =
-            self.insert_projection_below_single_child(requirement_map_right, 1)?;
+        let (
+            new_left_child,
+            new_right_child,
+            mut left_schema_mapping,
+            right_schema_mapping,
+        ) = self.insert_projection_below_multi_child(
+            requirement_map_left,
+            requirement_map_right,
+        )?;
 
         let new_left_size = new_left_child.plan.schema().fields().len();
         // left_schema_mapping does not need to be change, but it is updated with
@@ -2535,18 +2624,9 @@ impl ProjectionOptimizer {
                 .iter()
                 .enumerate()
                 .filter(|(idx, field)| {
-                    let right_projection = new_right_child
-                        .plan
-                        .as_any()
-                        .downcast_ref::<ProjectionExec>()
-                        .unwrap()
-                        .expr()
-                        .iter()
-                        .map(|(expr, _alias)| {
-                            expr.as_any().downcast_ref::<Column>().unwrap()
-                        })
-                        .collect::<Vec<_>>();
-                    right_projection.contains(&&Column::new(field.name(), *idx))
+                    let right_projection =
+                        collect_columns_in_plan_schema(&new_right_child.plan);
+                    right_projection.contains(&Column::new(field.name(), *idx))
                 })
         {
             left_schema_mapping.insert(
@@ -2756,10 +2836,10 @@ impl ProjectionOptimizer {
                 let right_mapping = all_mappings.swap_remove(0);
                 let new_mapping = left_mapping
                     .iter()
-                    .map(|(initial, new)| (initial.clone(), new.clone())) // Clone the columns from left_mapping
+                    .map(|(initial, new)| (initial.clone(), new.clone()))
                     .chain(right_mapping.iter().map(|(initial, new)| {
                         (
-                            Column::new(initial.name(), initial.index() + left_size), // Create new Column instances for right_mapping
+                            Column::new(initial.name(), initial.index() + left_size),
                             Column::new(new.name(), new.index() + left_size),
                         )
                     }))
@@ -2799,10 +2879,10 @@ impl ProjectionOptimizer {
                 let right_mapping = all_mappings.swap_remove(0);
                 let new_mapping = left_mapping
                     .iter()
-                    .map(|(initial, new)| (initial.clone(), new.clone())) // Clone the columns from left_mapping
+                    .map(|(initial, new)| (initial.clone(), new.clone()))
                     .chain(right_mapping.iter().map(|(initial, new)| {
                         (
-                            Column::new(initial.name(), initial.index() + left_size), // Create new Column instances for right_mapping
+                            Column::new(initial.name(), initial.index() + left_size),
                             Column::new(new.name(), new.index() + left_size),
                         )
                     }))
@@ -2841,10 +2921,10 @@ impl ProjectionOptimizer {
                 let right_mapping = all_mappings.swap_remove(0);
                 let new_mapping = left_mapping
                     .iter()
-                    .map(|(initial, new)| (initial.clone(), new.clone())) // Clone the columns from left_mapping
+                    .map(|(initial, new)| (initial.clone(), new.clone()))
                     .chain(right_mapping.iter().map(|(initial, new)| {
                         (
-                            Column::new(initial.name(), initial.index() + left_size), // Create new Column instances for right_mapping
+                            Column::new(initial.name(), initial.index() + left_size),
                             Column::new(new.name(), new.index() + left_size),
                         )
                     }))
@@ -2872,10 +2952,10 @@ impl ProjectionOptimizer {
                 let right_mapping = all_mappings.swap_remove(0);
                 let new_mapping = left_mapping
                     .iter()
-                    .map(|(initial, new)| (initial.clone(), new.clone())) // Clone the columns from left_mapping
+                    .map(|(initial, new)| (initial.clone(), new.clone()))
                     .chain(right_mapping.iter().map(|(initial, new)| {
                         (
-                            Column::new(initial.name(), initial.index() + left_size), // Create new Column instances for right_mapping
+                            Column::new(initial.name(), initial.index() + left_size),
                             Column::new(new.name(), new.index() + left_size),
                         )
                     }))
@@ -3022,65 +3102,54 @@ impl ProjectionOptimizer {
         };
         // Is the projection really required? First, we need to
         // have all column expression in the projection for removal.
-        if all_alias_free_columns(projection.expr()) {
-            // Then, check if all columns in the input schema exist after
-            // the projection. If it is so, we can remove the projection
-            // since it does not provide any benefit.
-            let child_columns = collect_columns_in_plan_schema(projection.input());
-            let projection_columns = projection
-                .expr()
-                .iter()
-                .map(|(expr, _alias)| {
-                    // We have ensured all expressions are column.
-                    expr.as_any().downcast_ref::<Column>().unwrap().clone()
-                })
-                .collect::<Vec<_>>();
-            let child_col_names = child_columns
-                .iter()
-                .map(|col| col.name().to_string())
-                .collect::<HashSet<_>>();
-            if child_columns
-                .iter()
-                .all(|child_col| projection_columns.contains(child_col))
-                && child_col_names.len() == child_columns.len()
-            {
-                // We need to store the existing node's mapping.
-                let self_mapping = self.schema_mapping;
-                // Remove the projection node.
-                self = self.children_nodes.swap_remove(0);
+        let Some(projection_columns) = collect_alias_free_columns(projection.expr())
+        else {
+            return Ok(self);
+        };
 
-                if self_mapping.is_empty() {
-                    self.schema_mapping = projection
-                        .expr()
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(idx, (col, _alias))| {
-                            let new_column =
-                                col.as_any().downcast_ref::<Column>().unwrap();
-                            if new_column.index() != idx {
-                                Some((
-                                    Column::new(new_column.name(), idx),
-                                    new_column.clone(),
-                                ))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                } else {
-                    self.schema_mapping = self_mapping
-                        .into_iter()
-                        .map(|(expected, updated)| {
-                            (
-                                expected,
-                                Column::new(
-                                    updated.name(),
-                                    projection_columns[updated.index()].index(),
-                                ),
-                            )
-                        })
-                        .collect()
-                }
+        // Then, check if all columns in the input schema exist after
+        // the projection. If it is so, we can remove the projection
+        // since it does not provide any benefit.
+        let child_columns = collect_columns_in_plan_schema(projection.input());
+        let child_col_names = child_columns
+            .iter()
+            .map(|col| col.name().to_string())
+            .collect::<HashSet<_>>();
+        if child_columns
+            .iter()
+            .all(|child_col| projection_columns.contains(child_col))
+            && child_col_names.len() == child_columns.len()
+        {
+            // We need to store the existing node's mapping.
+            let self_mapping = self.schema_mapping;
+            // Remove the projection node.
+            self = self.children_nodes.swap_remove(0);
+
+            if self_mapping.is_empty() {
+                self.schema_mapping = projection_columns
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, col)| {
+                        if col.index() != idx {
+                            Some((Column::new(col.name(), idx), col.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            } else {
+                self.schema_mapping = self_mapping
+                    .into_iter()
+                    .map(|(expected, updated)| {
+                        (
+                            expected,
+                            Column::new(
+                                updated.name(),
+                                projection_columns[updated.index()].index(),
+                            ),
+                        )
+                    })
+                    .collect()
             }
         }
         Ok(self)
@@ -3219,9 +3288,6 @@ impl PhysicalOptimizerRule for OptimizeProjections {
         // Ensure the final optimized plan satisfies the initial schema requirements.
         optimized = satisfy_initial_schema(optimized, initial_requirements)?;
 
-        // TODO: Remove this check to tests
-        crosscheck_helper(optimized.clone())?;
-
         Ok(optimized.plan)
     }
 
@@ -3232,24 +3298,6 @@ impl PhysicalOptimizerRule for OptimizeProjections {
     fn schema_check(&self) -> bool {
         true
     }
-}
-
-// TODO: Remove this to tests
-pub fn crosscheck_helper(context: ProjectionOptimizer) -> Result<()> {
-    context.transform_up(&|node| {
-        assert_eq!(node.children_nodes.len(), node.plan.children().len());
-        if !node.children_nodes.is_empty() {
-            assert_eq!(
-                get_plan_string(&node.plan),
-                get_plan_string(&node.plan.clone().with_new_children(
-                    node.children_nodes.iter().map(|c| c.plan.clone()).collect()
-                )?)
-            );
-        }
-        Ok(Transformed::No(node))
-    })?;
-
-    Ok(())
 }
 
 /// Ensures that the output schema `po` matches the `initial_requirements`.
@@ -3363,10 +3411,10 @@ fn window_agg_required(
 fn caching_projections(
     projection: &ProjectionExec,
     child_projection: &ProjectionExec,
-) -> bool {
+) -> Result<bool> {
     let mut column_ref_map: HashMap<Column, usize> = HashMap::new();
     // Collect the column references' usage in the parent projection.
-    projection.expr().iter().for_each(|(expr, _)| {
+    projection.expr().iter().try_for_each(|(expr, _)| {
         expr.apply(&mut |expr| {
             Ok({
                 if let Some(column) = expr.as_any().downcast_ref::<Column>() {
@@ -3374,12 +3422,12 @@ fn caching_projections(
                 }
                 VisitRecursion::Continue
             })
-        })
-        .unwrap();
-    });
-    column_ref_map.iter().any(|(column, count)| {
+        })?;
+        Ok(()) as Result<()>
+    })?;
+    Ok(column_ref_map.iter().any(|(column, count)| {
         *count > 1 && !is_expr_trivial(&child_projection.expr()[column.index()].0)
-    })
+    }))
 }
 
 /// Checks if the given expression is trivial.
@@ -3389,21 +3437,27 @@ fn is_expr_trivial(expr: &Arc<dyn PhysicalExpr>) -> bool {
         || expr.as_any().downcast_ref::<Literal>().is_some()
 }
 
-/// Given the expression set of a projection, checks if the projection causes
-/// any renaming or constructs a non-`Column` physical expression.
-fn all_alias_free_columns(exprs: &[(Arc<dyn PhysicalExpr>, String)]) -> bool {
-    exprs.iter().all(|(expr, alias)| {
-        expr.as_any()
-            .downcast_ref::<Column>()
-            .map(|column| column.name() == alias)
-            .unwrap_or(false)
-    })
+/// Given the expressions of a projection, checks if the projection causes
+/// any renaming or constructs a non-`Column` physical expression. If all
+/// expressions are `Column`, then they are collected and returned. If not,
+/// the function returns `None`.
+fn collect_alias_free_columns(
+    exprs: &[(Arc<dyn PhysicalExpr>, String)],
+) -> Option<Vec<Column>> {
+    let mut columns = vec![];
+    for (expr, alias) in exprs {
+        match expr.as_any().downcast_ref::<Column>() {
+            Some(column) if column.name() == alias => columns.push(column.clone()),
+            _ => return None,
+        }
+    }
+    Some(columns)
 }
 
 /// Updates a source provider's projected columns according to the given
 /// projection operator's expressions. To use this function safely, one must
 /// ensure that all expressions are `Column` expressions without aliases.
-fn new_projections_for_columns(projection: &[&Column], source: &[usize]) -> Vec<usize> {
+fn new_projections_for_columns(projection: &[Column], source: &[usize]) -> Vec<usize> {
     projection.iter().map(|col| source[col.index()]).collect()
 }
 
@@ -3455,14 +3509,15 @@ fn split_column_requirements(
 fn convert_projection_exprs(
     columns: HashSet<Column>,
 ) -> Vec<(Arc<dyn PhysicalExpr>, String)> {
-    let result = columns
+    let mut new_expr = columns.into_iter().collect::<Vec<_>>();
+    new_expr.sort_by_key(|column| column.index());
+    new_expr
         .into_iter()
         .map(|column| {
             let name = column.name().to_string();
             (Arc::new(column) as Arc<dyn PhysicalExpr>, name)
         })
-        .collect::<Vec<_>>();
-    result
+        .collect()
 }
 
 #[derive(Debug, PartialEq)]
@@ -3841,30 +3896,6 @@ fn removed_column_count(
         }
     }
     left_skipped_columns
-}
-
-/// Downcast all expressions in a projection to their [`Column`] parts, returning an error if any downcast fails.
-///
-/// # Arguments
-/// * `projection`: Reference to a ProjectionExec.
-///
-/// # Returns
-/// A `Result<Vec<Column>>` containing the downcasted columns or an error if downcasting fails.
-///
-fn downcast_projected_exprs_to_columns(
-    projection: &ProjectionExec,
-) -> Result<Vec<Column>> {
-    let Some(columns) = projection
-        .expr()
-        .iter()
-        .map(|(expr, _)| expr.as_any().downcast_ref::<Column>())
-        .collect::<Option<Vec<_>>>()
-    else {
-        return Err(DataFusionError::Internal("PhysicalExpr which is tried to be downcasted is not a Column.
-        `downcast_projected_exprs_to_columns` can be used after the check of `all_alias_free_columns`".to_string()));
-    };
-
-    Ok(columns.into_iter().cloned().collect())
 }
 
 /// Maps the indices of required columns in a parent projection node to the corresponding indices in its child.
