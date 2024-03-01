@@ -71,26 +71,13 @@ impl ProjectionExec {
     ) -> Result<Self> {
         let input_schema = input.schema();
         expr = expr
-            .iter()
-            .enumerate()
-            .map(|(_expr_idx, (expression, name))| {
-                expression
-                    .clone()
-                    .transform_down(&|e| match e.as_any().downcast_ref::<Column>() {
-                        Some(col) => {
-                            // Sometimes, an expression and its name in the input_schema
-                            // doesn't match. This can cause problems, so we make sure
-                            // that the expression name matches with the name in `input_schema`.
-                            // Conceptually, `source_expr` and `expression` should be the same.
-                            let idx = col.index();
-                            let matching_input_field = input_schema.field(idx);
-                            let matching_input_column =
-                                Column::new(matching_input_field.name(), idx);
-                            Ok(Transformed::Yes(Arc::new(matching_input_column)))
-                        }
-                        None => Ok(Transformed::No(e)),
-                    })
-                    .map(|source_expr| (source_expr, name.to_string()))
+            .into_iter()
+            .map(|(expression, name)| {
+                ProjectionMapping::update_expr_with_input_schema(
+                    expression,
+                    &input_schema,
+                )
+                .map(|source_expr| (source_expr, name.to_string()))
             })
             .collect::<Result<Vec<_>>>()?;
 

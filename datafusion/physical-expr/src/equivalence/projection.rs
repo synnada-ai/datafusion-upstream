@@ -21,6 +21,7 @@ use crate::expressions::Column;
 use crate::PhysicalExpr;
 
 use arrow::datatypes::SchemaRef;
+use arrow_schema::Schema;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result;
 
@@ -56,22 +57,7 @@ impl ProjectionMapping {
             .enumerate()
             .map(|(expr_idx, (expression, name))| {
                 let target_expr = Arc::new(Column::new(name, expr_idx)) as _;
-                expression
-                    .clone()
-                    .transform_down(&|e| match e.as_any().downcast_ref::<Column>() {
-                        Some(col) => {
-                            // Sometimes, an expression and its name in the input_schema
-                            // doesn't match. This can cause problems, so we make sure
-                            // that the expression name matches with the name in `input_schema`.
-                            // Conceptually, `source_expr` and `expression` should be the same.
-                            let idx = col.index();
-                            let matching_input_field = input_schema.field(idx);
-                            let matching_input_column =
-                                Column::new(matching_input_field.name(), idx);
-                            Ok(Transformed::Yes(Arc::new(matching_input_column)))
-                        }
-                        None => Ok(Transformed::No(e)),
-                    })
+                Self::update_expr_with_input_schema(expression.clone(), input_schema)
                     .map(|source_expr| (source_expr, target_expr))
             })
             .collect::<Result<Vec<_>>>()
@@ -103,6 +89,22 @@ impl ProjectionMapping {
             .iter()
             .find(|(source, _)| source.eq(expr))
             .map(|(_, target)| target.clone())
+    }
+
+    /// This function ensures that an expression has the same name with the field of it in its input schema.
+    pub fn update_expr_with_input_schema(
+        expr: Arc<dyn PhysicalExpr>,
+        input_schema: &Schema,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        expr.transform_down(&|e| match e.as_any().downcast_ref::<Column>() {
+            Some(col) => {
+                let idx = col.index();
+                let matching_input_field = input_schema.field(idx);
+                let matching_input_column = Column::new(matching_input_field.name(), idx);
+                Ok(Transformed::Yes(Arc::new(matching_input_column)))
+            }
+            None => Ok(Transformed::No(e)),
+        })
     }
 }
 
