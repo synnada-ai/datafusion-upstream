@@ -69,17 +69,18 @@ impl ProjectionExec {
         input: Arc<dyn ExecutionPlan>,
     ) -> Result<Self> {
         let input_schema = input.schema();
-        expr = expr
-            .into_iter()
-            .map(|(expression, name)| {
-                ProjectionMapping::update_expr_with_input_schema(
-                    expression,
-                    &input_schema,
-                )
-                .map(|source_expr| (source_expr, name.to_string()))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
+        // construct a map from the input expressions to the output expression of the Projection
+        let expr_names = expr
+            .iter()
+            .map(|(_, alias)| alias.to_string())
+            .collect::<Vec<_>>();
+        let projection_mapping = ProjectionMapping::try_new(expr, &input_schema)?;
+        expr = projection_mapping
+            .map
+            .iter()
+            .zip(expr_names)
+            .map(|((source, _), name)| (source.clone(), name))
+            .collect();
         let fields: Result<Vec<Field>> = expr
             .iter()
             .map(|(e, name)| {
@@ -101,8 +102,6 @@ impl ProjectionExec {
             input_schema.metadata().clone(),
         ));
 
-        // construct a map from the input expressions to the output expression of the Projection
-        let projection_mapping = ProjectionMapping::try_new(&expr, &input_schema)?;
         let cache =
             Self::compute_properties(&input, &projection_mapping, schema.clone())?;
         Ok(Self {

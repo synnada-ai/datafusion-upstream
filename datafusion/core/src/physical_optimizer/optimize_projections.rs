@@ -226,7 +226,7 @@ impl ProjectionOptimizer {
         else {
             return Ok(Transformed::No(self));
         };
-
+        // Projection can be beneficial if it caches any computation which are used more than once.
         if caching_projections(projection, child_projection)? {
             return Ok(Transformed::No(self));
         }
@@ -264,7 +264,6 @@ impl ProjectionOptimizer {
         else {
             return Ok(Transformed::No(self));
         };
-
         // The projection must have all column expressions without aliases.
         let Some(projection_columns) = collect_alias_free_columns(projection_exec.expr())
         else {

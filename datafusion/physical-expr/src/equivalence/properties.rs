@@ -1321,7 +1321,7 @@ mod tests {
             (col_a.clone(), "a3".to_string()),
             (col_a.clone(), "a4".to_string()),
         ];
-        let projection_mapping = ProjectionMapping::try_new(&proj_exprs, &input_schema)?;
+        let projection_mapping = ProjectionMapping::try_new(proj_exprs, &input_schema)?;
 
         let out_schema = output_schema(&projection_mapping, &input_schema)?;
         // a as a1, a as a2, a as a3, a as a3
@@ -1331,7 +1331,7 @@ mod tests {
             (col_a.clone(), "a3".to_string()),
             (col_a.clone(), "a4".to_string()),
         ];
-        let projection_mapping = ProjectionMapping::try_new(&proj_exprs, &input_schema)?;
+        let projection_mapping = ProjectionMapping::try_new(proj_exprs, &input_schema)?;
 
         // a as a1, a as a2, a as a3, a as a3
         let col_a1 = &col("a1", &out_schema)?;

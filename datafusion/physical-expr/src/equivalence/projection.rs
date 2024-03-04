@@ -21,7 +21,6 @@ use crate::expressions::Column;
 use crate::PhysicalExpr;
 
 use arrow::datatypes::SchemaRef;
-use arrow_schema::Schema;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result;
 
@@ -49,15 +48,29 @@ impl ProjectionMapping {
     ///
     /// where `col("c + d")` means the column named `"c + d"`.
     pub fn try_new(
-        expr: &[(Arc<dyn PhysicalExpr>, String)],
+        expr: Vec<(Arc<dyn PhysicalExpr>, String)>,
         input_schema: &SchemaRef,
     ) -> Result<Self> {
         // Construct a map from the input expressions to the output expression of the projection:
-        expr.iter()
+        expr.into_iter()
             .enumerate()
             .map(|(expr_idx, (expression, name))| {
-                let target_expr = Arc::new(Column::new(name, expr_idx)) as _;
-                Self::update_expr_with_input_schema(expression.clone(), input_schema)
+                let target_expr = Arc::new(Column::new(&name, expr_idx)) as _;
+                expression
+                    .transform_down(&|e| match e.as_any().downcast_ref::<Column>() {
+                        Some(col) => {
+                            // Sometimes, an expression and its name in the input_schema
+                            // doesn't match. This can cause problems, so we make sure
+                            // that the expression name matches with the name in `input_schema`.
+                            // Conceptually, `source_expr` and `expression` should be the same.
+                            let idx = col.index();
+                            let matching_input_field = input_schema.field(idx);
+                            let matching_input_column =
+                                Column::new(matching_input_field.name(), idx);
+                            Ok(Transformed::Yes(Arc::new(matching_input_column)))
+                        }
+                        None => Ok(Transformed::No(e)),
+                    })
                     .map(|source_expr| (source_expr, target_expr))
             })
             .collect::<Result<Vec<_>>>()
@@ -89,22 +102,6 @@ impl ProjectionMapping {
             .iter()
             .find(|(source, _)| source.eq(expr))
             .map(|(_, target)| target.clone())
-    }
-
-    /// This function ensures that an expression has the same name with the field of it in its input schema.
-    pub fn update_expr_with_input_schema(
-        expr: Arc<dyn PhysicalExpr>,
-        input_schema: &Schema,
-    ) -> Result<Arc<dyn PhysicalExpr>> {
-        expr.transform_down(&|e| match e.as_any().downcast_ref::<Column>() {
-            Some(col) => {
-                let idx = col.index();
-                let matching_input_field = input_schema.field(idx);
-                let matching_input_column = Column::new(matching_input_field.name(), idx);
-                Ok(Transformed::Yes(Arc::new(matching_input_column)))
-            }
-            None => Ok(Transformed::No(e)),
-        })
     }
 }
 
@@ -608,7 +605,7 @@ mod tests {
                 .into_iter()
                 .map(|(expr, name)| (expr.clone(), name))
                 .collect::<Vec<_>>();
-            let projection_mapping = ProjectionMapping::try_new(&proj_exprs, &schema)?;
+            let projection_mapping = ProjectionMapping::try_new(proj_exprs, &schema)?;
             let output_schema = output_schema(&projection_mapping, &schema)?;
 
             let expected = expected
@@ -691,7 +688,7 @@ mod tests {
             .into_iter()
             .map(|(expr, name)| (expr.clone(), name))
             .collect::<Vec<_>>();
-        let projection_mapping = ProjectionMapping::try_new(&proj_exprs, &schema)?;
+        let projection_mapping = ProjectionMapping::try_new(proj_exprs, &schema)?;
         let output_schema = output_schema(&projection_mapping, &schema)?;
 
         let col_a_new = &col("a_new", &output_schema)?;
@@ -876,7 +873,7 @@ mod tests {
             .into_iter()
             .map(|(expr, name)| (expr.clone(), name))
             .collect::<Vec<_>>();
-        let projection_mapping = ProjectionMapping::try_new(&proj_exprs, &schema)?;
+        let projection_mapping = ProjectionMapping::try_new(proj_exprs, &schema)?;
         let output_schema = output_schema(&projection_mapping, &schema)?;
 
         let col_a_plus_b_new = &col("a+b", &output_schema)?;
@@ -1112,7 +1109,7 @@ mod tests {
                     )?;
 
                     let projection_mapping =
-                        ProjectionMapping::try_new(&proj_exprs, &test_schema)?;
+                        ProjectionMapping::try_new(proj_exprs, &test_schema)?;
 
                     let projected_exprs = projection_mapping
                         .iter()

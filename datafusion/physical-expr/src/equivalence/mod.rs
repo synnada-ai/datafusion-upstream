@@ -289,7 +289,7 @@ mod tests {
         input_eq_properties: &EquivalenceProperties,
     ) -> Result<(RecordBatch, EquivalenceProperties)> {
         let input_schema = input_data.schema();
-        let projection_mapping = ProjectionMapping::try_new(&proj_exprs, &input_schema)?;
+        let projection_mapping = ProjectionMapping::try_new(proj_exprs, &input_schema)?;
 
         let output_schema = output_schema(&projection_mapping, &input_schema)?;
         let num_rows = input_data.num_rows();
