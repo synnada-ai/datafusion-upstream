@@ -82,6 +82,7 @@ impl ProjectionExec {
             .zip(expr_names)
             .map(|((source, _), name)| (source.clone(), name))
             .collect();
+
         let fields: Result<Vec<Field>> = expr
             .iter()
             .map(|(e, name)| {
