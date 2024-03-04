@@ -302,40 +302,31 @@ impl ProjectionOptimizer {
             return Ok(Transformed::No(self));
         };
 
-        let requirement_map = self.analyze_requirements();
+        let requirement_map = analyze_requirements(&self);
         let (used_columns, unused_columns) = split_column_requirements(&requirement_map);
         if unused_columns.is_empty() {
             // All projected items are used.
             return Ok(Transformed::No(self));
         }
-        let projected_exprs = projection_exec
-            .expr()
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, (expr, alias))| {
-                if used_columns
-                    .iter()
-                    .map(|column| column.index())
-                    .collect::<Vec<_>>()
-                    .contains(&idx)
-                {
-                    Some((expr.clone(), alias.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        let new_mapping =
+        let projected_exprs =
+            filter_unused_columns(projection_exec.expr(), &used_columns);
+        let mut new_mapping =
             calculate_column_mapping(&self.required_columns, &unused_columns);
 
-        let new_projection_plan = Arc::new(ProjectionExec::try_new(
-            projected_exprs.clone(),
-            self.children_nodes[0].plan.clone(),
-        )?);
-        let new_projection_requires = self
+        let new_child_requirements = self
             .required_columns
             .iter()
-            .map(|col| new_mapping.get(col).cloned().unwrap_or(col.clone()))
+            .flat_map(|column| collect_columns(&projected_exprs[column.index()].0))
+            .collect::<HashSet<_>>();
+        let new_projection_plan = Arc::new(ProjectionExec::try_new(
+            projected_exprs,
+            self.children_nodes[0].plan.clone(),
+        )?);
+
+        let new_projection_requires = self
+            .required_columns
+            .into_iter()
+            .map(|col| new_mapping.remove(&col).unwrap_or(col))
             .collect();
         let mut new_node = ProjectionOptimizer {
             plan: new_projection_plan,
@@ -345,12 +336,7 @@ impl ProjectionOptimizer {
         };
 
         // Since the rule work on the child node now, we need to insert child note requirements here.
-        new_node.children_nodes[0].required_columns = self
-            .required_columns
-            .iter()
-            .flat_map(|column| collect_columns(&projected_exprs[column.index()].0))
-            .collect::<HashSet<_>>();
-
+        new_node.children_nodes[0].required_columns = new_child_requirements;
         Ok(Transformed::Yes(new_node))
     }
 
@@ -406,18 +392,19 @@ impl ProjectionOptimizer {
         let plan = self.plan.clone();
 
         // These plans preserve the input schema, and do not add new requirements.
-        if let Some(coal_b) = plan.as_any().downcast_ref::<CoalesceBatchesExec>() {
-            self = self.try_insert_below_coalesce_batches(coal_b)?;
+        if let Some(coal_batches) = plan.as_any().downcast_ref::<CoalesceBatchesExec>() {
+            self = self.try_insert_below_coalesce_batches(coal_batches)?;
         } else if plan
             .as_any()
             .downcast_ref::<CoalescePartitionsExec>()
             .is_some()
         {
             self = self.try_insert_below_coalesce_partitions()?;
-        } else if let Some(glimit) = plan.as_any().downcast_ref::<GlobalLimitExec>() {
-            self = self.try_insert_below_global_limit(glimit)?;
-        } else if let Some(llimit) = plan.as_any().downcast_ref::<LocalLimitExec>() {
-            self = self.try_insert_below_local_limit(llimit)?;
+        } else if let Some(global_limit) = plan.as_any().downcast_ref::<GlobalLimitExec>()
+        {
+            self = self.try_insert_below_global_limit(global_limit)?;
+        } else if let Some(local_limit) = plan.as_any().downcast_ref::<LocalLimitExec>() {
+            self = self.try_insert_below_local_limit(local_limit)?;
         }
         // These plans also preserve the input schema, but may extend requirements.
         else if let Some(filter) = plan.as_any().downcast_ref::<FilterExec>() {
@@ -427,10 +414,10 @@ impl ProjectionOptimizer {
             self = self.try_insert_below_repartition(repartition)?;
         } else if let Some(sort) = plan.as_any().downcast_ref::<SortExec>() {
             self = self.try_insert_below_sort(sort)?;
-        } else if let Some(sortp_merge) =
+        } else if let Some(sort_merge) =
             plan.as_any().downcast_ref::<SortPreservingMergeExec>()
         {
-            self = self.try_insert_below_sort_preserving_merge(sortp_merge)?;
+            self = self.try_insert_below_sort_preserving_merge(sort_merge)?;
         }
         // Preserves schema and do not change requirements, but have multi-child.
         else if plan.as_any().downcast_ref::<UnionExec>().is_some() {
@@ -513,7 +500,7 @@ impl ProjectionOptimizer {
         coal_batches: &CoalesceBatchesExec,
     ) -> Result<ProjectionOptimizer> {
         // CoalesceBatchesExec does not change requirements. We can directly check whether there is a redundancy.
-        let requirement_map = self.analyze_requirements();
+        let requirement_map = analyze_requirements(&self);
         if all_columns_required(&requirement_map) {
             self.children_nodes[0].required_columns =
                 mem::take(&mut self.required_columns);
@@ -544,7 +531,7 @@ impl ProjectionOptimizer {
     /// * `Result<ProjectionOptimizer>`: The potentially modified `ProjectionOptimizer`.
     fn try_insert_below_coalesce_partitions(mut self) -> Result<ProjectionOptimizer> {
         // CoalescePartitionsExec does not change requirements. We can directly check whether there is a redundancy.
-        let requirement_map = self.analyze_requirements();
+        let requirement_map = analyze_requirements(&self);
         if all_columns_required(&requirement_map) {
             self.children_nodes[0].required_columns =
                 mem::take(&mut self.required_columns);
@@ -577,7 +564,7 @@ impl ProjectionOptimizer {
         global_limit: &GlobalLimitExec,
     ) -> Result<ProjectionOptimizer> {
         // GlobalLimitExec does not change requirements. We can directly check whether there is a redundancy.
-        let requirement_map = self.analyze_requirements();
+        let requirement_map = analyze_requirements(&self);
         if all_columns_required(&requirement_map) {
             // if all_columns_required(&requirement_map) {
             self.children_nodes[0].required_columns =
@@ -611,17 +598,19 @@ impl ProjectionOptimizer {
     /// * `Result<ProjectionOptimizer>`: The updated `ProjectionOptimizer`.
     fn try_insert_below_local_limit(
         mut self,
-        limit: &LocalLimitExec,
+        local_limit: &LocalLimitExec,
     ) -> Result<ProjectionOptimizer> {
         // LocalLimitExec does not change requirements. We can directly check whether there is a redundancy.
-        let requirement_map = self.analyze_requirements();
+        let requirement_map = analyze_requirements(&self);
         if all_columns_required(&requirement_map) {
             self.children_nodes[0].required_columns =
                 mem::take(&mut self.required_columns);
         } else {
             let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
-            let plan =
-                Arc::new(LocalLimitExec::new(new_child.plan.clone(), limit.fetch())) as _;
+            let plan = Arc::new(LocalLimitExec::new(
+                new_child.plan.clone(),
+                local_limit.fetch(),
+            )) as _;
 
             self = ProjectionOptimizer {
                 plan,
@@ -651,7 +640,7 @@ impl ProjectionOptimizer {
         self.required_columns
             .extend(collect_columns(filter.predicate()));
 
-        let requirement_map = self.analyze_requirements();
+        let requirement_map = analyze_requirements(&self);
         if all_columns_required(&requirement_map) {
             self.children_nodes[0].required_columns =
                 mem::take(&mut self.required_columns);
@@ -694,7 +683,7 @@ impl ProjectionOptimizer {
                 .extend(exprs.iter().flat_map(collect_columns));
         }
 
-        let requirement_map = self.analyze_requirements();
+        let requirement_map = analyze_requirements(&self);
         if all_columns_required(&requirement_map) {
             self.children_nodes[0].required_columns =
                 mem::take(&mut self.required_columns);
@@ -738,7 +727,7 @@ impl ProjectionOptimizer {
                 .flat_map(|sort_expr| collect_columns(&sort_expr.expr)),
         );
 
-        let requirement_map = self.analyze_requirements();
+        let requirement_map = analyze_requirements(&self);
         if all_columns_required(&requirement_map) {
             self.children_nodes[0].required_columns =
                 mem::take(&mut self.required_columns);
@@ -774,17 +763,17 @@ impl ProjectionOptimizer {
     /// * `Result<ProjectionOptimizer>`: The modified `ProjectionOptimizer`.
     fn try_insert_below_sort_preserving_merge(
         mut self,
-        sortp_merge: &SortPreservingMergeExec,
+        sort_merge: &SortPreservingMergeExec,
     ) -> Result<ProjectionOptimizer> {
         // SortPreservingMergeExec extends the requirements with the columns in its sort expressions.
         self.required_columns.extend(
-            sortp_merge
+            sort_merge
                 .expr()
                 .iter()
                 .flat_map(|sort_expr| collect_columns(&sort_expr.expr)),
         );
 
-        let requirement_map = self.analyze_requirements();
+        let requirement_map = analyze_requirements(&self);
         if all_columns_required(&requirement_map) {
             self.children_nodes[0].required_columns =
                 mem::take(&mut self.required_columns);
@@ -792,10 +781,10 @@ impl ProjectionOptimizer {
             let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
             // Rewrite the sort expressions with possibly updated column indices.
             let new_sort_exprs =
-                update_sort_expressions(sortp_merge.expr(), &schema_mapping);
+                update_sort_expressions(sort_merge.expr(), &schema_mapping);
             let plan = Arc::new(
                 SortPreservingMergeExec::new(new_sort_exprs, new_child.plan.clone())
-                    .with_fetch(sortp_merge.fetch()),
+                    .with_fetch(sort_merge.fetch()),
             ) as _;
 
             self = ProjectionOptimizer {
@@ -820,7 +809,7 @@ impl ProjectionOptimizer {
     /// * `Result<ProjectionOptimizer>`: The optimized `ProjectionOptimizer` after potentially inserting projection nodes.
     fn try_insert_below_union(mut self) -> Result<ProjectionOptimizer> {
         // UnionExec does not change requirements. We can directly check whether there is a redundancy.
-        let requirement_map = self.analyze_requirements();
+        let requirement_map = analyze_requirements(&self);
         if all_columns_required(&requirement_map) {
             let required_columns = mem::take(&mut self.required_columns);
             self.children_nodes
@@ -853,7 +842,7 @@ impl ProjectionOptimizer {
     /// # Returns
     /// * `Result<ProjectionOptimizer>`: The potentially modified `ProjectionOptimizer` after the optimization process.
     fn try_insert_below_interleave(mut self) -> Result<ProjectionOptimizer> {
-        let requirement_map = self.analyze_requirements();
+        let requirement_map = analyze_requirements(&self);
         if all_columns_required(&requirement_map) {
             let required_columns = mem::take(&mut self.required_columns);
             self.children_nodes
@@ -929,7 +918,7 @@ impl ProjectionOptimizer {
             (false, true) => {
                 let required_columns = self.required_columns.clone();
                 let mut right_child = self.children_nodes.swap_remove(1);
-                let (new_left_child, left_schema_mapping) =
+                let (new_left_child, mut left_schema_mapping) =
                     self.insert_projection_below_left_child(analyzed_join_left)?;
                 right_child.required_columns = required_columns
                     .iter()
@@ -940,7 +929,22 @@ impl ProjectionOptimizer {
                     new_left_child.plan.clone(),
                     right_child.plan.clone(),
                 )) as _;
-
+                let new_left_size = new_left_child.plan.schema().fields().len();
+                left_schema_mapping.extend(
+                    right_child
+                        .plan
+                        .schema()
+                        .fields()
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, field)| {
+                            (
+                                Column::new(field.name(), left_size + idx),
+                                Column::new(field.name(), new_left_size + idx),
+                            )
+                        })
+                        .collect::<HashMap<_, _>>(),
+                );
                 self = ProjectionOptimizer {
                     plan,
                     required_columns: HashSet::new(),
@@ -1067,7 +1071,6 @@ impl ProjectionOptimizer {
                                 analyzed_join_left,
                                 analyzed_join_right,
                             )?;
-
                         let plan = Arc::new(HashJoinExec::try_new(
                             new_left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -1139,8 +1142,8 @@ impl ProjectionOptimizer {
                         }
                     }
                     (true, false) => {
-                        let mut left_child = self.children_nodes.swap_remove(0);
                         let required_columns = self.required_columns.clone();
+                        let mut left_child = self.children_nodes.swap_remove(0);
                         let new_on = update_equivalence_conditions(
                             hj.on(),
                             &HashMap::new(),
@@ -1167,7 +1170,6 @@ impl ProjectionOptimizer {
                             .filter(|col| col.index() < left_size)
                             .cloned()
                             .collect();
-
                         let plan = Arc::new(HashJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -1261,7 +1263,6 @@ impl ProjectionOptimizer {
                             &HashMap::new(),
                             &analyzed_join_right,
                         );
-
                         let (new_right_child, right_schema_mapping) = self
                             .insert_projection_below_right_child(analyzed_join_right)?;
 
@@ -1310,6 +1311,16 @@ impl ProjectionOptimizer {
     ) -> Result<ProjectionOptimizer> {
         let left_size = nlj.left().schema().fields().len();
         // NestedLoopJoinExec extends the requirements with the columns in its equivalence and non-equivalence conditions.
+        match nlj.join_type() {
+            JoinType::RightAnti | JoinType::RightSemi => {
+                self.required_columns = self
+                    .required_columns
+                    .into_iter()
+                    .map(|col| Column::new(col.name(), col.index() + left_size))
+                    .collect()
+            }
+            _ => {}
+        }
         self.required_columns
             .extend(collect_columns_in_join_conditions(
                 &[],
@@ -1459,11 +1470,9 @@ impl ProjectionOptimizer {
                             &analyzed_join_left,
                             &HashMap::new(),
                         );
-                        let (new_left_child, left_schema_mapping) = self
-                            .insert_projection_below_single_child(
-                                analyzed_join_left,
-                                0,
-                            )?;
+                        let (new_left_child, left_schema_mapping) =
+                            self.insert_projection_below_left_child(analyzed_join_left)?;
+
                         let plan = Arc::new(NestedLoopJoinExec::try_new(
                             new_left_child.plan.clone(),
                             right_child.plan.clone(),
@@ -1507,6 +1516,7 @@ impl ProjectionOptimizer {
                         );
                         let (new_right_child, right_schema_mapping) = self
                             .insert_projection_below_right_child(analyzed_join_right)?;
+
                         let plan = Arc::new(NestedLoopJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -1549,6 +1559,16 @@ impl ProjectionOptimizer {
     ) -> Result<ProjectionOptimizer> {
         let left_size = smj.left().schema().fields().len();
         // SortMergeJoin extends the requirements with the columns in its equivalence and non-equivalence conditions.
+        match smj.join_type() {
+            JoinType::RightAnti | JoinType::RightSemi => {
+                self.required_columns = self
+                    .required_columns
+                    .into_iter()
+                    .map(|col| Column::new(col.name(), col.index() + left_size))
+                    .collect()
+            }
+            _ => {}
+        }
         self.required_columns
             .extend(collect_columns_in_join_conditions(
                 smj.on(),
@@ -1606,7 +1626,8 @@ impl ProjectionOptimizer {
                         }
                     }
                     (false, true) => {
-                        let right_child = self.children_nodes.swap_remove(1);
+                        let required_columns = self.required_columns.clone();
+                        let mut right_child = self.children_nodes.swap_remove(1);
                         let new_on = update_equivalence_conditions(
                             smj.on(),
                             &analyzed_join_left,
@@ -1617,11 +1638,13 @@ impl ProjectionOptimizer {
                             &analyzed_join_right,
                             &HashMap::new(),
                         );
-                        let (new_left_child, left_schema_mapping) = self
-                            .insert_projection_below_single_child(
-                                analyzed_join_left,
-                                0,
-                            )?;
+                        let (new_left_child, mut left_schema_mapping) =
+                            self.insert_projection_below_left_child(analyzed_join_left)?;
+                        right_child.required_columns = required_columns
+                            .iter()
+                            .filter(|col| col.index() >= left_size)
+                            .map(|col| Column::new(col.name(), col.index() - left_size))
+                            .collect();
                         let plan = Arc::new(SortMergeJoinExec::try_new(
                             new_left_child.plan.clone(),
                             right_child.plan.clone(),
@@ -1631,7 +1654,22 @@ impl ProjectionOptimizer {
                             smj.sort_options.clone(),
                             smj.null_equals_null,
                         )?) as _;
-
+                        let new_left_size = new_left_child.plan.schema().fields().len();
+                        left_schema_mapping.extend(
+                            right_child
+                                .plan
+                                .schema()
+                                .fields()
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, field)| {
+                                    (
+                                        Column::new(field.name(), left_size + idx),
+                                        Column::new(field.name(), new_left_size + idx),
+                                    )
+                                })
+                                .collect::<HashMap<_, _>>(),
+                        );
                         self = ProjectionOptimizer {
                             plan,
                             required_columns: HashSet::new(),
@@ -1640,7 +1678,8 @@ impl ProjectionOptimizer {
                         }
                     }
                     (true, false) => {
-                        let left_child = self.children_nodes.swap_remove(0);
+                        let required_columns = self.required_columns.clone();
+                        let mut left_child = self.children_nodes.swap_remove(0);
                         let new_on = update_equivalence_conditions(
                             smj.on(),
                             &HashMap::new(),
@@ -1651,8 +1690,22 @@ impl ProjectionOptimizer {
                             &HashMap::new(),
                             &analyzed_join_right,
                         );
-                        let (new_right_child, right_schema_mapping) = self
+                        let (new_right_child, mut right_schema_mapping) = self
                             .insert_projection_below_right_child(analyzed_join_right)?;
+                        right_schema_mapping = right_schema_mapping
+                            .into_iter()
+                            .map(|(old, new)| {
+                                (
+                                    Column::new(old.name(), old.index() + left_size),
+                                    Column::new(new.name(), new.index() + left_size),
+                                )
+                            })
+                            .collect();
+                        left_child.required_columns = required_columns
+                            .iter()
+                            .filter(|col| col.index() < left_size)
+                            .cloned()
+                            .collect();
                         let plan = Arc::new(SortMergeJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -1693,11 +1746,9 @@ impl ProjectionOptimizer {
                             &analyzed_join_left,
                             &HashMap::new(),
                         );
-                        let (new_left_child, left_schema_mapping) = self
-                            .insert_projection_below_single_child(
-                                analyzed_join_left,
-                                0,
-                            )?;
+                        let (new_left_child, left_schema_mapping) =
+                            self.insert_projection_below_left_child(analyzed_join_left)?;
+
                         let plan = Arc::new(SortMergeJoinExec::try_new(
                             new_left_child.plan.clone(),
                             right_child.plan.clone(),
@@ -1749,6 +1800,7 @@ impl ProjectionOptimizer {
                         );
                         let (new_right_child, right_schema_mapping) = self
                             .insert_projection_below_right_child(analyzed_join_right)?;
+
                         let plan = Arc::new(SortMergeJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -1794,6 +1846,16 @@ impl ProjectionOptimizer {
     ) -> Result<ProjectionOptimizer> {
         let left_size = shj.left().schema().fields().len();
         // SymmetricHashJoinExec extends the requirements with the columns in its equivalence and non-equivalence conditions.
+        match shj.join_type() {
+            JoinType::RightAnti | JoinType::RightSemi => {
+                self.required_columns = self
+                    .required_columns
+                    .into_iter()
+                    .map(|col| Column::new(col.name(), col.index() + left_size))
+                    .collect()
+            }
+            _ => {}
+        }
         self.required_columns
             .extend(collect_columns_in_join_conditions(
                 shj.on(),
@@ -1855,7 +1917,8 @@ impl ProjectionOptimizer {
                         }
                     }
                     (false, true) => {
-                        let right_child = self.children_nodes.swap_remove(1);
+                        let required_columns = self.required_columns.clone();
+                        let mut right_child = self.children_nodes.swap_remove(1);
                         let new_on = update_equivalence_conditions(
                             shj.on(),
                             &analyzed_join_left,
@@ -1866,11 +1929,13 @@ impl ProjectionOptimizer {
                             &analyzed_join_right,
                             &HashMap::new(),
                         );
-                        let (new_left_child, left_schema_mapping) = self
-                            .insert_projection_below_single_child(
-                                analyzed_join_left,
-                                0,
-                            )?;
+                        let (new_left_child, mut left_schema_mapping) =
+                            self.insert_projection_below_left_child(analyzed_join_left)?;
+                        right_child.required_columns = required_columns
+                            .iter()
+                            .filter(|col| col.index() >= left_size)
+                            .map(|col| Column::new(col.name(), col.index() - left_size))
+                            .collect();
                         let plan = Arc::new(SymmetricHashJoinExec::try_new(
                             new_left_child.plan.clone(),
                             right_child.plan.clone(),
@@ -1882,7 +1947,22 @@ impl ProjectionOptimizer {
                             shj.right_sort_exprs().map(|exprs| exprs.to_vec()),
                             shj.partition_mode(),
                         )?) as _;
-
+                        let new_left_size = new_left_child.plan.schema().fields().len();
+                        left_schema_mapping.extend(
+                            right_child
+                                .plan
+                                .schema()
+                                .fields()
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, field)| {
+                                    (
+                                        Column::new(field.name(), left_size + idx),
+                                        Column::new(field.name(), new_left_size + idx),
+                                    )
+                                })
+                                .collect::<HashMap<_, _>>(),
+                        );
                         self = ProjectionOptimizer {
                             plan,
                             required_columns: HashSet::new(),
@@ -1891,7 +1971,8 @@ impl ProjectionOptimizer {
                         }
                     }
                     (true, false) => {
-                        let left_child = self.children_nodes.swap_remove(0);
+                        let required_columns = self.required_columns.clone();
+                        let mut left_child = self.children_nodes.swap_remove(0);
                         let new_on = update_equivalence_conditions(
                             shj.on(),
                             &HashMap::new(),
@@ -1902,8 +1983,22 @@ impl ProjectionOptimizer {
                             &HashMap::new(),
                             &analyzed_join_right,
                         );
-                        let (new_right_child, right_schema_mapping) = self
+                        let (new_right_child, mut right_schema_mapping) = self
                             .insert_projection_below_right_child(analyzed_join_right)?;
+                        right_schema_mapping = right_schema_mapping
+                            .into_iter()
+                            .map(|(old, new)| {
+                                (
+                                    Column::new(old.name(), old.index() + left_size),
+                                    Column::new(new.name(), new.index() + left_size),
+                                )
+                            })
+                            .collect();
+                        left_child.required_columns = required_columns
+                            .iter()
+                            .filter(|col| col.index() < left_size)
+                            .cloned()
+                            .collect();
                         let plan = Arc::new(SymmetricHashJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -1946,11 +2041,9 @@ impl ProjectionOptimizer {
                             &analyzed_join_left,
                             &HashMap::new(),
                         );
-                        let (new_left_child, left_schema_mapping) = self
-                            .insert_projection_below_single_child(
-                                analyzed_join_left,
-                                0,
-                            )?;
+                        let (new_left_child, left_schema_mapping) =
+                            self.insert_projection_below_left_child(analyzed_join_left)?;
+
                         let plan = Arc::new(SymmetricHashJoinExec::try_new(
                             new_left_child.plan.clone(),
                             right_child.plan.clone(),
@@ -2004,6 +2097,7 @@ impl ProjectionOptimizer {
                         );
                         let (new_right_child, right_schema_mapping) = self
                             .insert_projection_below_right_child(analyzed_join_right)?;
+
                         let plan = Arc::new(SymmetricHashJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -2185,7 +2279,7 @@ impl ProjectionOptimizer {
             }));
         self.required_columns
             .extend(w_agg.partition_keys.iter().flat_map(collect_columns));
-        let requirement_map = self.analyze_requirements();
+        let requirement_map = analyze_requirements(&self);
         if !all_columns_required(&requirement_map) {
             if window_agg_required(
                 w_agg.input().schema().fields().len(),
@@ -2292,7 +2386,7 @@ impl ProjectionOptimizer {
             }));
         self.required_columns
             .extend(bw_agg.partition_keys.iter().flat_map(collect_columns));
-        let requirement_map = self.analyze_requirements();
+        let requirement_map = analyze_requirements(&self);
         if !all_columns_required(&requirement_map) {
             if window_agg_required(
                 bw_agg.input().schema().fields().len(),
@@ -2384,18 +2478,6 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
-    /// Compares the required and existing columns in the node, and maps them accordingly. Caller side must
-    /// ensure that the node extends its own requirements if the node's plan can introduce new requirements.
-    fn analyze_requirements(&self) -> ColumnRequirements {
-        let mut requirement_map = HashMap::new();
-        let columns_in_schema = collect_columns_in_plan_schema(&self.plan);
-        columns_in_schema.into_iter().for_each(|col| {
-            let contains = self.required_columns.contains(&col);
-            requirement_map.insert(col, contains);
-        });
-        requirement_map
-    }
-
     /// If a node is known to have redundant columns, we need to insert a projection to its input.
     /// This function takes this node and requirement mapping of this node. Then, defines the projection
     /// and constructs the new subtree. The returned objects are the new tree starting from the inserted
@@ -2470,32 +2552,6 @@ impl ProjectionOptimizer {
             })
             .collect();
         Ok((inserted_projection_nodes, new_mapping))
-    }
-
-    /// Single child version of `insert_projection` for joins.
-    fn insert_projection_below_single_child(
-        mut self,
-        requirement_map_left: ColumnRequirements,
-        children_index: usize,
-    ) -> Result<(Self, HashMap<Column, Column>)> {
-        // During the iteration, we construct the ProjectionExec with required columns as the new child,
-        // and also collect the unused columns to store the index changes after removal of some columns.
-        let (used_columns, unused_columns) =
-            split_column_requirements(&requirement_map_left);
-        let child_plan = self.plan.children().remove(children_index);
-        let new_mapping = calculate_column_mapping(&used_columns, &unused_columns);
-        let projected_exprs = convert_projection_exprs(used_columns);
-        let inserted_projection =
-            Arc::new(ProjectionExec::try_new(projected_exprs, child_plan)?) as _;
-
-        let required_columns = collect_columns_in_plan_schema(&inserted_projection);
-        let inserted_projection = ProjectionOptimizer {
-            plan: inserted_projection,
-            required_columns,
-            schema_mapping: HashMap::new(),
-            children_nodes: vec![self.children_nodes.swap_remove(children_index)],
-        };
-        Ok((inserted_projection, new_mapping))
     }
 
     /// Single child version of `insert_projection` for joins.
@@ -2741,7 +2797,7 @@ impl ProjectionOptimizer {
                         .map(|child| child.plan.clone())
                         .collect(),
                 )?;
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(_coal_parts) =
                 plan_any.downcast_ref::<CoalescePartitionsExec>()
             {
@@ -2751,7 +2807,7 @@ impl ProjectionOptimizer {
                         .map(|child| child.plan.clone())
                         .collect(),
                 )?;
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(_glimit) = plan_any.downcast_ref::<GlobalLimitExec>() {
                 self.plan = self.plan.with_new_children(
                     self.children_nodes
@@ -2759,7 +2815,7 @@ impl ProjectionOptimizer {
                         .map(|child| child.plan.clone())
                         .collect(),
                 )?;
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(_llimit) = plan_any.downcast_ref::<LocalLimitExec>() {
                 self.plan = self.plan.with_new_children(
                     self.children_nodes
@@ -2767,7 +2823,7 @@ impl ProjectionOptimizer {
                         .map(|child| child.plan.clone())
                         .collect(),
                 )?;
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(_union) = plan_any.downcast_ref::<UnionExec>() {
                 self.plan = self.plan.with_new_children(
                     self.children_nodes
@@ -2775,7 +2831,7 @@ impl ProjectionOptimizer {
                         .map(|child| child.plan.clone())
                         .collect(),
                 )?;
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(_union) = plan_any.downcast_ref::<InterleaveExec>() {
                 self.plan = self.plan.with_new_children(
                     self.children_nodes
@@ -2783,7 +2839,7 @@ impl ProjectionOptimizer {
                         .map(|child| child.plan.clone())
                         .collect(),
                 )?;
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(_cj) = plan_any.downcast_ref::<CrossJoinExec>() {
                 self.plan = self.plan.with_new_children(
                     self.children_nodes
@@ -2791,7 +2847,7 @@ impl ProjectionOptimizer {
                         .map(|child| child.plan.clone())
                         .collect(),
                 )?;
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(projection) = plan_any.downcast_ref::<ProjectionExec>() {
                 self.plan = rewrite_projection(
                     projection,
@@ -2806,21 +2862,21 @@ impl ProjectionOptimizer {
                     self.children_nodes[0].plan.clone(),
                     &all_mappings[0],
                 )?;
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(repartition) = plan_any.downcast_ref::<RepartitionExec>() {
                 self.plan = rewrite_repartition(
                     repartition.partitioning(),
                     self.children_nodes[0].plan.clone(),
                     &all_mappings[0],
                 )?;
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(sort) = plan_any.downcast_ref::<SortExec>() {
                 self.plan = rewrite_sort(
                     sort,
                     self.children_nodes[0].plan.clone(),
                     &all_mappings[0],
                 )?;
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(sortp_merge) =
                 plan_any.downcast_ref::<SortPreservingMergeExec>()
             {
@@ -2829,7 +2885,7 @@ impl ProjectionOptimizer {
                     self.children_nodes[0].plan.clone(),
                     &all_mappings[0],
                 )?;
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(hj) = plan_any.downcast_ref::<HashJoinExec>() {
                 let left_size = self.children_nodes[0].plan.schema().fields().len();
                 let left_mapping = all_mappings.swap_remove(0);
@@ -2872,7 +2928,7 @@ impl ProjectionOptimizer {
                     }
                 };
                 // self.schema_mapping  = all_mappings;
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(nlj) = plan_any.downcast_ref::<NestedLoopJoinExec>() {
                 let left_size = self.children_nodes[0].plan.schema().fields().len();
                 let left_mapping = all_mappings.swap_remove(0);
@@ -2914,7 +2970,7 @@ impl ProjectionOptimizer {
                         all_mappings.push(right_mapping)
                     }
                 };
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(smj) = plan_any.downcast_ref::<SortMergeJoinExec>() {
                 let left_size = self.children_nodes[0].plan.schema().fields().len();
                 let left_mapping = all_mappings.swap_remove(0);
@@ -2945,7 +3001,7 @@ impl ProjectionOptimizer {
                     JoinType::LeftSemi | JoinType::LeftAnti => left_mapping,
                     JoinType::RightAnti | JoinType::RightSemi => right_mapping,
                 };
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(shj) = plan_any.downcast_ref::<SymmetricHashJoinExec>() {
                 let left_size = self.children_nodes[0].plan.schema().fields().len();
                 let left_mapping = all_mappings.swap_remove(0);
@@ -2976,7 +3032,7 @@ impl ProjectionOptimizer {
                     JoinType::LeftSemi | JoinType::LeftAnti => left_mapping,
                     JoinType::RightAnti | JoinType::RightSemi => right_mapping,
                 };
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(agg) = plan_any.downcast_ref::<AggregateExec>() {
                 if agg.aggr_expr().iter().any(|expr| {
                     expr.clone()
@@ -3006,7 +3062,7 @@ impl ProjectionOptimizer {
                 } else {
                     return Ok(Transformed::No(self));
                 };
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(bw_agg) = plan_any.downcast_ref::<BoundedWindowAggExec>() {
                 self.plan = if let Some(updated) = rewrite_bounded_window_aggregate(
                     bw_agg,
@@ -3017,7 +3073,7 @@ impl ProjectionOptimizer {
                 } else {
                     return Ok(Transformed::No(self));
                 };
-                self.update_mapping(all_mappings)
+                update_mapping(&mut self, all_mappings)
             } else if let Some(_file_sink) = plan_any.downcast_ref::<FileSinkExec>() {
                 let mapped_exprs =
                     all_mappings.swap_remove(0).into_iter().collect::<Vec<_>>();
@@ -3069,24 +3125,6 @@ impl ProjectionOptimizer {
         }
 
         Ok(Transformed::Yes(self))
-    }
-
-    fn update_mapping(&mut self, mut child_mappings: Vec<HashMap<Column, Column>>) {
-        if self.schema_mapping.is_empty() {
-            self.schema_mapping = child_mappings.swap_remove(0);
-        } else {
-            let child_map = child_mappings.swap_remove(0);
-            self.schema_mapping = self
-                .schema_mapping
-                .iter()
-                .map(|(initial, new)| {
-                    (
-                        initial.clone(),
-                        child_map.get(new).cloned().unwrap_or(new.clone()),
-                    )
-                })
-                .collect()
-        }
     }
 
     /// After the top-down pass, there may be some unnecessary projections surviving
@@ -3344,6 +3382,18 @@ fn satisfy_initial_schema(
     }
 }
 
+/// Compares the required and existing columns in the node, and maps them accordingly. Caller side must
+/// ensure that the node extends its own requirements if the node's plan can introduce new requirements.
+fn analyze_requirements(node: &ProjectionOptimizer) -> ColumnRequirements {
+    let mut requirement_map = HashMap::new();
+    let columns_in_schema = collect_columns_in_plan_schema(&node.plan);
+    columns_in_schema.into_iter().for_each(|col| {
+        let contains = node.required_columns.contains(&col);
+        requirement_map.insert(col, contains);
+    });
+    requirement_map
+}
+
 fn preserve_requirements(po: ProjectionOptimizer) -> Result<ProjectionOptimizer> {
     if po.schema_mapping.is_empty() {
         // The initial schema is already satisfied, no further action required.
@@ -3461,6 +3511,29 @@ fn collect_alias_free_columns(
 /// ensure that all expressions are `Column` expressions without aliases.
 fn new_projections_for_columns(projection: &[Column], source: &[usize]) -> Vec<usize> {
     projection.iter().map(|col| source[col.index()]).collect()
+}
+
+/// Filters the expressions of a [`ProjectionExec`] according to the given used column indices.
+fn filter_unused_columns(
+    projection_exprs: &[(Arc<dyn PhysicalExpr>, String)],
+    used_columns: &HashSet<Column>,
+) -> Vec<(Arc<dyn PhysicalExpr>, String)> {
+    projection_exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (expr, alias))| {
+            if used_columns
+                .iter()
+                .map(|column| column.index())
+                .collect::<Vec<_>>()
+                .contains(&idx)
+            {
+                Some((expr.clone(), alias.clone()))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
 }
 
 /// When a field in a schema is decided to be redundant and planned to be dropped
@@ -3796,6 +3869,27 @@ fn update_non_equivalence_conditions(
             filter.schema().clone(),
         )
     })
+}
+
+fn update_mapping(
+    node: &mut ProjectionOptimizer,
+    mut child_mappings: Vec<HashMap<Column, Column>>,
+) {
+    if node.schema_mapping.is_empty() {
+        node.schema_mapping = child_mappings.swap_remove(0);
+    } else {
+        let child_map = child_mappings.swap_remove(0);
+        node.schema_mapping = node
+            .schema_mapping
+            .iter()
+            .map(|(initial, new)| {
+                (
+                    initial.clone(),
+                    child_map.get(new).cloned().unwrap_or(new.clone()),
+                )
+            })
+            .collect()
+    }
 }
 
 /// Collects all fields of a schema from a given execution plan and converts them into a [`HashSet`] of [`Column`].
