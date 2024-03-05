@@ -63,7 +63,9 @@ use crate::physical_plan::ExecutionPlan;
 
 use arrow_schema::SchemaRef;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::{Transformed, TreeNode, VisitRecursion};
+use datafusion_common::tree_node::{
+    ConcreteTreeNode, Transformed, TreeNode, TreeNodeRecursion,
+};
 use datafusion_common::{JoinSide, JoinType};
 use datafusion_physical_expr::expressions::{Column, Literal};
 use datafusion_physical_expr::utils::collect_columns;
@@ -159,40 +161,40 @@ impl ProjectionOptimizer {
         // We first need to check having 2 sequential projections in case of merging them.
         if projection_input.as_any().is::<ProjectionExec>() {
             self = match self.try_unifying_projections()? {
-                Transformed::Yes(unified_plans) => {
+                unified_plans if unified_plans.transformed => {
                     // We need to re-run the rule on the new node since it may need further optimizations.
                     // There may be 3 sequential projections, or the unified node may also be removed or narrowed.
-                    return unified_plans.optimize_projections();
+                    return unified_plans.data.optimize_projections();
                 }
-                Transformed::No(no_change) => no_change,
+                no_change => no_change.data,
             };
         }
 
         // The projection can be removed. To avoid making unnecessary operations,
         // try_remove should be called before try_narrow.
         self = match self.try_remove_projection()? {
-            Transformed::Yes(removed) => {
+            removed if removed.transformed => {
                 // We need to re-run the rule on the current node. It is
                 // a new plan node and may need optimizations for sure.
-                return removed.adjust_node_with_requirements();
+                return removed.data.adjust_node_with_requirements();
             }
-            Transformed::No(no_change) => no_change,
+            no_change => no_change.data,
         };
 
         // The projection can get narrower.
         self = match self.try_narrow_projection()? {
-            Transformed::Yes(narrowed) => {
+            narrowed if narrowed.transformed => {
                 // We need to re-run the rule on the new node since it may be removed within the source provider.
-                return narrowed.optimize_projections();
+                return narrowed.data.optimize_projections();
             }
-            Transformed::No(no_change) => no_change,
+            no_change => no_change.data,
         };
 
         // Source providers:
         if projection_input.as_any().is::<CsvExec>() {
             self = match self.try_projected_csv() {
-                Transformed::Yes(new_csv) => return Ok(new_csv),
-                Transformed::No(no_change) => no_change,
+                new_csv if new_csv.transformed => return Ok(new_csv.data),
+                no_change => no_change.data,
             }
         }
         // TODO: Other source execs can be implemented here if projection can be applied within the scope of them.
@@ -218,18 +220,18 @@ impl ProjectionOptimizer {
     fn try_unifying_projections(mut self) -> Result<Transformed<Self>> {
         // These are known to be a ProjectionExec.
         let Some(projection) = self.plan.as_any().downcast_ref::<ProjectionExec>() else {
-            return Ok(Transformed::No(self));
+            return Ok(Transformed::no(self));
         };
         let Some(child_projection) = self.children_nodes[0]
             .plan
             .as_any()
             .downcast_ref::<ProjectionExec>()
         else {
-            return Ok(Transformed::No(self));
+            return Ok(Transformed::no(self));
         };
         // Projection can be beneficial if it caches any computation which are used more than once.
         if caching_projections(projection, child_projection)? {
-            return Ok(Transformed::No(self));
+            return Ok(Transformed::no(self));
         }
 
         let mut projected_exprs = vec![];
@@ -237,7 +239,7 @@ impl ProjectionOptimizer {
             let Some(expr) =
                 update_expr_with_projection(expr, child_projection.expr(), true)?
             else {
-                return Ok(Transformed::No(self));
+                return Ok(Transformed::no(self));
             };
             projected_exprs.push((expr, alias.clone()));
         }
@@ -245,7 +247,7 @@ impl ProjectionOptimizer {
         let new_plan =
             ProjectionExec::try_new(projected_exprs, child_projection.input().clone())
                 .map(|e| Arc::new(e) as _)?;
-        Ok(Transformed::Yes(Self {
+        Ok(Transformed::yes(Self {
             plan: new_plan,
             // Schema of the projection does not change,
             // so no need any update on state variables.
@@ -263,12 +265,12 @@ impl ProjectionOptimizer {
         // It must be a projection
         let Some(projection_exec) = self.plan.as_any().downcast_ref::<ProjectionExec>()
         else {
-            return Ok(Transformed::No(self));
+            return Ok(Transformed::no(self));
         };
         // The projection must have all column expressions without aliases.
         let Some(projection_columns) = collect_alias_free_columns(projection_exec.expr())
         else {
-            return Ok(Transformed::No(self));
+            return Ok(Transformed::no(self));
         };
 
         // Input requirements of the projection in terms of projection's parent requirements:
@@ -283,14 +285,14 @@ impl ProjectionOptimizer {
                 &projection_columns,
             );
             let new_current_node = self.children_nodes.swap_remove(0);
-            Ok(Transformed::Yes(ProjectionOptimizer {
+            Ok(Transformed::yes(ProjectionOptimizer {
                 plan: new_current_node.plan,
                 required_columns: projection_requires,
                 schema_mapping,
                 children_nodes: new_current_node.children_nodes,
             }))
         } else {
-            Ok(Transformed::No(self))
+            Ok(Transformed::no(self))
         }
     }
 
@@ -300,17 +302,16 @@ impl ProjectionOptimizer {
         // It must be a projection.
         let Some(projection_exec) = self.plan.as_any().downcast_ref::<ProjectionExec>()
         else {
-            return Ok(Transformed::No(self));
+            return Ok(Transformed::no(self));
         };
 
         let requirement_map = analyze_requirements(&self);
         let (used_columns, unused_columns) = split_column_requirements(&requirement_map);
         if unused_columns.is_empty() {
             // All projected items are used.
-            return Ok(Transformed::No(self));
+            return Ok(Transformed::no(self));
         }
-        let projected_exprs =
-            filter_unused_columns(projection_exec.expr(), &used_columns);
+        let projected_exprs = collect_used_columns(projection_exec.expr(), &used_columns);
         let mut new_mapping =
             calculate_column_mapping(&self.required_columns, &unused_columns);
 
@@ -325,7 +326,7 @@ impl ProjectionOptimizer {
             .map(|col| new_mapping.remove(&col).unwrap_or(col))
             .collect();
 
-        Ok(Transformed::Yes(ProjectionOptimizer {
+        Ok(Transformed::yes(ProjectionOptimizer {
             plan: new_projection_plan,
             required_columns: new_projection_requires,
             schema_mapping: new_mapping,
@@ -337,16 +338,16 @@ impl ProjectionOptimizer {
     fn try_projected_csv(self) -> Transformed<ProjectionOptimizer> {
         // These plans are known.
         let Some(projection) = self.plan.as_any().downcast_ref::<ProjectionExec>() else {
-            return Transformed::No(self);
+            return Transformed::no(self);
         };
         let Some(csv) = projection.input().as_any().downcast_ref::<CsvExec>() else {
-            return Transformed::No(self);
+            return Transformed::no(self);
         };
         // If there is any non-column or alias-carrier expression, Projection should not be removed.
         // This process can be moved into CsvExec, but it could be a conflict of their responsibility.
         let Some(projection_columns) = collect_alias_free_columns(projection.expr())
         else {
-            return Transformed::No(self);
+            return Transformed::no(self);
         };
 
         let mut file_scan = csv.base_config().clone();
@@ -360,7 +361,7 @@ impl ProjectionOptimizer {
 
         file_scan.projection = Some(new_projections);
 
-        Transformed::Yes(ProjectionOptimizer {
+        Transformed::yes(ProjectionOptimizer {
             plan: Arc::new(CsvExec::new(
                 file_scan,
                 csv.has_header(),
@@ -947,7 +948,7 @@ impl ProjectionOptimizer {
                     update_right_mapping(right_schema_mapping, left_size);
 
                 left_child.required_columns =
-                    filter_left_requirements(required_columns, left_size);
+                    collect_left_used_columns(required_columns, left_size);
 
                 let plan = Arc::new(CrossJoinExec::new(
                     left_child.plan.clone(),
@@ -1127,7 +1128,7 @@ impl ProjectionOptimizer {
                             update_right_mapping(right_schema_mapping, left_size);
 
                         left_child.required_columns =
-                            filter_left_requirements(required_columns, left_size);
+                            collect_left_used_columns(required_columns, left_size);
 
                         let plan = Arc::new(HashJoinExec::try_new(
                             left_child.plan.clone(),
@@ -1375,7 +1376,7 @@ impl ProjectionOptimizer {
                             update_right_mapping(right_schema_mapping, left_size);
 
                         left_child.required_columns =
-                            filter_left_requirements(required_columns, left_size);
+                            collect_left_used_columns(required_columns, left_size);
 
                         let plan = Arc::new(NestedLoopJoinExec::try_new(
                             left_child.plan.clone(),
@@ -1623,7 +1624,7 @@ impl ProjectionOptimizer {
                             update_right_mapping(right_schema_mapping, left_size);
 
                         left_child.required_columns =
-                            filter_left_requirements(required_columns, left_size);
+                            collect_left_used_columns(required_columns, left_size);
 
                         let plan = Arc::new(SortMergeJoinExec::try_new(
                             left_child.plan.clone(),
@@ -1903,7 +1904,7 @@ impl ProjectionOptimizer {
                             update_right_mapping(right_schema_mapping, left_size);
 
                         left_child.required_columns =
-                            filter_left_requirements(required_columns, left_size);
+                            collect_left_used_columns(required_columns, left_size);
                         let plan = Arc::new(SymmetricHashJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -2811,7 +2812,6 @@ impl ProjectionOptimizer {
                     self.children_nodes[1].plan.clone(),
                     &left_mapping,
                     &right_mapping,
-                    left_size,
                 )?;
                 match hj.join_type() {
                     JoinType::Right
@@ -2968,7 +2968,7 @@ impl ProjectionOptimizer {
                         && !self.children_nodes[0].schema_mapping.is_empty()
                 }) {
                     self = preserve_requirements(self)?;
-                    return Ok(Transformed::No(self));
+                    return Ok(Transformed::no(self));
                 }
                 self.plan = if let Some(updated) = rewrite_aggregate(
                     agg,
@@ -2977,7 +2977,7 @@ impl ProjectionOptimizer {
                 )? {
                     updated
                 } else {
-                    return Ok(Transformed::No(self));
+                    return Ok(Transformed::no(self));
                 };
             } else if let Some(w_agg) = plan_any.downcast_ref::<WindowAggExec>() {
                 self.plan = if let Some(updated) = rewrite_window_aggregate(
@@ -2987,7 +2987,7 @@ impl ProjectionOptimizer {
                 )? {
                     updated
                 } else {
-                    return Ok(Transformed::No(self));
+                    return Ok(Transformed::no(self));
                 };
                 update_mapping(&mut self, all_mappings)
             } else if let Some(bw_agg) = plan_any.downcast_ref::<BoundedWindowAggExec>() {
@@ -2998,7 +2998,7 @@ impl ProjectionOptimizer {
                 )? {
                     updated
                 } else {
-                    return Ok(Transformed::No(self));
+                    return Ok(Transformed::no(self));
                 };
                 update_mapping(&mut self, all_mappings)
             } else if let Some(_file_sink) = plan_any.downcast_ref::<FileSinkExec>() {
@@ -3051,7 +3051,7 @@ impl ProjectionOptimizer {
             )?;
         }
 
-        Ok(Transformed::Yes(self))
+        Ok(Transformed::yes(self))
     }
 
     /// After the top-down pass, there may be some unnecessary projections surviving
@@ -3121,51 +3121,155 @@ impl ProjectionOptimizer {
     }
 }
 
-impl TreeNode for ProjectionOptimizer {
-    fn apply_children<F>(&self, op: &mut F) -> Result<VisitRecursion>
-    where
-        F: FnMut(&Self) -> Result<VisitRecursion>,
-    {
-        for child in &self.children_nodes {
-            match op(child)? {
-                VisitRecursion::Continue => {}
-                VisitRecursion::Skip => return Ok(VisitRecursion::Continue),
-                VisitRecursion::Stop => return Ok(VisitRecursion::Stop),
-            }
-        }
-        Ok(VisitRecursion::Continue)
+impl ConcreteTreeNode for ProjectionOptimizer {
+    fn children(&self) -> Vec<&Self> {
+        self.children_nodes.iter().collect_vec()
     }
 
-    fn map_children<F>(mut self, transform: F) -> Result<Self>
-    where
-        F: FnMut(Self) -> Result<Self>,
-    {
-        if self.children_nodes.is_empty() {
-            Ok(self)
-        } else {
-            self.children_nodes = self
-                .children_nodes
-                .into_iter()
-                .map(transform)
-                .collect::<Result<Vec<_>>>()?;
+    fn take_children(mut self) -> (Self, Vec<Self>) {
+        let children = mem::take(&mut self.children_nodes);
+        (self, children)
+    }
 
-            self = match self.index_updater()? {
-                Transformed::Yes(updated) => updated,
-                Transformed::No(not_rewritable) => {
-                    ProjectionOptimizer::new_default(not_rewritable.plan)
+    fn with_new_children(mut self, children: Vec<Self>) -> Result<Self> {
+        self.children_nodes = children;
+        self = match self.index_updater()? {
+            new_node if new_node.transformed => new_node.data,
+            same_node => ProjectionOptimizer::new_default(same_node.data.plan),
+        };
+
+        // After the top-down pass, there may be some unnecessary projections surviving
+        // since they assumes themselves as necessary when they are analyzed, but after
+        // some optimizations below, they may become unnecessary. This check is done
+        // here, and if the projection is regarded as unnecessary, the removal would
+        // set a new the mapping on the new node, which is the child of the projection.
+        self = self.try_remove_projection_bottom_up()?;
+
+        Ok(self)
+    }
+}
+
+#[derive(Default)]
+pub struct OptimizeProjections {}
+
+impl OptimizeProjections {
+    #[allow(missing_docs)]
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl PhysicalOptimizerRule for OptimizeProjections {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        _config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        // Collect initial columns requirements from the plan's schema.
+        let initial_requirements = collect_columns_in_plan_schema(&plan);
+        let mut optimizer = ProjectionOptimizer::new_default(plan);
+
+        // Insert the initial requirements to the root node, and run the rule.
+        optimizer.required_columns = initial_requirements.clone();
+        let mut optimized = optimizer.transform_down(&|o| {
+            o.adjust_node_with_requirements().map(Transformed::yes)
+        })?;
+
+        // When some projections are removed after the rule, we know that all columns of
+        // the initial schema still exist, but their order may be changed. Ensure the final
+        // optimized plan satisfies the initial schema order.
+        optimized = optimized
+            .map_data(|node| satisfy_initial_schema(node, initial_requirements))?;
+
+        Ok(optimized.data.plan)
+    }
+
+    fn name(&self) -> &str {
+        "OptimizeProjections"
+    }
+
+    fn schema_check(&self) -> bool {
+        true
+    }
+}
+
+// If an expression is not trivial and it is referred more than 1,
+// unification will not be beneficial as going against caching mechanism
+// for non-trivial computations. See the discussion:
+// https://github.com/apache/arrow-datafusion/issues/8296
+fn caching_projections(
+    projection: &ProjectionExec,
+    child_projection: &ProjectionExec,
+) -> Result<bool> {
+    let mut column_ref_map: HashMap<Column, usize> = HashMap::new();
+    // Collect the column references' usage in the parent projection.
+    projection.expr().iter().try_for_each(|(expr, _)| {
+        expr.apply(&mut |expr| {
+            Ok({
+                if let Some(column) = expr.as_any().downcast_ref::<Column>() {
+                    *column_ref_map.entry(column.clone()).or_default() += 1;
                 }
-            };
+                TreeNodeRecursion::Continue
+            })
+        })?;
+        Ok(()) as Result<()>
+    })?;
+    Ok(column_ref_map.iter().any(|(column, count)| {
+        *count > 1 && !is_expr_trivial(&child_projection.expr()[column.index()].0)
+    }))
+}
 
-            // After the top-down pass, there may be some unnecessary projections surviving
-            // since they assumes themselves as necessary when they are analyzed, but after
-            // some optimizations below, they may become unnecessary. This check is done
-            // here, and if the projection is regarded as unnecessary, the removal would
-            // set a new the mapping on the new node, which is the child of the projection.
-            self = self.try_remove_projection_bottom_up()?;
+/// Ensures that the output schema `po` matches the `initial_requirements`.
+/// If the `schema_mapping` of `po` indicates that some columns have been re-mapped,
+/// a new projection is added to restore the initial column order and indices.
+fn satisfy_initial_schema(
+    mut po: ProjectionOptimizer,
+    initial_requirements: HashSet<Column>,
+) -> Result<ProjectionOptimizer> {
+    if collect_columns_in_plan_schema(&po.plan) == initial_requirements
+        && po.schema_mapping.is_empty()
+    {
+        // The initial schema is already satisfied, no further action required.
+        Ok(po)
+    } else {
+        let mut initial_requirements_ordered =
+            initial_requirements.clone().into_iter().collect_vec();
+        initial_requirements_ordered.sort_by_key(|expr| expr.index());
+        let projected_exprs = initial_requirements_ordered
+            .into_iter()
+            .map(|col| {
+                // If there is a change, get the new index.
+                let final_column = po.schema_mapping.remove(&col).unwrap_or(col);
+                let final_column_name = final_column.name().to_string();
+                let new_col = Arc::new(final_column) as Arc<dyn PhysicalExpr>;
+                (new_col, final_column_name)
+            })
+            .collect::<Vec<_>>();
 
-            Ok(self)
-        }
+        // Create the final projection to align with the initial schema.
+        let final_projection =
+            Arc::new(ProjectionExec::try_new(projected_exprs, po.plan.clone())?);
+
+        // Return a new ProjectionOptimizer with the final projection, resetting the schema mapping.
+        Ok(ProjectionOptimizer {
+            plan: final_projection,
+            required_columns: HashSet::new(),
+            schema_mapping: HashMap::new(), // Reset schema mapping as we've now satisfied the initial schema
+            children_nodes: vec![po],       // Keep the original node as the child
+        })
     }
+}
+
+/// Compares the required and existing columns in the node, and maps them accordingly. Caller side must
+/// ensure that the node extends its own requirements if the node's plan can introduce new requirements.
+fn analyze_requirements(node: &ProjectionOptimizer) -> ColumnRequirements {
+    let mut requirement_map = HashMap::new();
+    let columns_in_schema = collect_columns_in_plan_schema(&node.plan);
+    columns_in_schema.into_iter().for_each(|col| {
+        let contains = node.required_columns.contains(&col);
+        requirement_map.insert(col, contains);
+    });
+    requirement_map
 }
 
 /// Analyzes the column requirements for join operations between left and right children plans.
@@ -3225,102 +3329,6 @@ fn analyze_requirements_of_joins(
     (requirement_map_left, requirement_map_right)
 }
 
-#[derive(Default)]
-pub struct OptimizeProjections {}
-
-impl OptimizeProjections {
-    #[allow(missing_docs)]
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl PhysicalOptimizerRule for OptimizeProjections {
-    fn optimize(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        _config: &ConfigOptions,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        // Collect initial columns requirements from the plan's schema.
-        let initial_requirements = collect_columns_in_plan_schema(&plan);
-        let mut optimizer = ProjectionOptimizer::new_default(plan);
-
-        // Insert the initial requirements to the root node, and run the rule.
-        optimizer.required_columns = initial_requirements.clone();
-        let mut optimized = optimizer.transform_down(&|o| {
-            o.adjust_node_with_requirements().map(Transformed::Yes)
-        })?;
-
-        // When some projections are removed after the rule, we know that all columns of
-        // the initial schema still exist, but their order may be changed. Ensure the final
-        // optimized plan satisfies the initial schema order.
-        optimized = satisfy_initial_schema(optimized, initial_requirements)?;
-
-        Ok(optimized.plan)
-    }
-
-    fn name(&self) -> &str {
-        "OptimizeProjections"
-    }
-
-    fn schema_check(&self) -> bool {
-        true
-    }
-}
-
-/// Ensures that the output schema `po` matches the `initial_requirements`.
-/// If the `schema_mapping` of `po` indicates that some columns have been re-mapped,
-/// a new projection is added to restore the initial column order and indices.
-fn satisfy_initial_schema(
-    mut po: ProjectionOptimizer,
-    initial_requirements: HashSet<Column>,
-) -> Result<ProjectionOptimizer> {
-    if collect_columns_in_plan_schema(&po.plan) == initial_requirements
-        && po.schema_mapping.is_empty()
-    {
-        // The initial schema is already satisfied, no further action required.
-        Ok(po)
-    } else {
-        let mut initial_requirements_ordered =
-            initial_requirements.clone().into_iter().collect_vec();
-        initial_requirements_ordered.sort_by_key(|expr| expr.index());
-        let projected_exprs = initial_requirements_ordered
-            .into_iter()
-            .map(|col| {
-                // If there is a change, get the new index.
-                let final_column = po.schema_mapping.remove(&col).unwrap_or(col);
-                let final_column_name = final_column.name().to_string();
-                let new_col = Arc::new(final_column) as Arc<dyn PhysicalExpr>;
-                (new_col, final_column_name)
-            })
-            .collect::<Vec<_>>();
-
-        // Create the final projection to align with the initial schema.
-        let final_projection =
-            Arc::new(ProjectionExec::try_new(projected_exprs, po.plan.clone())?);
-
-        // Return a new ProjectionOptimizer with the final projection, resetting the schema mapping.
-        Ok(ProjectionOptimizer {
-            plan: final_projection,
-            required_columns: HashSet::new(),
-            schema_mapping: HashMap::new(), // Reset schema mapping as we've now satisfied the initial schema
-            children_nodes: vec![po],       // Keep the original node as the child
-        })
-    }
-}
-
-/// Compares the required and existing columns in the node, and maps them accordingly. Caller side must
-/// ensure that the node extends its own requirements if the node's plan can introduce new requirements.
-fn analyze_requirements(node: &ProjectionOptimizer) -> ColumnRequirements {
-    let mut requirement_map = HashMap::new();
-    let columns_in_schema = collect_columns_in_plan_schema(&node.plan);
-    columns_in_schema.into_iter().for_each(|col| {
-        let contains = node.required_columns.contains(&col);
-        requirement_map.insert(col, contains);
-    });
-    requirement_map
-}
-
 fn preserve_requirements(po: ProjectionOptimizer) -> Result<ProjectionOptimizer> {
     if po.schema_mapping.is_empty() {
         // The initial schema is already satisfied, no further action required.
@@ -3373,6 +3381,24 @@ fn all_columns_required(requirement_map: &ColumnRequirements) -> bool {
     requirement_map.iter().all(|(_k, v)| *v)
 }
 
+/// Checks if all columns in the input schema are required by the projection.
+///
+/// # Arguments
+/// * `input_columns`: Reference to a `HashSet<Column>` representing the input columns.
+/// * `projection_requires`: Reference to a `HashSet<Column>` representing the projection requirements.
+///
+/// # Returns
+/// `true` if all input columns are required, otherwise `false`.
+///
+fn all_input_columns_required(
+    input_columns: &HashSet<Column>,
+    projection_requires: &HashSet<Column>,
+) -> bool {
+    input_columns
+        .iter()
+        .all(|input_column| projection_requires.contains(input_column))
+}
+
 fn window_agg_required(
     original_schema_len: usize,
     requirements: &ColumnRequirements,
@@ -3383,32 +3409,6 @@ fn window_agg_required(
         .any(|(_column, used)| *used)
 }
 
-// If an expression is not trivial and it is referred more than 1,
-// unification will not be beneficial as going against caching mechanism
-// for non-trivial computations. See the discussion:
-// https://github.com/apache/arrow-datafusion/issues/8296
-fn caching_projections(
-    projection: &ProjectionExec,
-    child_projection: &ProjectionExec,
-) -> Result<bool> {
-    let mut column_ref_map: HashMap<Column, usize> = HashMap::new();
-    // Collect the column references' usage in the parent projection.
-    projection.expr().iter().try_for_each(|(expr, _)| {
-        expr.apply(&mut |expr| {
-            Ok({
-                if let Some(column) = expr.as_any().downcast_ref::<Column>() {
-                    *column_ref_map.entry(column.clone()).or_default() += 1;
-                }
-                VisitRecursion::Continue
-            })
-        })?;
-        Ok(()) as Result<()>
-    })?;
-    Ok(column_ref_map.iter().any(|(column, count)| {
-        *count > 1 && !is_expr_trivial(&child_projection.expr()[column.index()].0)
-    }))
-}
-
 /// Checks if the given expression is trivial.
 /// An expression is considered trivial if it is either a `Column` or a `Literal`.
 fn is_expr_trivial(expr: &Arc<dyn PhysicalExpr>) -> bool {
@@ -3416,61 +3416,11 @@ fn is_expr_trivial(expr: &Arc<dyn PhysicalExpr>) -> bool {
         || expr.as_any().downcast_ref::<Literal>().is_some()
 }
 
-/// Given the expressions of a projection, checks if the projection causes
-/// any renaming or constructs a non-`Column` physical expression. If all
-/// expressions are `Column`, then they are collected and returned. If not,
-/// the function returns `None`.
-fn collect_alias_free_columns(
-    exprs: &[(Arc<dyn PhysicalExpr>, String)],
-) -> Option<Vec<Column>> {
-    let mut columns = vec![];
-    for (expr, alias) in exprs {
-        match expr.as_any().downcast_ref::<Column>() {
-            Some(column) if column.name() == alias => columns.push(column.clone()),
-            _ => return None,
-        }
-    }
-    Some(columns)
-}
-
 /// Updates a source provider's projected columns according to the given
 /// projection operator's expressions. To use this function safely, one must
 /// ensure that all expressions are `Column` expressions without aliases.
 fn new_projections_for_columns(projection: &[Column], source: &[usize]) -> Vec<usize> {
     projection.iter().map(|col| source[col.index()]).collect()
-}
-
-/// Filters the expressions of a [`ProjectionExec`] according to the given used column indices.
-fn filter_unused_columns(
-    projection_exprs: &[(Arc<dyn PhysicalExpr>, String)],
-    used_columns: &HashSet<Column>,
-) -> Vec<(Arc<dyn PhysicalExpr>, String)> {
-    projection_exprs
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, (expr, alias))| {
-            if used_columns
-                .iter()
-                .map(|column| column.index())
-                .collect::<Vec<_>>()
-                .contains(&idx)
-            {
-                Some((expr.clone(), alias.clone()))
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>()
-}
-
-fn filter_left_requirements(
-    required_columns: HashSet<Column>,
-    left_size: usize,
-) -> HashSet<Column> {
-    required_columns
-        .into_iter()
-        .filter(|col| col.index() < left_size)
-        .collect()
 }
 
 /// When a field in a schema is decided to be redundant and planned to be dropped
@@ -3532,6 +3482,235 @@ fn convert_projection_exprs(
         .collect()
 }
 
+fn extend_left_mapping_with_right(
+    mut left_schema_mapping: HashMap<Column, Column>,
+    right_child_plan: &Arc<dyn ExecutionPlan>,
+    left_size: usize,
+    new_left_size: usize,
+) -> HashMap<Column, Column> {
+    left_schema_mapping.extend(
+        right_child_plan
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(idx, field)| {
+                (
+                    Column::new(field.name(), left_size + idx),
+                    Column::new(field.name(), new_left_size + idx),
+                )
+            })
+            .collect::<HashMap<_, _>>(),
+    );
+    left_schema_mapping
+}
+
+/// Calculates the count of removed (unused) columns that precede a given column index.
+///
+/// # Arguments
+/// * `requirement_map`: Reference to a ColumnRequirements map.
+/// * `column_index`: The index of the column in question.
+///
+/// # Returns
+/// The number of removed columns before the given column index.
+fn removed_column_count(
+    requirement_map: &ColumnRequirements,
+    column_index: usize,
+) -> usize {
+    let mut left_skipped_columns = 0;
+    for unused_col in
+        requirement_map.iter().filter_map(
+            |(col, used)| {
+                if *used {
+                    None
+                } else {
+                    Some(col)
+                }
+            },
+        )
+    {
+        if unused_col.index() < column_index {
+            left_skipped_columns += 1;
+        }
+    }
+    left_skipped_columns
+}
+
+/// Maps the indices of required columns in a parent projection node to the corresponding indices in its child.
+///
+/// Projection is required to have columns at "@0:a - @1:b - @2:c"
+///
+/// Projection does "a@2 as a, b@0 as b, c@1 as c"
+///
+/// Then, projection inserts requirements into its child with these updated indices: "@0:b - @1:c - @2:a"
+///
+/// # Arguments
+/// * `requirements`: Reference to a `HashSet<Column>` representing the parent's column requirements.
+/// * `projection_columns`: Slice of `Column` representing the columns in the projection.
+///
+/// # Returns
+/// A `HashSet<Column>` with updated column indices reflecting the child's perspective.
+///
+fn map_parent_reqs_to_input_reqs(
+    requirements: &HashSet<Column>,
+    projection_columns: &[Column],
+) -> HashSet<Column> {
+    requirements
+        .iter()
+        .map(|column| projection_columns[column.index()].clone())
+        .collect::<HashSet<_>>()
+}
+
+/// Calculates the index changes of columns after the removal of a projection.
+///
+/// This function iterates through the columns and records the changes in their indices
+/// after the removal of a projection. It compares the columns with the columns in the
+/// projection and, if a change is observed, maps the old and new index values in a hashmap.
+///
+/// # Arguments
+/// * `columns` - A set of columns before the projection is removed.
+/// * `projection_columns` - A slice of columns as they appear in the projection.
+///
+/// # Returns
+/// A `HashMap` where the key is the original column and the value is the column with updated index.
+fn index_changes_after_projection_removal(
+    columns: HashSet<Column>,
+    projection_columns: &[Column],
+) -> HashMap<Column, Column> {
+    columns
+        .into_iter()
+        .filter_map(|column| {
+            let col_ind = column.index();
+            if column != projection_columns[col_ind] {
+                Some((column, projection_columns[col_ind].clone()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Filters the expressions of a [`ProjectionExec`] according to the given used column indices.
+fn collect_used_columns(
+    projection_exprs: &[(Arc<dyn PhysicalExpr>, String)],
+    used_columns: &HashSet<Column>,
+) -> Vec<(Arc<dyn PhysicalExpr>, String)> {
+    projection_exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (expr, alias))| {
+            if used_columns
+                .iter()
+                .map(|column| column.index())
+                .collect::<Vec<_>>()
+                .contains(&idx)
+            {
+                Some((expr.clone(), alias.clone()))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
+fn collect_left_used_columns(
+    required_columns: HashSet<Column>,
+    left_size: usize,
+) -> HashSet<Column> {
+    required_columns
+        .into_iter()
+        .filter(|col| col.index() < left_size)
+        .collect()
+}
+
+/// Given the expressions of a projection, checks if the projection causes
+/// any renaming or constructs a non-`Column` physical expression. If all
+/// expressions are `Column`, then they are collected and returned. If not,
+/// the function returns `None`.
+fn collect_alias_free_columns(
+    exprs: &[(Arc<dyn PhysicalExpr>, String)],
+) -> Option<Vec<Column>> {
+    let mut columns = vec![];
+    for (expr, alias) in exprs {
+        match expr.as_any().downcast_ref::<Column>() {
+            Some(column) if column.name() == alias => columns.push(column.clone()),
+            _ => return None,
+        }
+    }
+    Some(columns)
+}
+
+/// Collects all fields of a schema from a given execution plan and converts them into a [`HashSet`] of [`Column`].
+///
+/// # Arguments
+/// * `plan`: Reference to an Arc of a dynamic ExecutionPlan trait object.
+///
+/// # Returns
+/// A `HashSet<Column>` containing all columns from the plan's schema.
+fn collect_columns_in_plan_schema(plan: &Arc<dyn ExecutionPlan>) -> HashSet<Column> {
+    plan.schema()
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(i, f)| Column::new(f.name(), i))
+        .collect()
+}
+
+/// Collects all columns involved in the join's equivalence and non-equivalence conditions,
+/// adjusting the indices for columns from the right table by adding the size of the left table.
+///
+/// # Arguments
+/// * `on`: Slice of tuples representing the equivalence conditions between columns.
+/// * `filter`: Optional reference to a JoinFilter for non-equivalence conditions.
+/// * `left_size`: The number of columns in the left table.
+/// * `join_left_schema`: Schema reference of the left input to the join.
+/// * `join_right_schema`: Schema reference of the right input to the join.
+///
+/// # Returns
+/// A `HashSet<Column>` containing all columns from the join conditions.
+fn collect_columns_in_join_conditions(
+    on: &[(PhysicalExprRef, PhysicalExprRef)],
+    filter: Option<&JoinFilter>,
+    left_size: usize,
+    join_left_schema: SchemaRef,
+    join_right_schema: SchemaRef,
+) -> HashSet<Column> {
+    let equivalence_columns = on
+        .iter()
+        .flat_map(|(col_left, col_right)| {
+            let left_columns = collect_columns(col_left);
+            let right_columns = collect_columns(col_right);
+            let right_columns = right_columns
+                .into_iter()
+                .map(|col| Column::new(col.name(), col.index() + left_size))
+                .collect_vec();
+            left_columns.into_iter().chain(right_columns).collect_vec()
+        })
+        .collect::<HashSet<_>>();
+    let non_equivalence_columns = filter
+        .map(|filter| {
+            filter
+                .column_indices()
+                .iter()
+                .map(|col_idx| match col_idx.side {
+                    JoinSide::Left => Column::new(
+                        join_left_schema.fields()[col_idx.index].name(),
+                        col_idx.index,
+                    ),
+                    JoinSide::Right => Column::new(
+                        join_right_schema.fields()[col_idx.index].name(),
+                        col_idx.index + left_size,
+                    ),
+                })
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    equivalence_columns
+        .into_iter()
+        .chain(non_equivalence_columns)
+        .collect()
+}
+
 #[derive(Debug, PartialEq)]
 enum RewriteState {
     /// The expression is unchanged.
@@ -3570,15 +3749,15 @@ fn update_expr_with_projection(
         .clone()
         .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
             if state == RewriteState::RewrittenInvalid {
-                return Ok(Transformed::No(expr));
+                return Ok(Transformed::no(expr));
             }
             let Some(column) = expr.as_any().downcast_ref::<Column>() else {
-                return Ok(Transformed::No(expr));
+                return Ok(Transformed::no(expr));
             };
             if sync_with_child {
                 state = RewriteState::RewrittenValid;
                 // Update the index of `column`:
-                Ok(Transformed::Yes(projected_exprs[column.index()].0.clone()))
+                Ok(Transformed::yes(projected_exprs[column.index()].0.clone()))
             } else {
                 // default to invalid, in case we can't find the relevant column
                 state = RewriteState::RewrittenInvalid;
@@ -3597,12 +3776,12 @@ fn update_expr_with_projection(
                         )
                     })
                     .map_or_else(
-                        || Ok(Transformed::No(expr)),
-                        |c| Ok(Transformed::Yes(c)),
+                        || Ok(Transformed::no(expr)),
+                        |c| Ok(Transformed::yes(c)),
                     )
             }
         });
-    new_expr.map(|e| (state == RewriteState::RewrittenValid).then_some(e))
+    new_expr.map(|e| (state == RewriteState::RewrittenValid).then_some(e.data))
 }
 
 /// Rewrites the expressions with new index values.
@@ -3705,20 +3884,21 @@ fn update_column_index(
         .clone()
         .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
             if state == RewriteState::RewrittenInvalid {
-                return Ok(Transformed::No(expr));
+                return Ok(Transformed::no(expr));
             }
             let Some(column) = expr.as_any().downcast_ref::<Column>() else {
-                return Ok(Transformed::No(expr));
+                return Ok(Transformed::no(expr));
             };
             state = RewriteState::RewrittenValid;
             // Update the index of `column`:
             if let Some(updated) = mapping.get(column) {
-                Ok(Transformed::Yes(Arc::new(updated.clone()) as _))
+                Ok(Transformed::yes(Arc::new(updated.clone()) as _))
             } else {
-                Ok(Transformed::No(expr.clone()))
+                Ok(Transformed::no(expr.clone()))
             }
         })
-        .unwrap();
+        .unwrap()
+        .data;
     new_expr
 }
 
@@ -3737,13 +3917,13 @@ fn update_equivalence_conditions(
                     .clone()
                     .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
                         if left_state == RewriteState::RewrittenInvalid {
-                            return Ok(Transformed::No(expr));
+                            return Ok(Transformed::no(expr));
                         }
                         let Some(column) = expr.as_any().downcast_ref::<Column>() else {
-                            return Ok(Transformed::No(expr));
+                            return Ok(Transformed::no(expr));
                         };
                         left_state = RewriteState::RewrittenValid;
-                        Ok(Transformed::Yes(Arc::new(Column::new(
+                        Ok(Transformed::yes(Arc::new(Column::new(
                             column.name(),
                             column.index()
                                 - removed_column_count(
@@ -3752,18 +3932,19 @@ fn update_equivalence_conditions(
                                 ),
                         ))))
                     })
-                    .unwrap(),
+                    .unwrap()
+                    .data,
                 right_col
                     .clone()
                     .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
                         if right_state == RewriteState::RewrittenInvalid {
-                            return Ok(Transformed::No(expr));
+                            return Ok(Transformed::no(expr));
                         }
                         let Some(column) = expr.as_any().downcast_ref::<Column>() else {
-                            return Ok(Transformed::No(expr));
+                            return Ok(Transformed::no(expr));
                         };
                         right_state = RewriteState::RewrittenValid;
-                        Ok(Transformed::Yes(Arc::new(Column::new(
+                        Ok(Transformed::yes(Arc::new(Column::new(
                             column.name(),
                             column.index()
                                 - removed_column_count(
@@ -3772,7 +3953,8 @@ fn update_equivalence_conditions(
                                 ),
                         ))))
                     })
-                    .unwrap(),
+                    .unwrap()
+                    .data,
             )
         })
         .collect()
@@ -3862,203 +4044,6 @@ fn update_right_requirements(
     required_columns
         .into_iter()
         .map(|col| Column::new(col.name(), col.index() + left_size))
-        .collect()
-}
-
-fn extend_left_mapping_with_right(
-    mut left_schema_mapping: HashMap<Column, Column>,
-    right_child_plan: &Arc<dyn ExecutionPlan>,
-    left_size: usize,
-    new_left_size: usize,
-) -> HashMap<Column, Column> {
-    left_schema_mapping.extend(
-        right_child_plan
-            .schema()
-            .fields()
-            .iter()
-            .enumerate()
-            .map(|(idx, field)| {
-                (
-                    Column::new(field.name(), left_size + idx),
-                    Column::new(field.name(), new_left_size + idx),
-                )
-            })
-            .collect::<HashMap<_, _>>(),
-    );
-    left_schema_mapping
-}
-
-/// Collects all fields of a schema from a given execution plan and converts them into a [`HashSet`] of [`Column`].
-///
-/// # Arguments
-/// * `plan`: Reference to an Arc of a dynamic ExecutionPlan trait object.
-///
-/// # Returns
-/// A `HashSet<Column>` containing all columns from the plan's schema.
-fn collect_columns_in_plan_schema(plan: &Arc<dyn ExecutionPlan>) -> HashSet<Column> {
-    plan.schema()
-        .fields()
-        .iter()
-        .enumerate()
-        .map(|(i, f)| Column::new(f.name(), i))
-        .collect()
-}
-
-/// Collects all columns involved in the join's equivalence and non-equivalence conditions,
-/// adjusting the indices for columns from the right table by adding the size of the left table.
-///
-/// # Arguments
-/// * `on`: Slice of tuples representing the equivalence conditions between columns.
-/// * `filter`: Optional reference to a JoinFilter for non-equivalence conditions.
-/// * `left_size`: The number of columns in the left table.
-/// * `join_left_schema`: Schema reference of the left input to the join.
-/// * `join_right_schema`: Schema reference of the right input to the join.
-///
-/// # Returns
-/// A `HashSet<Column>` containing all columns from the join conditions.
-fn collect_columns_in_join_conditions(
-    on: &[(PhysicalExprRef, PhysicalExprRef)],
-    filter: Option<&JoinFilter>,
-    left_size: usize,
-    join_left_schema: SchemaRef,
-    join_right_schema: SchemaRef,
-) -> HashSet<Column> {
-    let equivalence_columns = on
-        .iter()
-        .flat_map(|(col_left, col_right)| {
-            let left_columns = collect_columns(col_left);
-            let right_columns = collect_columns(col_right);
-            let right_columns = right_columns
-                .into_iter()
-                .map(|col| Column::new(col.name(), col.index() + left_size))
-                .collect_vec();
-            left_columns.into_iter().chain(right_columns).collect_vec()
-        })
-        .collect::<HashSet<_>>();
-    let non_equivalence_columns = filter
-        .map(|filter| {
-            filter
-                .column_indices()
-                .iter()
-                .map(|col_idx| match col_idx.side {
-                    JoinSide::Left => Column::new(
-                        join_left_schema.fields()[col_idx.index].name(),
-                        col_idx.index,
-                    ),
-                    JoinSide::Right => Column::new(
-                        join_right_schema.fields()[col_idx.index].name(),
-                        col_idx.index + left_size,
-                    ),
-                })
-                .collect::<HashSet<_>>()
-        })
-        .unwrap_or_default();
-    equivalence_columns
-        .into_iter()
-        .chain(non_equivalence_columns)
-        .collect()
-}
-
-/// Calculates the count of removed (unused) columns that precede a given column index.
-///
-/// # Arguments
-/// * `requirement_map`: Reference to a ColumnRequirements map.
-/// * `column_index`: The index of the column in question.
-///
-/// # Returns
-/// The number of removed columns before the given column index.
-fn removed_column_count(
-    requirement_map: &ColumnRequirements,
-    column_index: usize,
-) -> usize {
-    let mut left_skipped_columns = 0;
-    for unused_col in
-        requirement_map.iter().filter_map(
-            |(col, used)| {
-                if *used {
-                    None
-                } else {
-                    Some(col)
-                }
-            },
-        )
-    {
-        if unused_col.index() < column_index {
-            left_skipped_columns += 1;
-        }
-    }
-    left_skipped_columns
-}
-
-/// Maps the indices of required columns in a parent projection node to the corresponding indices in its child.
-///
-/// Projection is required to have columns at "@0:a - @1:b - @2:c"
-///
-/// Projection does "a@2 as a, b@0 as b, c@1 as c"
-///
-/// Then, projection inserts requirements into its child with these updated indices: "@0:b - @1:c - @2:a"
-///
-/// # Arguments
-/// * `requirements`: Reference to a `HashSet<Column>` representing the parent's column requirements.
-/// * `projection_columns`: Slice of `Column` representing the columns in the projection.
-///
-/// # Returns
-/// A `HashSet<Column>` with updated column indices reflecting the child's perspective.
-///
-fn map_parent_reqs_to_input_reqs(
-    requirements: &HashSet<Column>,
-    projection_columns: &[Column],
-) -> HashSet<Column> {
-    requirements
-        .iter()
-        .map(|column| projection_columns[column.index()].clone())
-        .collect::<HashSet<_>>()
-}
-
-/// Checks if all columns in the input schema are required by the projection.
-///
-/// # Arguments
-/// * `input_columns`: Reference to a `HashSet<Column>` representing the input columns.
-/// * `projection_requires`: Reference to a `HashSet<Column>` representing the projection requirements.
-///
-/// # Returns
-/// `true` if all input columns are required, otherwise `false`.
-///
-fn all_input_columns_required(
-    input_columns: &HashSet<Column>,
-    projection_requires: &HashSet<Column>,
-) -> bool {
-    input_columns
-        .iter()
-        .all(|input_column| projection_requires.contains(input_column))
-}
-
-/// Calculates the index changes of columns after the removal of a projection.
-///
-/// This function iterates through the columns and records the changes in their indices
-/// after the removal of a projection. It compares the columns with the columns in the
-/// projection and, if a change is observed, maps the old and new index values in a hashmap.
-///
-/// # Arguments
-/// * `columns` - A set of columns before the projection is removed.
-/// * `projection_columns` - A slice of columns as they appear in the projection.
-///
-/// # Returns
-/// A `HashMap` where the key is the original column and the value is the column with updated index.
-fn index_changes_after_projection_removal(
-    columns: HashSet<Column>,
-    projection_columns: &[Column],
-) -> HashMap<Column, Column> {
-    columns
-        .into_iter()
-        .filter_map(|column| {
-            let col_ind = column.index();
-            if column != projection_columns[col_ind] {
-                Some((column, projection_columns[col_ind].clone()))
-            } else {
-                None
-            }
-        })
         .collect()
 }
 
@@ -4206,7 +4191,6 @@ fn rewrite_hash_join(
     right_input_plan: Arc<dyn ExecutionPlan>,
     left_mapping: &HashMap<Column, Column>,
     right_mapping: &HashMap<Column, Column>,
-    left_size: usize,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let new_on = update_join_on(hj.on(), left_mapping, right_mapping);
     let new_filter = hj.filter().map(|filter| {
@@ -4230,11 +4214,11 @@ fn rewrite_hash_join(
                         index: right_mapping
                             .iter()
                             .find(|(old_column, _new_column)| {
-                                old_column.index() == col_idx.index + left_size
+                                old_column.index() == col_idx.index
                             })
                             .map(|(_old_column, new_column)| new_column.index())
                             .unwrap_or(col_idx.index),
-                        side: JoinSide::Left,
+                        side: JoinSide::Right,
                     },
                 })
                 .collect(),
