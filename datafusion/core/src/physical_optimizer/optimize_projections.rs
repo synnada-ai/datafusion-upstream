@@ -190,6 +190,13 @@ impl ProjectionOptimizer {
             no_change => no_change.data,
         };
 
+        if projection_input.as_any().is::<HashJoinExec>() {
+            self = match self.try_embed_to_hash_join()? {
+                join if join.transformed => return Ok(join.data),
+                projection => projection.data,
+            }
+        }
+
         // Source providers:
         if projection_input.as_any().is::<CsvExec>() {
             self = match self.try_projected_csv() {
@@ -332,6 +339,81 @@ impl ProjectionOptimizer {
             schema_mapping: new_mapping,
             children_nodes: self.children_nodes,
         }))
+    }
+
+    /// Some projection can't be pushed down left input or right input of hash join because filter or on need may need some columns that won't be used in later.
+    /// By embed those projection to hash join, we can reduce the cost of build_batch_from_indices in hash join (build_batch_from_indices need to can compute::take() for each column) and avoid unnecessary output creation.
+    fn try_embed_to_hash_join(mut self) -> Result<Transformed<ProjectionOptimizer>> {
+        let Some(projection) = self.plan.as_any().downcast_ref::<ProjectionExec>() else {
+            return Ok(Transformed::no(self));
+        };
+        let Some(hash_join) = self.plan.as_any().downcast_ref::<HashJoinExec>() else {
+            return Ok(Transformed::no(self));
+        };
+        // Collect all column indices from the given projection expressions.
+        let projection_index = collect_column_indices(projection.expr());
+
+        if projection_index.is_empty() {
+            return Ok(Transformed::no(self));
+        };
+
+        // If the projection indices is the same as the input columns, we don't need to embed the projection to hash join.
+        // Check the projection_index is 0..n-1 and the length of projection_index is the same as the length of hash_join schema fields.
+        if projection_index.len() == projection_index.last().unwrap() + 1
+            && projection_index.len() == hash_join.schema().fields().len()
+        {
+            return Ok(Transformed::no(self));
+        }
+
+        let new_hash_join =
+            Arc::new(hash_join.with_projection(Some(projection_index.to_vec()))?)
+                as Arc<dyn ExecutionPlan>;
+
+        // Build projection expressions for update_expr. Zip the projection_index with the new_hash_join output schema fields.
+        let embed_project_exprs = projection_index
+            .iter()
+            .zip(new_hash_join.schema().fields())
+            .map(|(index, field)| {
+                (
+                    Arc::new(Column::new(field.name(), *index)) as Arc<dyn PhysicalExpr>,
+                    field.name().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut new_projection_exprs = Vec::with_capacity(projection.expr().len());
+
+        for (expr, alias) in projection.expr() {
+            // update column index for projection expression since the input schema has been changed.
+            let Some(expr) =
+                update_expr_with_projection(expr, embed_project_exprs.as_slice(), false)?
+            else {
+                return Ok(Transformed::no(self));
+            };
+            new_projection_exprs.push((expr, alias.clone()));
+        }
+        // Old projection may contain some alias or expression such as `a + 1` and `CAST('true' AS BOOLEAN)`, but our projection_exprs in hash join just contain column, so we need to create the new projection to keep the original projection.
+        let new_projection =
+            ProjectionExec::try_new(new_projection_exprs, new_hash_join.clone())?;
+
+        if is_projection_removable(&new_projection) {
+            let required_columns = collect_columns_in_plan_schema(&new_hash_join);
+            Ok(Transformed::yes(Self {
+                plan: new_hash_join,
+                required_columns,
+                schema_mapping: HashMap::new(),
+                children_nodes: self.children_nodes.swap_remove(0).children_nodes,
+            }))
+        } else {
+            let plan = Arc::new(new_projection) as Arc<dyn ExecutionPlan>;
+            let required_columns = collect_columns_in_plan_schema(&plan);
+            Ok(Transformed::yes(Self {
+                plan,
+                required_columns,
+                schema_mapping: HashMap::new(),
+                children_nodes: self.children_nodes.swap_remove(0).children_nodes,
+            }))
+        }
     }
 
     /// Tries to embed [`ProjectionExec`] into its input [`CsvExec`].
@@ -3421,6 +3503,20 @@ fn is_expr_trivial(expr: &Arc<dyn PhysicalExpr>) -> bool {
         || expr.as_any().downcast_ref::<Literal>().is_some()
 }
 
+/// Compare the inputs and outputs of the projection. All expressions must be
+/// columns without alias, and projection does not change the order of fields.
+/// For example, if the input schema is `a, b`, `SELECT a, b` is removable,
+/// but `SELECT b, a` and `SELECT a+1, b` and `SELECT a AS c, b` are not.
+fn is_projection_removable(projection: &ProjectionExec) -> bool {
+    let exprs = projection.expr();
+    exprs.iter().enumerate().all(|(idx, (expr, alias))| {
+        let Some(col) = expr.as_any().downcast_ref::<Column>() else {
+            return false;
+        };
+        col.name() == alias && col.index() == idx
+    }) && exprs.len() == projection.input().schema().fields().len()
+}
+
 /// Updates a source provider's projected columns according to the given
 /// projection operator's expressions. To use this function safely, one must
 /// ensure that all expressions are `Column` expressions without aliases.
@@ -3714,6 +3810,20 @@ fn collect_columns_in_join_conditions(
         .into_iter()
         .chain(non_equivalence_columns)
         .collect()
+}
+
+/// Collect all column indices from the given projection expressions.
+fn collect_column_indices(exprs: &[(Arc<dyn PhysicalExpr>, String)]) -> Vec<usize> {
+    // Collect indices and remove duplicates.
+    let mut indexs = exprs
+        .iter()
+        .flat_map(|(expr, _)| collect_columns(expr))
+        .map(|x| x.index())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    indexs.sort();
+    indexs
 }
 
 #[derive(Debug, PartialEq)]
@@ -4563,14 +4673,12 @@ fn rewrite_bounded_window_aggregate(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::sync::Arc;
 
     use crate::datasource::file_format::file_compression_type::FileCompressionType;
     use crate::datasource::listing::PartitionedFile;
     use crate::datasource::physical_plan::{CsvExec, FileScanConfig};
-    use crate::physical_optimizer::optimize_projections::{
-        update_expr_with_projection, OptimizeProjections,
-    };
     use crate::physical_optimizer::PhysicalOptimizerRule;
     use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
     use crate::physical_plan::filter::FilterExec;
@@ -4580,7 +4688,7 @@ mod tests {
     use crate::physical_plan::repartition::RepartitionExec;
     use crate::physical_plan::sorts::sort::SortExec;
     use crate::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
-    use crate::physical_plan::ExecutionPlan;
+    use crate::physical_plan::{get_plan_string, ExecutionPlan};
 
     use arrow_schema::{DataType, Field, Schema, SortOptions};
     use datafusion_common::config::ConfigOptions;
@@ -4593,8 +4701,9 @@ mod tests {
     use datafusion_physical_expr::{
         Partitioning, PhysicalExpr, PhysicalSortExpr, ScalarFunctionExpr,
     };
-    use datafusion_physical_plan::get_plan_string;
-    use datafusion_physical_plan::joins::SymmetricHashJoinExec;
+    use datafusion_physical_plan::joins::{
+        HashJoinExec, PartitionMode, SymmetricHashJoinExec,
+    };
     use datafusion_physical_plan::union::UnionExec;
 
     fn create_simple_csv_exec() -> Arc<dyn ExecutionPlan> {
@@ -4605,6 +4714,7 @@ mod tests {
             Field::new("d", DataType::Int32, true),
             Field::new("e", DataType::Int32, true),
         ]));
+
         Arc::new(CsvExec::new(
             FileScanConfig {
                 object_store_url: ObjectStoreUrl::parse("test:///").unwrap(),
@@ -4632,6 +4742,7 @@ mod tests {
             Field::new("d", DataType::Int32, true),
             Field::new("e", DataType::Int32, true),
         ]));
+
         Arc::new(CsvExec::new(
             FileScanConfig {
                 object_store_url: ObjectStoreUrl::parse("test:///").unwrap(),
@@ -4719,6 +4830,7 @@ mod tests {
             (Arc::new(Column::new("f", 5)), "f".to_owned()),
             (Arc::new(Column::new("e", 4)), "e".to_owned()),
         ];
+
         let expected_exprs: Vec<Arc<dyn PhysicalExpr>> = vec![
             Arc::new(BinaryExpr::new(
                 Arc::new(Column::new("a", 0)),
@@ -4777,11 +4889,13 @@ mod tests {
                 ))),
             )?),
         ];
+
         for (expr, expected_expr) in exprs.into_iter().zip(expected_exprs.into_iter()) {
             assert!(update_expr_with_projection(&expr, &child, true)?
                 .unwrap()
                 .eq(&expected_expr));
         }
+
         Ok(())
     }
 
@@ -4846,13 +4960,14 @@ mod tests {
             )?),
         ];
         let projected_exprs: Vec<(Arc<dyn PhysicalExpr>, String)> = vec![
-            (Arc::new(Column::new("a", 0)), "a".to_owned()),
+            (Arc::new(Column::new("a", 3)), "a".to_owned()),
             (Arc::new(Column::new("b", 1)), "b_new".to_owned()),
-            (Arc::new(Column::new("c", 2)), "c".to_owned()),
-            (Arc::new(Column::new("d", 3)), "d_new".to_owned()),
-            (Arc::new(Column::new("e", 4)), "e".to_owned()),
-            (Arc::new(Column::new("f", 5)), "f_new".to_owned()),
+            (Arc::new(Column::new("c", 0)), "c".to_owned()),
+            (Arc::new(Column::new("d", 2)), "d_new".to_owned()),
+            (Arc::new(Column::new("e", 5)), "e".to_owned()),
+            (Arc::new(Column::new("f", 4)), "f_new".to_owned()),
         ];
+
         let expected_exprs: Vec<Arc<dyn PhysicalExpr>> = vec![
             Arc::new(BinaryExpr::new(
                 Arc::new(Column::new("a", 0)),
@@ -4911,11 +5026,29 @@ mod tests {
                 ))),
             )?),
         ];
+
         for (expr, expected_expr) in exprs.into_iter().zip(expected_exprs.into_iter()) {
             assert!(update_expr_with_projection(&expr, &projected_exprs, false)?
                 .unwrap()
                 .eq(&expected_expr));
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_collect_column_indices() -> Result<()> {
+        let expr = Arc::new(BinaryExpr::new(
+            Arc::new(Column::new("b", 7)),
+            Operator::Minus,
+            Arc::new(BinaryExpr::new(
+                Arc::new(Literal::new(ScalarValue::Int32(Some(1)))),
+                Operator::Plus,
+                Arc::new(Column::new("a", 1)),
+            )),
+        ));
+        let column_indices = collect_column_indices(&[(expr, "b-(1+a)".to_string())]);
+        assert_eq!(column_indices, vec![1, 7]);
         Ok(())
     }
 
@@ -4935,12 +5068,15 @@ mod tests {
                 "  CsvExec: file_groups={1 group: [[x]]}, projection=[d, a, b], has_header=false",
         ];
         assert_eq!(initial, expected_initial);
+
         let after_optimize =
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
+
         let expected = [
             "CsvExec: file_groups={1 group: [[x]]}, projection=[b, d], has_header=false",
         ];
         assert_eq!(get_plan_string(&after_optimize), expected);
+
         Ok(())
     }
 
@@ -4971,6 +5107,7 @@ mod tests {
             ],
             child_projection.clone(),
         )?);
+
         let initial = get_plan_string(&top_projection);
         let expected_initial = [
             "ProjectionExec: expr=[new_b@3 as new_b, c@0 + new_e@1 as binary, new_b@3 as newest_b]",
@@ -4978,13 +5115,16 @@ mod tests {
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
             ];
         assert_eq!(initial, expected_initial);
+
         let after_optimize =
             OptimizeProjections::new().optimize(top_projection, &ConfigOptions::new())?;
+
         let expected = [
             "ProjectionExec: expr=[b@1 as new_b, c@2 + e@4 as binary, b@1 as newest_b]",
             "  CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
         ];
         assert_eq!(get_plan_string(&after_optimize), expected);
+
         Ok(())
     }
 
@@ -5008,14 +5148,17 @@ mod tests {
                 "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false",
         ];
         assert_eq!(initial, expected_initial);
+
         let after_optimize =
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
+
         let expected = [
                 "ProjectionExec: expr=[b@1 as b, a@0 as a_new, d@2 as d]", 
                 "  CoalescePartitionsExec", 
                 "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, d], has_header=false",
         ];
         assert_eq!(get_plan_string(&after_optimize), expected);
+
         Ok(())
     }
 
@@ -5045,6 +5188,7 @@ mod tests {
             ],
             filter.clone(),
         )?);
+
         let initial = get_plan_string(&projection);
         let expected_initial = [
                 "ProjectionExec: expr=[a@0 as a_new, b@1 as b, d@3 as d]",
@@ -5052,6 +5196,7 @@ mod tests {
                 "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false",
         ];
         assert_eq!(initial, expected_initial);
+
         let after_optimize =
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
 
@@ -5059,7 +5204,9 @@ mod tests {
                 "ProjectionExec: expr=[a@0 as a_new, b@1 as b, d@2 as d]", 
                 "  FilterExec: b@1 - a@0 > d@2 - a@0", 
                 "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, d], has_header=false"];
+
         assert_eq!(get_plan_string(&after_optimize), expected);
+
         Ok(())
     }
 
@@ -5067,6 +5214,7 @@ mod tests {
     fn test_join_after_projection() -> Result<()> {
         let left_csv = create_simple_csv_exec();
         let right_csv = create_simple_csv_exec();
+
         let join: Arc<dyn ExecutionPlan> = Arc::new(SymmetricHashJoinExec::try_new(
             left_csv,
             right_csv,
@@ -5134,15 +5282,18 @@ mod tests {
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
             ];
         assert_eq!(initial, expected_initial);
+
         let after_optimize =
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
+
         let expected = [
-            "ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, a@3 as a_from_right, c@4 as c_from_right]", 
+           "ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, a@3 as a_from_right, c@4 as c_from_right]", 
             "  SymmetricHashJoinExec: mode=SinglePartition, join_type=Inner, on=[(b@1, c@1)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2", 
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false", 
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, c], has_header=false"
             ];
         assert_eq!(get_plan_string(&after_optimize), expected);
+
         let expected_filter_col_ind = vec![
             ColumnIndex {
                 index: 1,
@@ -5157,6 +5308,7 @@ mod tests {
                 side: JoinSide::Left,
             },
         ];
+
         assert_eq!(
             expected_filter_col_ind,
             after_optimize.children()[0]
@@ -5167,6 +5319,205 @@ mod tests {
                 .unwrap()
                 .column_indices()
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_join_after_required_projection() -> Result<()> {
+        let left_csv = create_simple_csv_exec();
+        let right_csv = create_simple_csv_exec();
+
+        let join: Arc<dyn ExecutionPlan> = Arc::new(SymmetricHashJoinExec::try_new(
+            left_csv,
+            right_csv,
+            vec![(Arc::new(Column::new("b", 1)), Arc::new(Column::new("c", 2)))],
+            // b_left-(1+a_right)<=a_right+c_left
+            Some(JoinFilter::new(
+                Arc::new(BinaryExpr::new(
+                    Arc::new(BinaryExpr::new(
+                        Arc::new(Column::new("b_left_inter", 0)),
+                        Operator::Minus,
+                        Arc::new(BinaryExpr::new(
+                            Arc::new(Literal::new(ScalarValue::Int32(Some(1)))),
+                            Operator::Plus,
+                            Arc::new(Column::new("a_right_inter", 1)),
+                        )),
+                    )),
+                    Operator::LtEq,
+                    Arc::new(BinaryExpr::new(
+                        Arc::new(Column::new("a_right_inter", 1)),
+                        Operator::Plus,
+                        Arc::new(Column::new("c_left_inter", 2)),
+                    )),
+                )),
+                vec![
+                    ColumnIndex {
+                        index: 1,
+                        side: JoinSide::Left,
+                    },
+                    ColumnIndex {
+                        index: 0,
+                        side: JoinSide::Right,
+                    },
+                    ColumnIndex {
+                        index: 2,
+                        side: JoinSide::Left,
+                    },
+                ],
+                Schema::new(vec![
+                    Field::new("b_left_inter", DataType::Int32, true),
+                    Field::new("a_right_inter", DataType::Int32, true),
+                    Field::new("c_left_inter", DataType::Int32, true),
+                ]),
+            )),
+            &JoinType::Inner,
+            true,
+            None,
+            None,
+            StreamJoinPartitionMode::SinglePartition,
+        )?);
+        let projection: Arc<dyn ExecutionPlan> = Arc::new(ProjectionExec::try_new(
+            vec![
+                (Arc::new(Column::new("a", 5)), "a".to_string()),
+                (Arc::new(Column::new("b", 6)), "b".to_string()),
+                (Arc::new(Column::new("c", 7)), "c".to_string()),
+                (Arc::new(Column::new("d", 8)), "d".to_string()),
+                (Arc::new(Column::new("e", 9)), "e".to_string()),
+                (Arc::new(Column::new("a", 0)), "a".to_string()),
+                (Arc::new(Column::new("b", 1)), "b".to_string()),
+                (Arc::new(Column::new("c", 2)), "c".to_string()),
+                (Arc::new(Column::new("d", 3)), "d".to_string()),
+                (Arc::new(Column::new("e", 4)), "e".to_string()),
+            ],
+            join,
+        )?);
+        let initial = get_plan_string(&projection);
+        let expected_initial = [
+            "ProjectionExec: expr=[a@5 as a, b@6 as b, c@7 as c, d@8 as d, e@9 as e, a@0 as a, b@1 as b, c@2 as c, d@3 as d, e@4 as e]", 
+            "  SymmetricHashJoinExec: mode=SinglePartition, join_type=Inner, on=[(b@1, c@2)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2", 
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
+            ];
+        assert_eq!(initial, expected_initial);
+
+        let after_optimize =
+            OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
+
+        let expected = [
+            "ProjectionExec: expr=[a@5 as a, b@6 as b, c@7 as c, d@8 as d, e@9 as e, a@0 as a, b@1 as b, c@2 as c, d@3 as d, e@4 as e]", 
+            "  SymmetricHashJoinExec: mode=SinglePartition, join_type=Inner, on=[(b@1, c@2)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2", 
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
+            ];
+        assert_eq!(get_plan_string(&after_optimize), expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_hash_join_after_projection() -> Result<()> {
+        // sql like
+        // SELECT t1.c as c_from_left, t1.b as b_from_left, t1.a as a_from_left, t2.c as c_from_right FROM t1 JOIN t2 ON t1.b = t2.c WHERE t1.b - (1 + t2.a) <= t2.a + t1.c
+        let left_csv = create_simple_csv_exec();
+        let right_csv = create_simple_csv_exec();
+
+        let join: Arc<dyn ExecutionPlan> = Arc::new(HashJoinExec::try_new(
+            left_csv,
+            right_csv,
+            vec![(Arc::new(Column::new("b", 1)), Arc::new(Column::new("c", 2)))],
+            // b_left-(1+a_right)<=a_right+c_left
+            Some(JoinFilter::new(
+                Arc::new(BinaryExpr::new(
+                    Arc::new(BinaryExpr::new(
+                        Arc::new(Column::new("b_left_inter", 0)),
+                        Operator::Minus,
+                        Arc::new(BinaryExpr::new(
+                            Arc::new(Literal::new(ScalarValue::Int32(Some(1)))),
+                            Operator::Plus,
+                            Arc::new(Column::new("a_right_inter", 1)),
+                        )),
+                    )),
+                    Operator::LtEq,
+                    Arc::new(BinaryExpr::new(
+                        Arc::new(Column::new("a_right_inter", 1)),
+                        Operator::Plus,
+                        Arc::new(Column::new("c_left_inter", 2)),
+                    )),
+                )),
+                vec![
+                    ColumnIndex {
+                        index: 1,
+                        side: JoinSide::Left,
+                    },
+                    ColumnIndex {
+                        index: 0,
+                        side: JoinSide::Right,
+                    },
+                    ColumnIndex {
+                        index: 2,
+                        side: JoinSide::Left,
+                    },
+                ],
+                Schema::new(vec![
+                    Field::new("b_left_inter", DataType::Int32, true),
+                    Field::new("a_right_inter", DataType::Int32, true),
+                    Field::new("c_left_inter", DataType::Int32, true),
+                ]),
+            )),
+            &JoinType::Inner,
+            None,
+            PartitionMode::Auto,
+            true,
+        )?);
+        let projection: Arc<dyn ExecutionPlan> = Arc::new(ProjectionExec::try_new(
+            vec![
+                (Arc::new(Column::new("c", 2)), "c_from_left".to_string()),
+                (Arc::new(Column::new("b", 1)), "b_from_left".to_string()),
+                (Arc::new(Column::new("a", 0)), "a_from_left".to_string()),
+                (Arc::new(Column::new("c", 7)), "c_from_right".to_string()),
+            ],
+            join.clone(),
+        )?);
+        let initial = get_plan_string(&projection);
+        let expected_initial = [
+			"ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, c@7 as c_from_right]", 
+            "  HashJoinExec: mode=Auto, join_type=Inner, on=[(b@1, c@2)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2", 
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
+            ];
+        assert_eq!(initial, expected_initial);
+
+        let after_optimize =
+            OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
+
+        // HashJoinExec only returns result after projection. Because there are some alias columns in the projection, the ProjectionExec is not removed.
+        let expected = ["ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, c@4 as c_from_right]", 
+        "  HashJoinExec: mode=Auto, join_type=Inner, on=[(b@1, c@1)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2", 
+        "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false", 
+        "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, c], has_header=false"];
+        assert_eq!(get_plan_string(&after_optimize), expected);
+
+        let projection: Arc<dyn ExecutionPlan> = Arc::new(ProjectionExec::try_new(
+            vec![
+                (Arc::new(Column::new("a", 0)), "a".to_string()),
+                (Arc::new(Column::new("b", 1)), "b".to_string()),
+                (Arc::new(Column::new("c", 2)), "c".to_string()),
+                (Arc::new(Column::new("c", 7)), "c".to_string()),
+            ],
+            join.clone(),
+        )?);
+
+        let after_optimize =
+            OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
+
+        // Comparing to the previous result, this projection don't have alias columns either change the order of output fields. So the ProjectionExec is removed.
+        let expected = [
+            "ProjectionExec: expr=[a@0 as a, b@1 as b, c@2 as c, c@4 as c]", 
+            "  HashJoinExec: mode=Auto, join_type=Inner, on=[(b@1, c@1)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2", 
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false", 
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, c], has_header=false"];
+        assert_eq!(get_plan_string(&after_optimize), expected);
+
         Ok(())
     }
 
@@ -5199,15 +5550,17 @@ mod tests {
                 "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false",
         ];
         assert_eq!(initial, expected_initial);
+
         let after_optimize =
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
-
         let expected = [
                 "ProjectionExec: expr=[b@1 as b_new, a@0 as a, d@2 as d_new]", 
                 "  RepartitionExec: partitioning=Hash([a@0, b@1, d@2], 6), input_partitions=1", 
                 "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, d], has_header=false"
         ];
+
         assert_eq!(get_plan_string(&after_optimize), expected);
+
         Ok(())
     }
 
@@ -5239,6 +5592,7 @@ mod tests {
             ],
             sort_req.clone(),
         )?);
+
         let initial = get_plan_string(&projection);
         let expected_initial = [
             "ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]",
@@ -5246,6 +5600,7 @@ mod tests {
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
             ];
         assert_eq!(initial, expected_initial);
+
         let after_optimize =
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
 
@@ -5255,6 +5610,7 @@ mod tests {
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false"
         ];
         assert_eq!(get_plan_string(&after_optimize), expected);
+
         Ok(())
     }
 
@@ -5286,6 +5642,7 @@ mod tests {
             ],
             sort_req.clone(),
         )?);
+
         let initial = get_plan_string(&projection);
         let expected_initial = [
             "ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]",
@@ -5293,6 +5650,7 @@ mod tests {
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
             ];
         assert_eq!(initial, expected_initial);
+
         let after_optimize =
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
 
@@ -5302,6 +5660,7 @@ mod tests {
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false"
         ];
         assert_eq!(get_plan_string(&after_optimize), expected);
+
         Ok(())
     }
 
@@ -5318,6 +5677,7 @@ mod tests {
             ],
             union.clone(),
         )?);
+
         let initial = get_plan_string(&projection);
         let expected_initial = [
             "ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]", 
@@ -5327,6 +5687,7 @@ mod tests {
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
             ];
         assert_eq!(initial, expected_initial);
+
         let after_optimize =
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
         let expected = [
@@ -5336,11 +5697,14 @@ mod tests {
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false", 
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false"
         ];
+
         assert_eq!(get_plan_string(&after_optimize), expected);
+
         Ok(())
     }
 
     #[test]
+
     fn test_optimize_projections_filter_sort() -> Result<()> {
         /*
                                                         INITIAL PLAN:
@@ -5359,7 +5723,9 @@ mod tests {
                 ProjectionExec:        |c@2             |a@0 as x        |
                 CsvExec:               |a               |b               |c               |d               |e               |
         */
+
         let csv = create_simple_csv_exec();
+
         let projection1 = Arc::new(ProjectionExec::try_new(
             vec![
                 (Arc::new(Column::new("c", 2)), "c".to_string()),
@@ -5368,6 +5734,7 @@ mod tests {
             ],
             csv,
         )?);
+
         let projection2 = Arc::new(ProjectionExec::try_new(
             vec![
                 (Arc::new(Column::new("x", 1)), "x".to_string()),
@@ -5376,6 +5743,7 @@ mod tests {
             ],
             projection1,
         )?);
+
         let sort = Arc::new(SortExec::new(
             vec![
                 PhysicalSortExpr {
@@ -5389,6 +5757,7 @@ mod tests {
             ],
             projection2,
         ));
+
         let projection3 = Arc::new(ProjectionExec::try_new(
             vec![
                 (Arc::new(Column::new("x", 2)), "x".to_string()),
@@ -5397,6 +5766,7 @@ mod tests {
             ],
             sort,
         )?);
+
         let projection4 = Arc::new(ProjectionExec::try_new(
             vec![(
                 Arc::new(BinaryExpr::new(
@@ -5408,6 +5778,7 @@ mod tests {
             )],
             projection3,
         )?);
+
         let filter = Arc::new(FilterExec::try_new(
             Arc::new(BinaryExpr::new(
                 Arc::new(Column::new("sum", 0)),
@@ -5416,7 +5787,9 @@ mod tests {
             )),
             projection4,
         )?) as Arc<dyn ExecutionPlan>;
+
         let initial = get_plan_string(&filter);
+
         let expected_initial = [
             "FilterExec: sum@0 > 0", 
             "  ProjectionExec: expr=[c@2 + x@0 as sum]", 
@@ -5425,15 +5798,19 @@ mod tests {
             "        ProjectionExec: expr=[x@1 as x, c@0 as c, a@2 as x]", 
             "          ProjectionExec: expr=[c@2 as c, e@4 as x, a@0 as a]", 
             "            CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"];
+
         assert_eq!(initial, expected_initial);
+
         let after_optimize =
             OptimizeProjections::new().optimize(filter, &ConfigOptions::new())?;
+
         let expected = [
             "FilterExec: sum@0 > 0", 
             "  ProjectionExec: expr=[c@0 + x@1 as sum]", 
             "    SortExec: expr=[c@0 ASC,x@1 ASC]", 
             "      ProjectionExec: expr=[c@2 as c, a@0 as x]",
             "        CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"];
+
         assert_eq!(get_plan_string(&after_optimize), expected);
         Ok(())
     }
