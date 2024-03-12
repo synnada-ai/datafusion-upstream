@@ -153,7 +153,7 @@ impl ProjectionOptimizer {
     /// 1. If the input plan is also a projection, they can be merged into one projection.
     /// 2. The projection can be removed.
     /// 3. The projection can get narrower.
-    /// 4. The projection can be embedded into the source.
+    /// 4. The projection can be embedded into the plan below.
     /// If none of them is possible, it remains unchanged.
     fn optimize_projections(mut self) -> Result<Self> {
         let projection_input = &self.plan.children()[0];
@@ -184,15 +184,18 @@ impl ProjectionOptimizer {
         // The projection can get narrower.
         self = match self.try_narrow_projection()? {
             narrowed if narrowed.transformed => {
-                // We need to re-run the rule on the new node since it may be removed within the source provider.
+                // We need to re-run the rule on the new node since it may be removed within the plan below.
                 return narrowed.data.optimize_projections();
             }
             no_change => no_change.data,
         };
 
+        // HashJoinExec can own the projection above.
         if projection_input.as_any().is::<HashJoinExec>() {
             self = match self.try_embed_to_hash_join()? {
-                join if join.transformed => return Ok(join.data),
+                join if join.transformed => {
+                    return join.data.adjust_node_with_requirements()
+                }
                 projection => projection.data,
             }
         }
@@ -204,7 +207,7 @@ impl ProjectionOptimizer {
                 no_change => no_change.data,
             }
         }
-        // TODO: Other source execs can be implemented here if projection can be applied within the scope of them.
+        // TODO: Other source execs can be implemented here if projection can be applied inside them.
 
         // If none of them possible, we will continue to next node. Output requirements
         // of the projection in terms of projection input are inserted to child node.
@@ -341,8 +344,9 @@ impl ProjectionOptimizer {
         }))
     }
 
-    /// Some projection can't be pushed down left input or right input of hash join because filter or on need may need some columns that won't be used in later.
-    /// By embed those projection to hash join, we can reduce the cost of build_batch_from_indices in hash join (build_batch_from_indices need to can compute::take() for each column) and avoid unnecessary output creation.
+    /// By embedding projections to hash joins, we can reduce the cost of `build_batch_from_indices`
+    /// in hash join (build_batch_from_indices need to can compute::take() for each column) and avoid
+    /// unnecessary output creation.
     fn try_embed_to_hash_join(mut self) -> Result<Transformed<ProjectionOptimizer>> {
         let Some(projection) = self.plan.as_any().downcast_ref::<ProjectionExec>() else {
             return Ok(Transformed::no(self));
@@ -350,17 +354,15 @@ impl ProjectionOptimizer {
         let Some(hash_join) = self.plan.as_any().downcast_ref::<HashJoinExec>() else {
             return Ok(Transformed::no(self));
         };
+
         // Collect all column indices from the given projection expressions.
         let projection_index = collect_column_indices(projection.expr());
 
-        if projection_index.is_empty() {
-            return Ok(Transformed::no(self));
-        };
-
         // If the projection indices is the same as the input columns, we don't need to embed the projection to hash join.
         // Check the projection_index is 0..n-1 and the length of projection_index is the same as the length of hash_join schema fields.
-        if projection_index.len() == projection_index.last().unwrap() + 1
-            && projection_index.len() == hash_join.schema().fields().len()
+        if projection_index.is_empty()
+            || (projection_index.len() == projection_index.last().unwrap() + 1
+                && projection_index.len() == hash_join.schema().fields().len())
         {
             return Ok(Transformed::no(self));
         }
@@ -382,7 +384,6 @@ impl ProjectionOptimizer {
             .collect::<Vec<_>>();
 
         let mut new_projection_exprs = Vec::with_capacity(projection.expr().len());
-
         for (expr, alias) in projection.expr() {
             // update column index for projection expression since the input schema has been changed.
             let Some(expr) =
@@ -392,28 +393,37 @@ impl ProjectionOptimizer {
             };
             new_projection_exprs.push((expr, alias.clone()));
         }
-        // Old projection may contain some alias or expression such as `a + 1` and `CAST('true' AS BOOLEAN)`, but our projection_exprs in hash join just contain column, so we need to create the new projection to keep the original projection.
+        // Old projection may contain some alias or expression such as `a + 1` and `CAST('true' AS BOOLEAN)`,
+        // but our projection_exprs in hash join just contain column, so we need to create the new projection
+        // to keep the original projection.
         let new_projection =
             ProjectionExec::try_new(new_projection_exprs, new_hash_join.clone())?;
 
-        if is_projection_removable(&new_projection) {
+        let new_node = if is_projection_removable(&new_projection) {
             let required_columns = collect_columns_in_plan_schema(&new_hash_join);
-            Ok(Transformed::yes(Self {
+            Self {
                 plan: new_hash_join,
                 required_columns,
                 schema_mapping: HashMap::new(),
                 children_nodes: self.children_nodes.swap_remove(0).children_nodes,
-            }))
+            }
         } else {
+            let new_join_node = Self {
+                plan: new_hash_join,
+                required_columns: HashSet::new(),
+                schema_mapping: HashMap::new(),
+                children_nodes: self.children_nodes.swap_remove(0).children_nodes,
+            };
             let plan = Arc::new(new_projection) as Arc<dyn ExecutionPlan>;
             let required_columns = collect_columns_in_plan_schema(&plan);
-            Ok(Transformed::yes(Self {
+            Self {
                 plan,
                 required_columns,
                 schema_mapping: HashMap::new(),
-                children_nodes: self.children_nodes.swap_remove(0).children_nodes,
-            }))
-        }
+                children_nodes: vec![new_join_node],
+            }
+        };
+        Ok(Transformed::yes(new_node))
     }
 
     /// Tries to embed [`ProjectionExec`] into its input [`CsvExec`].
@@ -505,7 +515,7 @@ impl ProjectionOptimizer {
         else if let Some(cj) = plan.as_any().downcast_ref::<CrossJoinExec>() {
             self = self.try_insert_below_cross_join(cj)?
         }
-        // Specially handled joins and aggregations
+        // Joins and aggregations require special attention.
         else if let Some(hj) = plan.as_any().downcast_ref::<HashJoinExec>() {
             self = self.try_insert_below_hash_join(hj)?
         } else if let Some(nlj) = plan.as_any().downcast_ref::<NestedLoopJoinExec>() {
@@ -515,22 +525,14 @@ impl ProjectionOptimizer {
         } else if let Some(shj) = plan.as_any().downcast_ref::<SymmetricHashJoinExec>() {
             self = self.try_insert_below_symmetric_hash_join(shj)?
         } else if let Some(agg) = plan.as_any().downcast_ref::<AggregateExec>() {
-            if agg.aggr_expr().iter().any(|expr| {
-                expr.clone()
-                    .with_new_expressions(expr.expressions())
-                    .is_none()
-            }) {
+            if !is_agg_expr_rewritable(agg.aggr_expr()) {
                 self.children_nodes[0].required_columns =
                     collect_columns_in_plan_schema(&self.children_nodes[0].plan);
                 return Ok(self);
             }
             self = self.try_insert_below_aggregate(agg)?
         } else if let Some(w_agg) = plan.as_any().downcast_ref::<WindowAggExec>() {
-            if w_agg.window_expr().iter().any(|expr| {
-                expr.clone()
-                    .with_new_expressions(expr.expressions())
-                    .is_none()
-            }) {
+            if !is_window_expr_rewritable(w_agg.window_expr()) {
                 self.children_nodes[0].required_columns =
                     collect_columns_in_plan_schema(&self.children_nodes[0].plan);
                 return Ok(self);
@@ -538,19 +540,12 @@ impl ProjectionOptimizer {
             self = self.try_insert_below_window_aggregate(w_agg)?
         } else if let Some(bw_agg) = plan.as_any().downcast_ref::<BoundedWindowAggExec>()
         {
-            if bw_agg.window_expr().iter().any(|expr| {
-                expr.clone()
-                    .with_new_expressions(expr.expressions())
-                    .is_none()
-            }) {
+            if !is_window_expr_rewritable(bw_agg.window_expr()) {
                 self.children_nodes[0].required_columns =
                     collect_columns_in_plan_schema(&self.children_nodes[0].plan);
                 return Ok(self);
             }
             self = self.try_insert_below_bounded_window_aggregate(bw_agg)?
-        } else if let Some(_file_sink) = plan.as_any().downcast_ref::<FileSinkExec>() {
-            self.children_nodes[0].required_columns =
-                collect_columns_in_plan_schema(&self.children_nodes[0].plan)
         } else {
             self.children_nodes.iter_mut().for_each(|c| {
                 c.required_columns = collect_columns_in_plan_schema(&c.plan)
@@ -3517,6 +3512,24 @@ fn is_projection_removable(projection: &ProjectionExec) -> bool {
     }) && exprs.len() == projection.input().schema().fields().len()
 }
 
+/// Tries to rewrite the [`AggregateExpr`] with the existing expressions to keep on optimization.
+fn is_agg_expr_rewritable(aggr_expr: &[Arc<(dyn AggregateExpr)>]) -> bool {
+    aggr_expr.iter().any(|expr| {
+        expr.clone()
+            .with_new_expressions(expr.expressions())
+            .is_some()
+    })
+}
+
+/// Tries to rewrite the [`WindowExpr`] with the existing expressions to keep on optimization.
+fn is_window_expr_rewritable(window_expr: &[Arc<(dyn WindowExpr)>]) -> bool {
+    window_expr.iter().any(|expr| {
+        expr.clone()
+            .with_new_expressions(expr.expressions())
+            .is_some()
+    })
+}
+
 /// Updates a source provider's projected columns according to the given
 /// projection operator's expressions. To use this function safely, one must
 /// ensure that all expressions are `Column` expressions without aliases.
@@ -3819,7 +3832,7 @@ fn collect_column_indices(exprs: &[(Arc<dyn PhysicalExpr>, String)]) -> Vec<usiz
         .iter()
         .flat_map(|(expr, _)| collect_columns(expr))
         .map(|x| x.index())
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
     indexs.sort();
