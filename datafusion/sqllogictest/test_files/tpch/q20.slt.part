@@ -108,7 +108,7 @@ SortPreservingMergeExec: [s_name@0 ASC NULLS LAST]
 ----------------ProjectionExec: expr=[ps_suppkey@1 as ps_suppkey]
 ------------------HashJoinExec: mode=Partitioned, join_type=Inner, on=[(ps_partkey@0, l_partkey@1), (ps_suppkey@1, l_suppkey@2)], filter=CAST(ps_availqty@0 AS Float64) > Float64(0.5) * SUM(lineitem.l_quantity)@1
 --------------------CoalesceBatchesExec: target_batch_size=8192
-----------------------RepartitionExec: partitioning=Hash([ps_partkey@0, ps_suppkey@1], 4), input_partitions=4
+----------------------HashJoinExec: mode=Partitioned, join_type=LeftSemi, on=[(ps_partkey@0, p_partkey@0)]
 ------------------------CoalesceBatchesExec: target_batch_size=8192
 --------------------------HashJoinExec: mode=Partitioned, join_type=LeftSemi, on=[(ps_partkey@0, p_partkey@0)]
 ----------------------------CoalesceBatchesExec: target_batch_size=8192

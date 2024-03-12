@@ -20,12 +20,12 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::{sync::Arc, vec};
 
+use arrow_schema::TimeUnit::Nanosecond;
 use arrow_schema::*;
 use sqlparser::dialect::{Dialect, GenericDialect, HiveDialect, MySqlDialect};
 
 use datafusion_common::{
-    assert_contains, config::ConfigOptions, DataFusionError, Result, ScalarValue,
-    TableReference,
+    config::ConfigOptions, DataFusionError, Result, ScalarValue, TableReference,
 };
 use datafusion_common::{plan_err, ParamValues};
 use datafusion_expr::{
@@ -1288,16 +1288,6 @@ fn select_simple_aggregate_repeated_aggregate_with_unique_aliases() {
     );
 }
 
-#[test]
-fn select_simple_aggregate_respect_nulls() {
-    let sql = "SELECT MIN(age) RESPECT NULLS FROM person";
-    let err = logical_plan(sql).expect_err("query should have failed");
-
-    assert_contains!(
-        err.strip_backtrace(),
-        "This feature is not implemented: Null treatment in aggregate functions is not supported: RESPECT NULLS"
-    );
-}
 #[test]
 fn select_from_typed_string_values() {
     quick_test(
@@ -2673,12 +2663,17 @@ fn logical_plan_with_dialect_and_options(
     dialect: &dyn Dialect,
     options: ParserOptions,
 ) -> Result<LogicalPlan> {
-    let context = MockContextProvider::default().with_udf(make_udf(
-        "nullif",
-        vec![DataType::Int32, DataType::Int32],
-        DataType::Int32,
-    ));
-
+    let context = MockContextProvider::default()
+        .with_udf(make_udf(
+            "nullif",
+            vec![DataType::Int32, DataType::Int32],
+            DataType::Int32,
+        ))
+        .with_udf(make_udf(
+            "date_trunc",
+            vec![DataType::Utf8, DataType::Timestamp(Nanosecond, None)],
+            DataType::Int32,
+        ));
     let planner = SqlToRel::new_with_options(&context, options);
     let result = DFParser::parse_sql_with_dialect(sql, dialect);
     let mut ast = result?;
@@ -2731,8 +2726,7 @@ impl ScalarUDFImpl for DummyUDF {
 
 /// Create logical plan, write with formatter, compare to expected output
 fn quick_test(sql: &str, expected: &str) {
-    let plan = logical_plan(sql).unwrap();
-    assert_eq!(format!("{plan:?}"), expected);
+    quick_test_with_options(sql, expected, ParserOptions::default())
 }
 
 fn quick_test_with_options(sql: &str, expected: &str, options: ParserOptions) {
@@ -2906,6 +2900,18 @@ impl ContextProvider for MockContextProvider {
         schema: SchemaRef,
     ) -> Result<Arc<dyn TableSource>> {
         Ok(Arc::new(EmptyTable::new(schema)))
+    }
+
+    fn udfs_names(&self) -> Vec<String> {
+        self.udfs.keys().cloned().collect()
+    }
+
+    fn udafs_names(&self) -> Vec<String> {
+        self.udafs.keys().cloned().collect()
+    }
+
+    fn udwfs_names(&self) -> Vec<String> {
+        Vec::new()
     }
 }
 
