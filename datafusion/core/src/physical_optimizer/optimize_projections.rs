@@ -1053,6 +1053,7 @@ impl ProjectionOptimizer {
                             new_on,
                             new_filter,
                             hj.join_type(),
+                            None,
                             *hj.partition_mode(),
                             hj.null_equals_null(),
                         )?) as _;
@@ -1091,6 +1092,7 @@ impl ProjectionOptimizer {
                             new_on,
                             new_filter,
                             hj.join_type(),
+                            None,
                             *hj.partition_mode(),
                             hj.null_equals_null(),
                         )?) as _;
@@ -1136,6 +1138,7 @@ impl ProjectionOptimizer {
                             new_on,
                             new_filter,
                             hj.join_type(),
+                            None,
                             *hj.partition_mode(),
                             hj.null_equals_null(),
                         )?) as _;
@@ -1180,6 +1183,7 @@ impl ProjectionOptimizer {
                             new_on,
                             new_filter,
                             hj.join_type(),
+                            None,
                             *hj.partition_mode(),
                             hj.null_equals_null(),
                         )?) as _;
@@ -1232,6 +1236,7 @@ impl ProjectionOptimizer {
                             new_on,
                             new_filter,
                             hj.join_type(),
+                            None,
                             *hj.partition_mode(),
                             hj.null_equals_null(),
                         )?) as _;
@@ -4231,6 +4236,7 @@ fn rewrite_hash_join(
         new_on,
         new_filter,
         hj.join_type(),
+        None,
         *hj.partition_mode(),
         hj.null_equals_null(),
     )

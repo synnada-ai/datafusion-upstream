@@ -42,20 +42,6 @@ pub enum GetFieldAccessExpr {
     NamedStructField { name: ScalarValue },
 }
 
-impl GetFieldAccessExpr {
-    pub fn exprs(&self) -> Vec<Arc<dyn PhysicalExpr>> {
-        match self {
-            GetFieldAccessExpr::NamedStructField { .. } => vec![],
-            GetFieldAccessExpr::ListIndex { key } => vec![key.clone()],
-            GetFieldAccessExpr::ListRange {
-                start,
-                stop,
-                stride,
-            } => vec![start.clone(), stop.clone(), stride.clone()],
-        }
-    }
-}
-
 impl std::fmt::Display for GetFieldAccessExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
@@ -178,9 +164,7 @@ impl PhysicalExpr for GetIndexedFieldExpr {
     }
 
     fn children(&self) -> Vec<Arc<dyn PhysicalExpr>> {
-        let mut children = vec![self.arg.clone()];
-        children.extend(self.field.exprs());
-        children
+        vec![self.arg.clone()]
     }
 
     fn with_new_children(
