@@ -65,11 +65,11 @@ use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::utils::{get_at_indices, set_difference};
 use datafusion_physical_expr::window::WindowExpr;
 use datafusion_physical_expr::{PhysicalExpr, PhysicalSortExpr, PhysicalSortRequirement};
+use datafusion_physical_plan::aggregates::AggregateExec;
 use datafusion_physical_plan::repartition::RepartitionExec;
 use datafusion_physical_plan::sorts::partial_sort::PartialSortExec;
 use datafusion_physical_plan::windows::get_window_mode;
 use datafusion_physical_plan::ExecutionPlanProperties;
-use datafusion_physical_plan::aggregates::AggregateExec;
 
 use itertools::izip;
 
@@ -200,8 +200,7 @@ impl PhysicalOptimizerRule for EnforceSorting {
             .transform_up(&|plan| Ok(Transformed::yes(replace_mode_of_aggregate(plan)?)))
             .data()?;
 
-        let plan = adjusted
-            .plan
+        let plan = plan
             .transform_up(&|plan| Ok(Transformed::yes(replace_mode_of_window(plan)?)))
             .data()?;
 
@@ -260,7 +259,29 @@ fn replace_mode_of_aggregate(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     if let Some(aggregate) = plan.as_any().downcast_ref::<AggregateExec>() {
-        // 
+        let group_by_exprs = aggregate.group_by().input_exprs();
+        let (mut ordering, gb_ordered_indices) = aggregate
+            .input
+            .equivalence_properties()
+            .find_longest_permutation(&group_by_exprs);
+        if !gb_ordered_indices.is_empty()
+            && gb_ordered_indices.len() < group_by_exprs.len()
+        {
+            // Partially Sorted Mode
+            let all_indices = (0..group_by_exprs.len()).collect::<Vec<_>>();
+            let missing_indices = set_difference(all_indices, &gb_ordered_indices);
+            let missing_partition_bys = get_at_indices(&group_by_exprs, missing_indices)?;
+            ordering.extend(with_default_ordering(missing_partition_bys));
+
+            let child = aggregate.input().clone();
+            let preserve_partitioning = child.output_partitioning().partition_count() > 1;
+            let new_child = Arc::new(
+                SortExec::new(ordering, child)
+                    .with_preserve_partitioning(preserve_partitioning),
+            ) as Arc<dyn ExecutionPlan>;
+
+            return plan.with_new_children(vec![new_child]);
+        }
     }
     Ok(plan)
 }
@@ -336,8 +357,6 @@ fn contruct_window(
     let partition_by_exprs = window_exprs[0].partition_by();
     let order_by_exprs = window_exprs[0].order_by();
 
-    let preserve_partitioning = child.output_partitioning().partition_count() > 1;
-
     let (mut ordering, pb_ordered_indices) = child
         .equivalence_properties()
         .find_longest_permutation(partition_by_exprs);
@@ -363,6 +382,7 @@ fn contruct_window(
         InputOrderMode::Sorted
     };
 
+    let preserve_partitioning = child.output_partitioning().partition_count() > 1;
     let new_child = Arc::new(
         SortExec::new(ordering, child).with_preserve_partitioning(preserve_partitioning),
     ) as Arc<dyn ExecutionPlan>;
