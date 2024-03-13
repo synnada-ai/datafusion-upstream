@@ -59,11 +59,15 @@ use crate::physical_plan::windows::{
 };
 use crate::physical_plan::{Distribution, ExecutionPlan, InputOrderMode};
 
+use arrow_schema::SortOptions;
 use datafusion_common::plan_err;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
-use datafusion_physical_expr::{PhysicalSortExpr, PhysicalSortRequirement};
+use datafusion_common::utils::{get_at_indices, set_difference};
+use datafusion_physical_expr::window::WindowExpr;
+use datafusion_physical_expr::{PhysicalExpr, PhysicalSortExpr, PhysicalSortRequirement};
 use datafusion_physical_plan::repartition::RepartitionExec;
 use datafusion_physical_plan::sorts::partial_sort::PartialSortExec;
+use datafusion_physical_plan::windows::get_window_mode;
 use datafusion_physical_plan::ExecutionPlanProperties;
 
 use itertools::izip;
@@ -190,10 +194,15 @@ impl PhysicalOptimizerRule for EnforceSorting {
         assign_initial_requirements(&mut sort_pushdown);
         let adjusted = sort_pushdown.transform_down(&pushdown_sorts)?.data;
 
-        adjusted
+        let plan = adjusted
             .plan
+            .transform_up(&|plan| Ok(Transformed::yes(replace_mode_of_window(plan)?)))
+            .data()?;
+
+        let res = plan
             .transform_up(&|plan| Ok(Transformed::yes(replace_with_partial_sort(plan)?)))
-            .data()
+            .data()?;
+        Ok(res)
     }
 
     fn name(&self) -> &str {
@@ -239,6 +248,125 @@ fn replace_with_partial_sort(
         }
     }
     Ok(plan)
+}
+
+fn replace_mode_of_window(
+    plan: Arc<dyn ExecutionPlan>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let mut window_exprs;
+    let mut input_order_mode = InputOrderMode::Sorted;
+    let mut ordering_satisfied = false;
+    let mut partition_keys;
+    if let Some(window) = plan.as_any().downcast_ref::<BoundedWindowAggExec>() {
+        partition_keys = Some(window.partition_keys.to_vec());
+        let partition_by_exprs = window.window_expr()[0].partition_by();
+        let order_by_exprs = window.window_expr()[0].order_by();
+        window_exprs = Some(window.window_expr().to_vec());
+        if let Some((should_reverse, mode)) =
+            get_window_mode(partition_by_exprs, order_by_exprs, window.input())
+        {
+            if should_reverse {
+                if let Some(reversed_window_expr) = window
+                    .window_expr()
+                    .iter()
+                    .map(|e| e.get_reverse_expr())
+                    .collect::<Option<Vec<_>>>()
+                {
+                    ordering_satisfied = true;
+                    window_exprs = Some(reversed_window_expr);
+                    input_order_mode = mode;
+                }
+            } else {
+                ordering_satisfied = true;
+                input_order_mode = mode;
+            }
+        }
+    } else {
+        return Ok(plan);
+    }
+
+    let window_exprs = window_exprs.unwrap();
+    let partition_keys = partition_keys.unwrap();
+
+    if !ordering_satisfied {
+        let child = plan.children().swap_remove(0);
+        return contruct_window(window_exprs, child, partition_keys);
+    }
+
+    let (input_order_mode, new_child) = match input_order_mode {
+        InputOrderMode::Sorted | InputOrderMode::Linear => {
+            let child = plan.children().swap_remove(0);
+            // Can use as is
+            (input_order_mode, child)
+        }
+        InputOrderMode::PartiallySorted(_) => {
+            let child = plan.children().swap_remove(0);
+            return contruct_window(window_exprs, child, partition_keys);
+        }
+    };
+
+    Ok(Arc::new(BoundedWindowAggExec::try_new(
+        window_exprs,
+        new_child,
+        partition_keys,
+        input_order_mode,
+    )?))
+}
+
+fn contruct_window(
+    window_exprs: Vec<Arc<dyn WindowExpr>>,
+    child: Arc<dyn ExecutionPlan>,
+    partition_keys: Vec<Arc<dyn PhysicalExpr>>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let partition_by_exprs = window_exprs[0].partition_by();
+    let order_by_exprs = window_exprs[0].order_by();
+
+    let preserve_partitioning = child.output_partitioning().partition_count() > 1;
+
+    let (mut ordering, pb_ordered_indices) = child
+        .equivalence_properties()
+        .find_longest_permutation(partition_by_exprs);
+
+    let mode = if !pb_ordered_indices.is_empty() || partition_by_exprs.is_empty() {
+        let all_indices = (0..partition_by_exprs.len()).collect::<Vec<_>>();
+        let missing_indices = set_difference(all_indices, &pb_ordered_indices);
+        let missing_partition_bys = get_at_indices(partition_by_exprs, missing_indices)?;
+        ordering.extend(with_default_ordering(missing_partition_bys));
+        ordering.extend_from_slice(order_by_exprs);
+        InputOrderMode::Sorted
+    } else if !order_by_exprs.is_empty()
+        && child
+            .equivalence_properties()
+            .ordering_satisfy(&order_by_exprs[0..1])
+    {
+        ordering.extend_from_slice(order_by_exprs);
+        InputOrderMode::Linear
+    } else {
+        assert!(ordering.is_empty());
+        ordering.extend(with_default_ordering(partition_by_exprs.to_vec()));
+        ordering.extend_from_slice(order_by_exprs);
+        InputOrderMode::Sorted
+    };
+
+    let new_child = Arc::new(
+        SortExec::new(ordering, child).with_preserve_partitioning(preserve_partitioning),
+    ) as Arc<dyn ExecutionPlan>;
+    Ok(Arc::new(BoundedWindowAggExec::try_new(
+        window_exprs,
+        new_child,
+        partition_keys,
+        mode,
+    )?))
+}
+
+fn with_default_ordering(exprs: Vec<Arc<dyn PhysicalExpr>>) -> Vec<PhysicalSortExpr> {
+    exprs
+        .into_iter()
+        .map(|expr| PhysicalSortExpr {
+            expr,
+            options: SortOptions::default(),
+        })
+        .collect()
 }
 
 /// This function turns plans of the form
