@@ -69,6 +69,7 @@ use datafusion_physical_plan::repartition::RepartitionExec;
 use datafusion_physical_plan::sorts::partial_sort::PartialSortExec;
 use datafusion_physical_plan::windows::get_window_mode;
 use datafusion_physical_plan::ExecutionPlanProperties;
+use datafusion_physical_plan::aggregates::AggregateExec;
 
 use itertools::izip;
 
@@ -196,6 +197,11 @@ impl PhysicalOptimizerRule for EnforceSorting {
 
         let plan = adjusted
             .plan
+            .transform_up(&|plan| Ok(Transformed::yes(replace_mode_of_aggregate(plan)?)))
+            .data()?;
+
+        let plan = adjusted
+            .plan
             .transform_up(&|plan| Ok(Transformed::yes(replace_mode_of_window(plan)?)))
             .data()?;
 
@@ -246,6 +252,15 @@ fn replace_with_partial_sort(
                 .with_fetch(sort_plan.fetch()),
             ));
         }
+    }
+    Ok(plan)
+}
+
+fn replace_mode_of_aggregate(
+    plan: Arc<dyn ExecutionPlan>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    if let Some(aggregate) = plan.as_any().downcast_ref::<AggregateExec>() {
+        // 
     }
     Ok(plan)
 }
