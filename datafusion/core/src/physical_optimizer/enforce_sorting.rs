@@ -256,7 +256,7 @@ fn replace_mode_of_window(
     let mut window_exprs;
     let mut input_order_mode = InputOrderMode::Sorted;
     let mut ordering_satisfied = false;
-    let mut partition_keys;
+    let partition_keys;
     if let Some(window) = plan.as_any().downcast_ref::<BoundedWindowAggExec>() {
         partition_keys = Some(window.partition_keys.to_vec());
         let partition_by_exprs = window.window_expr()[0].partition_by();
