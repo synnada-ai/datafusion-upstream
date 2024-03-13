@@ -202,10 +202,7 @@ impl ProjectionOptimizer {
 
         // Source providers:
         if projection_input.as_any().is::<CsvExec>() {
-            self = match self.try_projected_csv() {
-                new_csv if new_csv.transformed => return Ok(new_csv.data),
-                no_change => no_change.data,
-            }
+            return self.try_projected_csv();
         }
         // TODO: Other source execs can be implemented here if projection can be applied inside them.
 
@@ -427,45 +424,128 @@ impl ProjectionOptimizer {
     }
 
     /// Tries to embed [`ProjectionExec`] into its input [`CsvExec`].
-    fn try_projected_csv(self) -> Transformed<ProjectionOptimizer> {
+    fn try_projected_csv(self) -> Result<ProjectionOptimizer> {
         // These plans are known.
         let Some(projection) = self.plan.as_any().downcast_ref::<ProjectionExec>() else {
-            return Transformed::no(self);
+            return Ok(self);
         };
         let Some(csv) = projection.input().as_any().downcast_ref::<CsvExec>() else {
-            return Transformed::no(self);
+            return Ok(self);
         };
         // If there is any non-column or alias-carrier expression, Projection should not be removed.
         // This process can be moved into CsvExec, but it could be a conflict of their responsibility.
-        let Some(projection_columns) = collect_alias_free_columns(projection.expr())
-        else {
-            return Transformed::no(self);
-        };
+        if let Some(projection_columns) = collect_alias_free_columns(projection.expr()) {
+            let mut file_scan = csv.base_config().clone();
+            let new_projections = new_projections_for_columns(
+                &projection_columns,
+                &file_scan
+                    .projection
+                    .unwrap_or((0..csv.schema().fields().len()).collect()),
+            );
 
-        let mut file_scan = csv.base_config().clone();
+            file_scan.projection = Some(new_projections);
 
-        let new_projections = new_projections_for_columns(
-            &projection_columns,
-            &file_scan
+            Ok(ProjectionOptimizer {
+                plan: Arc::new(CsvExec::new(
+                    file_scan,
+                    csv.has_header(),
+                    csv.delimiter(),
+                    csv.quote(),
+                    csv.escape(),
+                    csv.file_compression_type,
+                )) as _,
+                required_columns: HashSet::new(),
+                schema_mapping: HashMap::new(), // Sources cannot have a mapping.
+                children_nodes: vec![],
+            })
+        } else {
+            let mut file_scan = csv.base_config().clone();
+            let used_column_indices = projection
+                .expr()
+                .iter()
+                .flat_map(|(expr, _)| collect_columns(expr))
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .map(|col| col.index())
+                .collect::<Vec<_>>();
+
+            let used_csv_indices = file_scan
                 .projection
-                .unwrap_or((0..csv.schema().fields().len()).collect()),
-        );
+                .clone()
+                .unwrap_or((0..csv.schema().fields().len()).collect())
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, csv_indx)| {
+                    if used_column_indices.contains(&idx) {
+                        Some(*csv_indx)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
 
-        file_scan.projection = Some(new_projections);
+            let unused_indices = file_scan
+                .projection
+                .unwrap_or((0..csv.schema().fields().len()).collect())
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, csv_idx)| {
+                    if used_csv_indices.contains(&csv_idx) {
+                        None
+                    } else {
+                        Some(idx)
+                    }
+                })
+                .collect::<Vec<_>>();
 
-        Transformed::yes(ProjectionOptimizer {
-            plan: Arc::new(CsvExec::new(
-                file_scan,
-                csv.has_header(),
-                csv.delimiter(),
-                csv.quote(),
-                csv.escape(),
-                csv.file_compression_type,
-            )) as _,
-            required_columns: HashSet::new(),
-            schema_mapping: HashMap::new(), // Sources cannot have a mapping.
-            children_nodes: vec![],
-        })
+            let new_exprs = projection
+                .expr()
+                .iter()
+                .map(|(expr, alias)| {
+                    let new_expr = expr
+                        .clone()
+                        .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
+                            let Some(column) = expr.as_any().downcast_ref::<Column>()
+                            else {
+                                return Ok(Transformed::no(expr));
+                            };
+                            let diff = unused_indices
+                                .iter()
+                                .filter(|idx| **idx < column.index())
+                                .count();
+                            Ok(Transformed::yes(Arc::new(Column::new(
+                                column.name(),
+                                column.index() - diff,
+                            ))))
+                        })?
+                        .data;
+                    Ok((new_expr, alias.to_owned()))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            file_scan.projection = Some(used_csv_indices);
+            let new_csv = ProjectionOptimizer {
+                plan: Arc::new(CsvExec::new(
+                    file_scan,
+                    csv.has_header(),
+                    csv.delimiter(),
+                    csv.quote(),
+                    csv.escape(),
+                    csv.file_compression_type,
+                )) as _,
+                required_columns: HashSet::new(),
+                schema_mapping: HashMap::new(), // Sources cannot have a mapping.
+                children_nodes: vec![],
+            };
+
+            Ok(Self {
+                plan: Arc::new(ProjectionExec::try_new(new_exprs, new_csv.plan.clone())?)
+                    as Arc<dyn ExecutionPlan>,
+                required_columns: self.required_columns,
+                schema_mapping: self.schema_mapping,
+                children_nodes: vec![new_csv],
+            })
+        }
     }
 
     /// If the node plan can be rewritten with a narrower schema, a projection is inserted
@@ -5133,9 +5213,9 @@ mod tests {
             OptimizeProjections::new().optimize(top_projection, &ConfigOptions::new())?;
 
         let expected = [
-            "ProjectionExec: expr=[b@1 as new_b, c@2 + e@4 as binary, b@1 as newest_b]",
-            "  CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
-        ];
+            "ProjectionExec: expr=[b@0 as new_b, c@1 + e@2 as binary, b@0 as newest_b]", 
+            "  CsvExec: file_groups={1 group: [[x]]}, projection=[b, c, e], has_header=false"
+            ];
         assert_eq!(get_plan_string(&after_optimize), expected);
 
         Ok(())
@@ -5821,8 +5901,8 @@ mod tests {
             "FilterExec: sum@0 > 0", 
             "  ProjectionExec: expr=[c@0 + x@1 as sum]", 
             "    SortExec: expr=[c@0 ASC,x@1 ASC]", 
-            "      ProjectionExec: expr=[c@2 as c, a@0 as x]",
-            "        CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"];
+            "      ProjectionExec: expr=[c@1 as c, a@0 as x]", 
+            "        CsvExec: file_groups={1 group: [[x]]}, projection=[a, c], has_header=false"];
 
         assert_eq!(get_plan_string(&after_optimize), expected);
         Ok(())
