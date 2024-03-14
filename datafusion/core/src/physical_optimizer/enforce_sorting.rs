@@ -257,8 +257,13 @@ fn replace_with_partial_sort(
 
 fn add_sort_on_top(
     mut plan: Arc<dyn ExecutionPlan>,
-    sort_exprs: LexOrdering,
+    mut sort_exprs: LexOrdering,
 ) -> Arc<dyn ExecutionPlan> {
+    sort_exprs.retain(|sort_expr| {
+        !plan
+            .equivalence_properties()
+            .is_expr_constant(&sort_expr.expr)
+    });
     if plan.equivalence_properties().ordering_satisfy(&sort_exprs) {
         // Requirement already satisfied, return existing plan without modification.
         return plan;
@@ -312,13 +317,7 @@ fn replace_partial_mode_with_full_mode(
 fn replace_mode_of_aggregate(
     aggregate: &AggregateExec,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-    let mut groupby_exprs = aggregate.group_by().input_exprs();
-    groupby_exprs.retain(|expr| {
-        !aggregate
-            .input
-            .equivalence_properties()
-            .is_expr_constant(expr)
-    });
+    let groupby_exprs = aggregate.group_by().input_exprs();
     let (mut ordering, gb_ordered_indices) = aggregate
         .input
         .equivalence_properties()

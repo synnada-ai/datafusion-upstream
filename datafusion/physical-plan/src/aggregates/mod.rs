@@ -323,9 +323,7 @@ impl AggregateExec {
 
         let input_eq_properties = input.equivalence_properties();
         // Get GROUP BY expressions:
-        let mut groupby_exprs = group_by.input_exprs();
-        groupby_exprs
-            .retain(|expr| !input.equivalence_properties().is_expr_constant(expr));
+        let groupby_exprs = group_by.input_exprs();
         // If existing ordering satisfies a prefix of the GROUP BY expressions,
         // prefix requirements with this section. In this case, aggregation will
         // work more efficiently.
