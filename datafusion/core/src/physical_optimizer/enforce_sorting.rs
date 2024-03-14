@@ -198,7 +198,9 @@ impl PhysicalOptimizerRule for EnforceSorting {
 
         let plan = adjusted
             .plan
-            .transform_up(&|plan| Ok(Transformed::yes(replace_partial_mode_with_full_mode(plan)?)))
+            .transform_up(&|plan| {
+                Ok(Transformed::yes(replace_partial_mode_with_full_mode(plan)?))
+            })
             .data()?;
 
         let res = plan
@@ -255,10 +257,10 @@ fn replace_with_partial_sort(
 fn replace_partial_mode_with_full_mode(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    if let Some(_aggregate) = plan.as_any().downcast_ref::<AggregateExec>() {
-        replace_mode_of_aggregate(plan)
-    } else if let Some(_window) = plan.as_any().downcast_ref::<BoundedWindowAggExec>(){
-        replace_mode_of_window(plan)
+    if let Some(aggregate) = plan.as_any().downcast_ref::<AggregateExec>() {
+        replace_mode_of_aggregate(aggregate)
+    } else if let Some(window) = plan.as_any().downcast_ref::<BoundedWindowAggExec>() {
+        replace_mode_of_window(window)
     } else {
         // TODO: Add ordering requirement handling
         Ok(plan)
@@ -266,88 +268,91 @@ fn replace_partial_mode_with_full_mode(
 }
 
 fn replace_mode_of_aggregate(
-    plan: Arc<dyn ExecutionPlan>,
+    aggregate: &AggregateExec,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    if let Some(aggregate) = plan.as_any().downcast_ref::<AggregateExec>() {
-        let mut groupby_exprs = aggregate.group_by().input_exprs();
-        groupby_exprs.retain(|expr| expr.as_any().downcast_ref::<Literal>().is_none());
-        let (mut ordering, gb_ordered_indices) = aggregate
-            .input
-            .equivalence_properties()
-            .find_longest_permutation(&groupby_exprs);
-        if !gb_ordered_indices.is_empty()
-            && gb_ordered_indices.len() < groupby_exprs.len()
-        {
-            // Partially Sorted Mode
-            let all_indices = (0..groupby_exprs.len()).collect::<Vec<_>>();
-            let missing_indices = set_difference(all_indices, &gb_ordered_indices);
-            let missing_partition_bys = get_at_indices(&groupby_exprs, missing_indices)?;
-            ordering.extend(with_default_ordering(missing_partition_bys));
+    let mut groupby_exprs = aggregate.group_by().input_exprs();
+    groupby_exprs.retain(|expr| expr.as_any().downcast_ref::<Literal>().is_none());
+    let (mut ordering, gb_ordered_indices) = aggregate
+        .input
+        .equivalence_properties()
+        .find_longest_permutation(&groupby_exprs);
+    let new_child = if !gb_ordered_indices.is_empty()
+        && gb_ordered_indices.len() < groupby_exprs.len()
+    {
+        // Partially Sorted Mode
+        let all_indices = (0..groupby_exprs.len()).collect::<Vec<_>>();
+        let missing_indices = set_difference(all_indices, &gb_ordered_indices);
+        let missing_partition_bys = get_at_indices(&groupby_exprs, missing_indices)?;
+        ordering.extend(with_default_ordering(missing_partition_bys));
 
-            let child = aggregate.input().clone();
-            let preserve_partitioning = child.output_partitioning().partition_count() > 1;
-            let new_child = Arc::new(
-                SortExec::new(ordering, child)
-                    .with_preserve_partitioning(preserve_partitioning),
-            ) as Arc<dyn ExecutionPlan>;
+        let child = aggregate.input().clone();
+        let preserve_partitioning = child.output_partitioning().partition_count() > 1;
+        Arc::new(
+            SortExec::new(ordering, child)
+                .with_preserve_partitioning(preserve_partitioning),
+        ) as Arc<dyn ExecutionPlan>
+    } else {
+        aggregate.input.clone()
+    };
 
-            return plan.with_new_children(vec![new_child]);
-        }
-    }
-    Ok(plan)
+    Ok(Arc::new(
+        AggregateExec::try_new(
+            *aggregate.mode(),
+            aggregate.group_by().clone(),
+            aggregate.aggr_expr().to_vec(),
+            aggregate.filter_expr().to_vec(),
+            new_child,
+            aggregate.input_schema.clone(),
+        )?
+        .with_limit(aggregate.limit()),
+    ))
 }
 
 fn replace_mode_of_window(
-    plan: Arc<dyn ExecutionPlan>,
+    window: &BoundedWindowAggExec,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let mut window_exprs;
     let mut input_order_mode = InputOrderMode::Sorted;
     let mut ordering_satisfied = false;
-    let partition_keys;
-    if let Some(window) = plan.as_any().downcast_ref::<BoundedWindowAggExec>() {
-        partition_keys = Some(window.partition_keys.to_vec());
-        let partition_by_exprs = window.window_expr()[0].partition_by();
-        let order_by_exprs = window.window_expr()[0].order_by();
-        window_exprs = Some(window.window_expr().to_vec());
-        if let Some((should_reverse, mode)) =
-            get_window_mode(partition_by_exprs, order_by_exprs, window.input())
-        {
-            if should_reverse {
-                if let Some(reversed_window_expr) = window
-                    .window_expr()
-                    .iter()
-                    .map(|e| e.get_reverse_expr())
-                    .collect::<Option<Vec<_>>>()
-                {
-                    ordering_satisfied = true;
-                    window_exprs = Some(reversed_window_expr);
-                    input_order_mode = mode;
-                }
-            } else {
+    let partition_keys = window.partition_keys.to_vec();
+    let partition_by_exprs = window.window_expr()[0].partition_by();
+    let order_by_exprs = window.window_expr()[0].order_by();
+    window_exprs = Some(window.window_expr().to_vec());
+    if let Some((should_reverse, mode)) =
+        get_window_mode(partition_by_exprs, order_by_exprs, window.input())
+    {
+        if should_reverse {
+            if let Some(reversed_window_expr) = window
+                .window_expr()
+                .iter()
+                .map(|e| e.get_reverse_expr())
+                .collect::<Option<Vec<_>>>()
+            {
                 ordering_satisfied = true;
+                window_exprs = Some(reversed_window_expr);
                 input_order_mode = mode;
             }
+        } else {
+            ordering_satisfied = true;
+            input_order_mode = mode;
         }
-    } else {
-        return Ok(plan);
     }
 
     let window_exprs = window_exprs.unwrap();
-    let partition_keys = partition_keys.unwrap();
 
     if !ordering_satisfied {
-        let child = plan.children().swap_remove(0);
+        let child = window.input().clone();
         return contruct_window(window_exprs, child, partition_keys);
     }
 
     let (input_order_mode, new_child) = match input_order_mode {
         InputOrderMode::Sorted | InputOrderMode::Linear => {
-            let child = plan.children().swap_remove(0);
+            let child = window.input().clone();
             // Can use as is
             (input_order_mode, child)
         }
         InputOrderMode::PartiallySorted(_) => {
-            let child = plan.children().swap_remove(0);
+            let child = window.input().clone();
             return contruct_window(window_exprs, child, partition_keys);
         }
     };
