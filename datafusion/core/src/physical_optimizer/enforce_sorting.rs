@@ -190,20 +190,21 @@ impl PhysicalOptimizerRule for EnforceSorting {
             })
             .data()?;
 
-        // Execute a top-down traversal to exploit sort push-down opportunities
-        // missed by the bottom-up traversal:
-        let mut sort_pushdown = SortPushDown::new_default(updated_plan.plan);
-        assign_initial_requirements(&mut sort_pushdown);
-        let adjusted = sort_pushdown.transform_down(&pushdown_sorts)?.data;
-
-        let plan = adjusted
+        let plan = updated_plan
             .plan
             .transform_up(&|plan| {
                 Ok(Transformed::yes(replace_partial_mode_with_full_mode(plan)?))
             })
             .data()?;
 
-        let res = plan
+        // Execute a top-down traversal to exploit sort push-down opportunities
+        // missed by the bottom-up traversal:
+        let mut sort_pushdown = SortPushDown::new_default(plan);
+        assign_initial_requirements(&mut sort_pushdown);
+        let adjusted = sort_pushdown.transform_down(&pushdown_sorts)?.data;
+
+        let res = adjusted
+            .plan
             .transform_up(&|plan| Ok(Transformed::yes(replace_with_partial_sort(plan)?)))
             .data()?;
         Ok(res)
@@ -264,8 +265,32 @@ fn replace_partial_mode_with_full_mode(
         // If None, return original plan as is
         Ok(replace_mode_of_window(window)?.unwrap_or(plan))
     } else {
-        // TODO: Add ordering requirement handling
-        Ok(plan)
+        let required_orderings = plan.required_input_ordering();
+        let children = plan.children();
+        let mut child_modified = false;
+        let new_children = izip!(children, required_orderings)
+            .map(|(child, reqs)| {
+                let reqs = reqs.unwrap_or_default();
+                if !child
+                    .equivalence_properties()
+                    .ordering_satisfy_requirement(&reqs)
+                {
+                    let sort_exprs = PhysicalSortRequirement::to_sort_exprs(reqs);
+                    child_modified = true;
+                    Arc::new(
+                        SortExec::new(sort_exprs, child).with_preserve_partitioning(true),
+                    ) as Arc<dyn ExecutionPlan>
+                } else {
+                    child
+                }
+            })
+            .collect::<Vec<_>>();
+        if child_modified {
+            // Since at least one of the children changes, update plan.
+            plan.with_new_children(new_children)
+        } else {
+            Ok(plan)
+        }
     }
 }
 
