@@ -44,7 +44,7 @@ use hashbrown::HashMap;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use datafusion_physical_plan::InputOrderMode::{Linear, PartiallySorted, Sorted};
+use datafusion_physical_plan::InputOrderMode::{Linear, Sorted};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn window_bounded_window_random_comparison() -> Result<()> {

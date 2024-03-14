@@ -32,7 +32,7 @@ use crate::metrics::{BaselineMetrics, RecordOutput};
 use crate::sorts::sort::{read_spill_as_stream, sort_batch};
 use crate::sorts::streaming_merge;
 use crate::stream::RecordBatchStreamAdapter;
-use crate::{aggregates, ExecutionPlan, PhysicalExpr};
+use crate::{aggregates, PhysicalExpr};
 use crate::{RecordBatchStream, SendableRecordBatchStream};
 
 use arrow::array::*;
@@ -340,15 +340,7 @@ impl GroupedHashAggregateStream {
         let reservation = MemoryConsumer::new(name)
             .with_can_spill(true)
             .register(context.memory_pool());
-        let (ordering, _) = agg
-            .properties()
-            .equivalence_properties()
-            .find_longest_permutation(&agg_group_by.output_exprs());
-        let group_ordering = GroupOrdering::try_new(
-            &group_schema,
-            &agg.input_order_mode,
-            ordering.as_slice(),
-        )?;
+        let group_ordering = GroupOrdering::try_new(&agg.input_order_mode)?;
 
         let group_values = new_group_values(group_schema)?;
         timer.done();
@@ -554,11 +546,7 @@ impl GroupedHashAggregateStream {
             // Update ordering information if necessary
             let total_num_groups = self.group_values.len();
             if total_num_groups > starting_num_groups {
-                self.group_ordering.new_groups(
-                    group_values,
-                    group_indices,
-                    total_num_groups,
-                )?;
+                self.group_ordering.new_groups(total_num_groups)?;
             }
 
             // Gather the inputs to call the actual accumulator
