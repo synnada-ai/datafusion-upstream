@@ -356,7 +356,6 @@ impl AggregateExec {
             } else {
                 InputOrderMode::Linear
             };
-
         // construct a map from the input expression to the output expression of the Aggregation group by
         let projection_mapping =
             ProjectionMapping::try_new(&group_by.expr, &input.schema())?;
@@ -454,8 +453,10 @@ impl AggregateExec {
         }
 
         // grouping by something else and we need to just materialize all results
-        if let InputOrderMode::PartiallySorted(_) = self.input_order_mode{
-            return Err(plan_datafusion_err!("AggregateExec cannot receive input in the PartiallySorted mode."))
+        if let InputOrderMode::PartiallySorted(_) = self.input_order_mode {
+            return Err(plan_datafusion_err!(
+                "AggregateExec cannot receive input in the PartiallySorted mode."
+            ));
         }
         Ok(StreamType::GroupedHash(GroupedHashAggregateStream::new(
             self, context, partition,

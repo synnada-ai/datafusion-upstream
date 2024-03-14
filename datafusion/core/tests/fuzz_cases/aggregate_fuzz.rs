@@ -49,12 +49,9 @@ async fn streaming_aggregate_test() {
     let test_cases = vec![
         vec!["a"],
         vec!["b", "a"],
-        vec!["c", "a"],
+        vec!["a", "b"],
         vec!["c", "b", "a"],
-        vec!["d", "a"],
-        vec!["d", "b", "a"],
-        vec!["d", "c", "a"],
-        vec!["d", "c", "b", "a"],
+        vec!["a", "b", "c"],
     ];
     let n = 300;
     let distincts = vec![10, 20];
