@@ -198,11 +198,7 @@ impl PhysicalOptimizerRule for EnforceSorting {
 
         let plan = adjusted
             .plan
-            .transform_up(&|plan| Ok(Transformed::yes(replace_mode_of_aggregate(plan)?)))
-            .data()?;
-
-        let plan = plan
-            .transform_up(&|plan| Ok(Transformed::yes(replace_mode_of_window(plan)?)))
+            .transform_up(&|plan| Ok(Transformed::yes(replace_partial_mode_with_full_mode(plan)?)))
             .data()?;
 
         let res = plan
@@ -254,6 +250,19 @@ fn replace_with_partial_sort(
         }
     }
     Ok(plan)
+}
+
+fn replace_partial_mode_with_full_mode(
+    plan: Arc<dyn ExecutionPlan>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    if let Some(_aggregate) = plan.as_any().downcast_ref::<AggregateExec>() {
+        replace_mode_of_aggregate(plan)
+    } else if let Some(_window) = plan.as_any().downcast_ref::<BoundedWindowAggExec>(){
+        replace_mode_of_window(plan)
+    } else {
+        // TODO: Add ordering requirement handling
+        Ok(plan)
+    }
 }
 
 fn replace_mode_of_aggregate(
