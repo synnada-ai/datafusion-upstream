@@ -2577,8 +2577,7 @@ physical_plan
 ProjectionExec: expr=[country@0 as country, zip_code@1 as zip_code, ARRAY_AGG(s.amount) ORDER BY [s.amount DESC NULLS FIRST]@2 as amounts, SUM(s.amount)@3 as sum1]
 --AggregateExec: mode=Single, gby=[country@1 as country, zip_code@0 as zip_code], aggr=[ARRAY_AGG(s.amount), SUM(s.amount)], ordering_mode=Sorted
 ----SortExec: expr=[country@1 ASC NULLS LAST,zip_code@0 ASC NULLS LAST,amount@2 DESC]
-------SortExec: expr=[country@1 ASC NULLS LAST,amount@2 DESC]
---------MemoryExec: partitions=1, partition_sizes=[1]
+------MemoryExec: partitions=1, partition_sizes=[1]
 
 query TI?R rowsort
 SELECT s.country, s.zip_code, ARRAY_AGG(s.amount ORDER BY s.amount DESC) AS amounts,
@@ -3915,13 +3914,12 @@ Aggregate: groupBy=[[multiple_ordered_table_with_pk.c, multiple_ordered_table_wi
 physical_plan
 AggregateExec: mode=FinalPartitioned, gby=[c@0 as c, b@1 as b], aggr=[SUM(multiple_ordered_table_with_pk.d)], ordering_mode=Sorted
 --SortExec: expr=[c@0 ASC NULLS LAST,b@1 ASC]
-----SortExec: expr=[c@0 ASC NULLS LAST]
-------CoalesceBatchesExec: target_batch_size=2
---------RepartitionExec: partitioning=Hash([c@0, b@1], 8), input_partitions=8
-----------AggregateExec: mode=Partial, gby=[c@1 as c, b@0 as b], aggr=[SUM(multiple_ordered_table_with_pk.d)], ordering_mode=Sorted
-------------SortExec: expr=[c@1 ASC NULLS LAST,b@0 ASC]
---------------RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1
-----------------CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[b, c, d], output_ordering=[c@1 ASC NULLS LAST], has_header=true
+----CoalesceBatchesExec: target_batch_size=2
+------RepartitionExec: partitioning=Hash([c@0, b@1], 8), input_partitions=8
+--------AggregateExec: mode=Partial, gby=[c@1 as c, b@0 as b], aggr=[SUM(multiple_ordered_table_with_pk.d)], ordering_mode=Sorted
+----------SortExec: expr=[c@1 ASC NULLS LAST,b@0 ASC]
+------------RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1
+--------------CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[b, c, d], output_ordering=[c@1 ASC NULLS LAST], has_header=true
 
 # drop table multiple_ordered_table_with_pk
 statement ok
@@ -3958,13 +3956,12 @@ Aggregate: groupBy=[[multiple_ordered_table_with_pk.c, multiple_ordered_table_wi
 physical_plan
 AggregateExec: mode=FinalPartitioned, gby=[c@0 as c, b@1 as b], aggr=[SUM(multiple_ordered_table_with_pk.d)], ordering_mode=Sorted
 --SortExec: expr=[c@0 ASC NULLS LAST,b@1 ASC]
-----SortExec: expr=[c@0 ASC NULLS LAST]
-------CoalesceBatchesExec: target_batch_size=2
---------RepartitionExec: partitioning=Hash([c@0, b@1], 8), input_partitions=8
-----------AggregateExec: mode=Partial, gby=[c@1 as c, b@0 as b], aggr=[SUM(multiple_ordered_table_with_pk.d)], ordering_mode=Sorted
-------------SortExec: expr=[c@1 ASC NULLS LAST,b@0 ASC]
---------------RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1
-----------------CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[b, c, d], output_ordering=[c@1 ASC NULLS LAST], has_header=true
+----CoalesceBatchesExec: target_batch_size=2
+------RepartitionExec: partitioning=Hash([c@0, b@1], 8), input_partitions=8
+--------AggregateExec: mode=Partial, gby=[c@1 as c, b@0 as b], aggr=[SUM(multiple_ordered_table_with_pk.d)], ordering_mode=Sorted
+----------SortExec: expr=[c@1 ASC NULLS LAST,b@0 ASC]
+------------RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1
+--------------CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[b, c, d], output_ordering=[c@1 ASC NULLS LAST], has_header=true
 
 statement ok
 set datafusion.execution.target_partitions = 1;

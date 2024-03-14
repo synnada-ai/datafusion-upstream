@@ -65,7 +65,9 @@ use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::utils::{get_at_indices, set_difference};
 use datafusion_physical_expr::expressions::Literal;
 use datafusion_physical_expr::window::WindowExpr;
-use datafusion_physical_expr::{PhysicalExpr, PhysicalSortExpr, PhysicalSortRequirement};
+use datafusion_physical_expr::{
+    LexOrdering, PhysicalExpr, PhysicalSortExpr, PhysicalSortRequirement,
+};
 use datafusion_physical_plan::aggregates::AggregateExec;
 use datafusion_physical_plan::repartition::RepartitionExec;
 use datafusion_physical_plan::sorts::partial_sort::PartialSortExec;
@@ -203,11 +205,10 @@ impl PhysicalOptimizerRule for EnforceSorting {
         assign_initial_requirements(&mut sort_pushdown);
         let adjusted = sort_pushdown.transform_down(&pushdown_sorts)?.data;
 
-        let res = adjusted
+        adjusted
             .plan
             .transform_up(&|plan| Ok(Transformed::yes(replace_with_partial_sort(plan)?)))
-            .data()?;
-        Ok(res)
+            .data()
     }
 
     fn name(&self) -> &str {
@@ -277,9 +278,7 @@ fn replace_partial_mode_with_full_mode(
                 {
                     let sort_exprs = PhysicalSortRequirement::to_sort_exprs(reqs);
                     child_modified = true;
-                    Arc::new(
-                        SortExec::new(sort_exprs, child).with_preserve_partitioning(true),
-                    ) as Arc<dyn ExecutionPlan>
+                    add_sort_on_top(child, sort_exprs)
                 } else {
                     child
                 }
@@ -311,11 +310,7 @@ fn replace_mode_of_aggregate(
         ordering.extend(with_default_ordering(missing_partition_bys));
 
         let child = aggregate.input().clone();
-        let preserve_partitioning = child.output_partitioning().partition_count() > 1;
-        let new_child = Arc::new(
-            SortExec::new(ordering, child)
-                .with_preserve_partitioning(preserve_partitioning),
-        ) as Arc<dyn ExecutionPlan>;
+        let new_child = add_sort_on_top(child, ordering);
 
         Ok(Some(Arc::new(
             AggregateExec::try_new(
@@ -331,6 +326,23 @@ fn replace_mode_of_aggregate(
     } else {
         Ok(None)
     }
+}
+
+fn add_sort_on_top(
+    mut plan: Arc<dyn ExecutionPlan>,
+    sort_exprs: LexOrdering,
+) -> Arc<dyn ExecutionPlan> {
+    if plan.equivalence_properties().ordering_satisfy(&sort_exprs) {
+        // Requirement already satisfied, return existing plan without modification.
+        return plan;
+    }
+    while let Some(sort) = plan.as_any().downcast_ref::<SortExec>() {
+        plan = sort.input().clone();
+    }
+    let preserve_partitioning = plan.output_partitioning().partition_count() > 1;
+    Arc::new(
+        SortExec::new(sort_exprs, plan).with_preserve_partitioning(preserve_partitioning),
+    )
 }
 
 fn replace_mode_of_window(
@@ -409,10 +421,7 @@ fn contruct_window(
         InputOrderMode::Sorted
     };
 
-    let preserve_partitioning = child.output_partitioning().partition_count() > 1;
-    let new_child = Arc::new(
-        SortExec::new(ordering, child).with_preserve_partitioning(preserve_partitioning),
-    ) as Arc<dyn ExecutionPlan>;
+    let new_child = add_sort_on_top(child, ordering);
     Ok(Arc::new(BoundedWindowAggExec::try_new(
         window_exprs,
         new_child,

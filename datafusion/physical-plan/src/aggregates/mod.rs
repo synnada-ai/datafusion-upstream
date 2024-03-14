@@ -356,6 +356,7 @@ impl AggregateExec {
             } else {
                 InputOrderMode::Linear
             };
+
         // construct a map from the input expression to the output expression of the Aggregation group by
         let projection_mapping =
             ProjectionMapping::try_new(&group_by.expr, &input.schema())?;
