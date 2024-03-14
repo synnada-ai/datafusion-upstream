@@ -58,6 +58,7 @@ mod topk_stream;
 
 pub use datafusion_expr::AggregateFunction;
 pub use datafusion_physical_expr::expressions::create_aggregate_expr;
+use datafusion_physical_expr::expressions::Literal;
 
 /// Hash aggregate modes
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -323,7 +324,8 @@ impl AggregateExec {
 
         let input_eq_properties = input.equivalence_properties();
         // Get GROUP BY expressions:
-        let groupby_exprs = group_by.input_exprs();
+        let mut groupby_exprs = group_by.input_exprs();
+        groupby_exprs.retain(|expr| expr.as_any().downcast_ref::<Literal>().is_none());
         // If existing ordering satisfies a prefix of the GROUP BY expressions,
         // prefix requirements with this section. In this case, aggregation will
         // work more efficiently.

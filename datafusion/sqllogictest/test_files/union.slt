@@ -550,7 +550,7 @@ UnionExec
 ----AggregateExec: mode=FinalPartitioned, gby=[Int64(1)@0 as Int64(1)], aggr=[], ordering_mode=Sorted
 ------CoalesceBatchesExec: target_batch_size=2
 --------RepartitionExec: partitioning=Hash([Int64(1)@0], 4), input_partitions=1
-----------AggregateExec: mode=Partial, gby=[1 as Int64(1)], aggr=[], ordering_mode=Sorted
+----------AggregateExec: mode=Partial, gby=[1 as Int64(1)], aggr=[]
 ------------PlaceholderRowExec
 --ProjectionExec: expr=[2 as a]
 ----PlaceholderRowExec

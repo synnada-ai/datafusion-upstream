@@ -63,6 +63,7 @@ use arrow_schema::SortOptions;
 use datafusion_common::plan_err;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::utils::{get_at_indices, set_difference};
+use datafusion_physical_expr::expressions::Literal;
 use datafusion_physical_expr::window::WindowExpr;
 use datafusion_physical_expr::{PhysicalExpr, PhysicalSortExpr, PhysicalSortRequirement};
 use datafusion_physical_plan::aggregates::AggregateExec;
@@ -259,18 +260,19 @@ fn replace_mode_of_aggregate(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     if let Some(aggregate) = plan.as_any().downcast_ref::<AggregateExec>() {
-        let group_by_exprs = aggregate.group_by().input_exprs();
+        let mut groupby_exprs = aggregate.group_by().input_exprs();
+        groupby_exprs.retain(|expr| expr.as_any().downcast_ref::<Literal>().is_none());
         let (mut ordering, gb_ordered_indices) = aggregate
             .input
             .equivalence_properties()
-            .find_longest_permutation(&group_by_exprs);
+            .find_longest_permutation(&groupby_exprs);
         if !gb_ordered_indices.is_empty()
-            && gb_ordered_indices.len() < group_by_exprs.len()
+            && gb_ordered_indices.len() < groupby_exprs.len()
         {
             // Partially Sorted Mode
-            let all_indices = (0..group_by_exprs.len()).collect::<Vec<_>>();
+            let all_indices = (0..groupby_exprs.len()).collect::<Vec<_>>();
             let missing_indices = set_difference(all_indices, &gb_ordered_indices);
-            let missing_partition_bys = get_at_indices(&group_by_exprs, missing_indices)?;
+            let missing_partition_bys = get_at_indices(&groupby_exprs, missing_indices)?;
             ordering.extend(with_default_ordering(missing_partition_bys));
 
             let child = aggregate.input().clone();
