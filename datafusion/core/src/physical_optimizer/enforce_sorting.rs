@@ -258,9 +258,11 @@ fn replace_partial_mode_with_full_mode(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     if let Some(aggregate) = plan.as_any().downcast_ref::<AggregateExec>() {
-        replace_mode_of_aggregate(aggregate)
+        // If None, return original plan as is
+        Ok(replace_mode_of_aggregate(aggregate)?.unwrap_or(plan))
     } else if let Some(window) = plan.as_any().downcast_ref::<BoundedWindowAggExec>() {
-        replace_mode_of_window(window)
+        // If None, return original plan as is
+        Ok(replace_mode_of_window(window)?.unwrap_or(plan))
     } else {
         // TODO: Add ordering requirement handling
         Ok(plan)
@@ -269,16 +271,14 @@ fn replace_partial_mode_with_full_mode(
 
 fn replace_mode_of_aggregate(
     aggregate: &AggregateExec,
-) -> Result<Arc<dyn ExecutionPlan>> {
+) -> Result<Option<Arc<dyn ExecutionPlan>>> {
     let mut groupby_exprs = aggregate.group_by().input_exprs();
     groupby_exprs.retain(|expr| expr.as_any().downcast_ref::<Literal>().is_none());
     let (mut ordering, gb_ordered_indices) = aggregate
         .input
         .equivalence_properties()
         .find_longest_permutation(&groupby_exprs);
-    let new_child = if !gb_ordered_indices.is_empty()
-        && gb_ordered_indices.len() < groupby_exprs.len()
-    {
+    if !gb_ordered_indices.is_empty() && gb_ordered_indices.len() < groupby_exprs.len() {
         // Partially Sorted Mode
         let all_indices = (0..groupby_exprs.len()).collect::<Vec<_>>();
         let missing_indices = set_difference(all_indices, &gb_ordered_indices);
@@ -287,37 +287,36 @@ fn replace_mode_of_aggregate(
 
         let child = aggregate.input().clone();
         let preserve_partitioning = child.output_partitioning().partition_count() > 1;
-        Arc::new(
+        let new_child = Arc::new(
             SortExec::new(ordering, child)
                 .with_preserve_partitioning(preserve_partitioning),
-        ) as Arc<dyn ExecutionPlan>
-    } else {
-        aggregate.input.clone()
-    };
+        ) as Arc<dyn ExecutionPlan>;
 
-    Ok(Arc::new(
-        AggregateExec::try_new(
-            *aggregate.mode(),
-            aggregate.group_by().clone(),
-            aggregate.aggr_expr().to_vec(),
-            aggregate.filter_expr().to_vec(),
-            new_child,
-            aggregate.input_schema.clone(),
-        )?
-        .with_limit(aggregate.limit()),
-    ))
+        Ok(Some(Arc::new(
+            AggregateExec::try_new(
+                *aggregate.mode(),
+                aggregate.group_by().clone(),
+                aggregate.aggr_expr().to_vec(),
+                aggregate.filter_expr().to_vec(),
+                new_child,
+                aggregate.input_schema.clone(),
+            )?
+            .with_limit(aggregate.limit()),
+        )))
+    } else {
+        Ok(None)
+    }
 }
 
 fn replace_mode_of_window(
     window: &BoundedWindowAggExec,
-) -> Result<Arc<dyn ExecutionPlan>> {
-    let mut window_exprs;
+) -> Result<Option<Arc<dyn ExecutionPlan>>> {
     let mut input_order_mode = InputOrderMode::Sorted;
     let mut ordering_satisfied = false;
+    let mut window_exprs = window.window_expr().to_vec();
     let partition_keys = window.partition_keys.to_vec();
     let partition_by_exprs = window.window_expr()[0].partition_by();
     let order_by_exprs = window.window_expr()[0].order_by();
-    window_exprs = Some(window.window_expr().to_vec());
     if let Some((should_reverse, mode)) =
         get_window_mode(partition_by_exprs, order_by_exprs, window.input())
     {
@@ -329,7 +328,7 @@ fn replace_mode_of_window(
                 .collect::<Option<Vec<_>>>()
             {
                 ordering_satisfied = true;
-                window_exprs = Some(reversed_window_expr);
+                window_exprs = reversed_window_expr;
                 input_order_mode = mode;
             }
         } else {
@@ -338,31 +337,18 @@ fn replace_mode_of_window(
         }
     }
 
-    let window_exprs = window_exprs.unwrap();
-
     if !ordering_satisfied {
         let child = window.input().clone();
-        return contruct_window(window_exprs, child, partition_keys);
+        return contruct_window(window_exprs, child, partition_keys).map(Some);
     }
 
-    let (input_order_mode, new_child) = match input_order_mode {
-        InputOrderMode::Sorted | InputOrderMode::Linear => {
-            let child = window.input().clone();
-            // Can use as is
-            (input_order_mode, child)
-        }
+    match input_order_mode {
+        InputOrderMode::Sorted | InputOrderMode::Linear => Ok(None),
         InputOrderMode::PartiallySorted(_) => {
             let child = window.input().clone();
-            return contruct_window(window_exprs, child, partition_keys);
+            contruct_window(window_exprs, child, partition_keys).map(Some)
         }
-    };
-
-    Ok(Arc::new(BoundedWindowAggExec::try_new(
-        window_exprs,
-        new_child,
-        partition_keys,
-        input_order_mode,
-    )?))
+    }
 }
 
 fn contruct_window(
