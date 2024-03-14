@@ -63,7 +63,6 @@ use arrow_schema::SortOptions;
 use datafusion_common::plan_err;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::utils::{get_at_indices, set_difference};
-use datafusion_physical_expr::expressions::Literal;
 use datafusion_physical_expr::window::WindowExpr;
 use datafusion_physical_expr::{
     LexOrdering, PhysicalExpr, PhysicalSortExpr, PhysicalSortRequirement,
@@ -256,6 +255,23 @@ fn replace_with_partial_sort(
     Ok(plan)
 }
 
+fn add_sort_on_top(
+    mut plan: Arc<dyn ExecutionPlan>,
+    sort_exprs: LexOrdering,
+) -> Arc<dyn ExecutionPlan> {
+    if plan.equivalence_properties().ordering_satisfy(&sort_exprs) {
+        // Requirement already satisfied, return existing plan without modification.
+        return plan;
+    }
+    while let Some(sort) = plan.as_any().downcast_ref::<SortExec>() {
+        plan = sort.input().clone();
+    }
+    let preserve_partitioning = plan.output_partitioning().partition_count() > 1;
+    Arc::new(
+        SortExec::new(sort_exprs, plan).with_preserve_partitioning(preserve_partitioning),
+    )
+}
+
 fn replace_partial_mode_with_full_mode(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
@@ -297,7 +313,12 @@ fn replace_mode_of_aggregate(
     aggregate: &AggregateExec,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
     let mut groupby_exprs = aggregate.group_by().input_exprs();
-    groupby_exprs.retain(|expr| expr.as_any().downcast_ref::<Literal>().is_none());
+    groupby_exprs.retain(|expr| {
+        !aggregate
+            .input
+            .equivalence_properties()
+            .is_expr_constant(expr)
+    });
     let (mut ordering, gb_ordered_indices) = aggregate
         .input
         .equivalence_properties()
@@ -326,23 +347,6 @@ fn replace_mode_of_aggregate(
     } else {
         Ok(None)
     }
-}
-
-fn add_sort_on_top(
-    mut plan: Arc<dyn ExecutionPlan>,
-    sort_exprs: LexOrdering,
-) -> Arc<dyn ExecutionPlan> {
-    if plan.equivalence_properties().ordering_satisfy(&sort_exprs) {
-        // Requirement already satisfied, return existing plan without modification.
-        return plan;
-    }
-    while let Some(sort) = plan.as_any().downcast_ref::<SortExec>() {
-        plan = sort.input().clone();
-    }
-    let preserve_partitioning = plan.output_partitioning().partition_count() > 1;
-    Arc::new(
-        SortExec::new(sort_exprs, plan).with_preserve_partitioning(preserve_partitioning),
-    )
 }
 
 fn replace_mode_of_window(
