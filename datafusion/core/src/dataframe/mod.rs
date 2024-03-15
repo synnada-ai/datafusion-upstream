@@ -2933,11 +2933,12 @@ mod tests {
         for join_type in all_join_types {
             let join = left.clone().join(
                 right.clone(),
-                join_type,
+                join_type.clone(),
                 &["c1", "c2"],
                 &["c2_c1", "c2_c2"],
                 None,
             )?;
+            println!("join_type: {:?}", join_type);
             let physical_plan = join.create_physical_plan().await?;
             let out_partitioning = physical_plan.output_partitioning();
             let join_schema = physical_plan.schema();

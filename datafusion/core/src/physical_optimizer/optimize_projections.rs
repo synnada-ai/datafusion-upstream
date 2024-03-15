@@ -79,6 +79,7 @@ use datafusion_physical_plan::aggregates::{
 };
 use datafusion_physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion_physical_plan::displayable;
 use datafusion_physical_plan::insert::FileSinkExec;
 use datafusion_physical_plan::joins::utils::{
     ColumnIndex, JoinFilter, JoinOn, JoinOnRef,
@@ -95,6 +96,13 @@ use datafusion_physical_plan::union::{InterleaveExec, UnionExec};
 use datafusion_physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
 
 use itertools::Itertools;
+
+fn print_plan(plan: &Arc<dyn ExecutionPlan>) -> Result<()> {
+    let formatted = displayable(plan.as_ref()).indent(true).to_string();
+    let actual: Vec<&str> = formatted.trim().lines().collect();
+    println!("{:#?}", actual);
+    Ok(())
+}
 
 /// The tree node for the rule of [`OptimizeProjections`]. It stores the necessary
 /// fields for column requirements and changed indices of columns.
@@ -192,12 +200,13 @@ impl ProjectionOptimizer {
 
         // HashJoinExec can own the projection above.
         if projection_input.as_any().is::<HashJoinExec>() {
-            self = match self.try_embed_to_hash_join()? {
+            return match self.try_embed_to_hash_join()? {
                 join if join.transformed => {
-                    return join.data.adjust_node_with_requirements()
+                    // Re-run on the new HashJoin node
+                    join.data.adjust_node_with_requirements()
                 }
-                projection => projection.data,
-            }
+                projection => Ok(projection.data),
+            };
         }
 
         // Source providers:
@@ -348,7 +357,8 @@ impl ProjectionOptimizer {
         let Some(projection) = self.plan.as_any().downcast_ref::<ProjectionExec>() else {
             return Ok(Transformed::no(self));
         };
-        let Some(hash_join) = self.plan.as_any().downcast_ref::<HashJoinExec>() else {
+        let Some(hash_join) = projection.input().as_any().downcast_ref::<HashJoinExec>()
+        else {
             return Ok(Transformed::no(self));
         };
 
@@ -396,31 +406,30 @@ impl ProjectionOptimizer {
         let new_projection =
             ProjectionExec::try_new(new_projection_exprs, new_hash_join.clone())?;
 
-        let new_node = if is_projection_removable(&new_projection) {
+        if is_projection_removable(&new_projection) {
             let required_columns = collect_columns_in_plan_schema(&new_hash_join);
-            Self {
+            Ok(Transformed::yes(Self {
                 plan: new_hash_join,
                 required_columns,
                 schema_mapping: HashMap::new(),
                 children_nodes: self.children_nodes.swap_remove(0).children_nodes,
-            }
+            }))
         } else {
+            let required_columns = collect_columns_in_plan_schema(&new_hash_join);
             let new_join_node = Self {
                 plan: new_hash_join,
-                required_columns: HashSet::new(),
+                required_columns,
                 schema_mapping: HashMap::new(),
                 children_nodes: self.children_nodes.swap_remove(0).children_nodes,
             };
             let plan = Arc::new(new_projection) as Arc<dyn ExecutionPlan>;
-            let required_columns = collect_columns_in_plan_schema(&plan);
-            Self {
+            Ok(Transformed::no(Self {
                 plan,
-                required_columns,
+                required_columns: HashSet::new(),
                 schema_mapping: HashMap::new(),
                 children_nodes: vec![new_join_node],
-            }
-        };
-        Ok(Transformed::yes(new_node))
+            }))
+        }
     }
 
     /// Tries to embed [`ProjectionExec`] into its input [`CsvExec`].
@@ -490,7 +499,7 @@ impl ProjectionOptimizer {
                 .iter()
                 .enumerate()
                 .filter_map(|(idx, csv_idx)| {
-                    if used_csv_indices.contains(&csv_idx) {
+                    if used_csv_indices.contains(csv_idx) {
                         None
                     } else {
                         Some(idx)
@@ -1035,12 +1044,8 @@ impl ProjectionOptimizer {
     ) -> Result<ProjectionOptimizer> {
         let left_size = cj.left().schema().fields().len();
         // CrossJoinExec does not add new requirements.
-        let (analyzed_join_left, analyzed_join_right) = analyze_requirements_of_joins(
-            cj.left(),
-            cj.right(),
-            &self.required_columns,
-            left_size,
-        );
+        let (analyzed_join_left, analyzed_join_right) =
+            analyze_requirements_of_joins(cj.schema(), &self.required_columns, left_size);
         match (
             all_columns_required(&analyzed_join_left),
             all_columns_required(&analyzed_join_right),
@@ -1155,6 +1160,256 @@ impl ProjectionOptimizer {
         mut self,
         hj: &HashJoinExec,
     ) -> Result<ProjectionOptimizer> {
+        if matches!(
+            hj.join_type,
+            JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full
+        ) {
+            let join_left_input_size = hj.left().schema().fields().len();
+            let join_projection = hj
+                .projection
+                .clone()
+                .unwrap_or((0..hj.schema().fields().len()).collect());
+            let mut hj_left_requirements = self
+                .required_columns
+                .iter()
+                .filter_map(|req| {
+                    if join_projection[req.index()] < join_left_input_size {
+                        Some(Column::new(req.name(), join_projection[req.index()]))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<HashSet<_>>();
+            hj_left_requirements.extend(
+                hj.on()
+                    .iter()
+                    .flat_map(|(left_on, _)| collect_columns(left_on))
+                    .collect::<HashSet<_>>(),
+            );
+            hj_left_requirements.extend(
+                hj.filter()
+                    .map(|filter| {
+                        filter
+                            .column_indices()
+                            .iter()
+                            .filter_map(|col_ind| {
+                                if col_ind.side == JoinSide::Left {
+                                    Some(Column::new(
+                                        hj.left().schema().fields()[col_ind.index].name(),
+                                        col_ind.index,
+                                    ))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<HashSet<_>>()
+                    })
+                    .unwrap_or_default(),
+            );
+
+            let mut hj_right_requirements = self
+                .required_columns
+                .iter()
+                .filter_map(|req| {
+                    if join_projection[req.index()] >= join_left_input_size {
+                        Some(Column::new(
+                            req.name(),
+                            join_projection[req.index()] - join_left_input_size,
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<HashSet<_>>();
+            hj_right_requirements.extend(
+                hj.on()
+                    .iter()
+                    .flat_map(|(_, right_on)| collect_columns(right_on))
+                    .collect::<HashSet<_>>(),
+            );
+            hj_right_requirements.extend(
+                hj.filter()
+                    .map(|filter| {
+                        filter
+                            .column_indices()
+                            .iter()
+                            .filter_map(|col_ind| {
+                                if col_ind.side == JoinSide::Right {
+                                    Some(Column::new(
+                                        hj.right().schema().fields()[col_ind.index]
+                                            .name(),
+                                        col_ind.index,
+                                    ))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<HashSet<_>>()
+                    })
+                    .unwrap_or_default(),
+            );
+
+            let left_input_columns = collect_columns_in_plan_schema(hj.left());
+            let keep_left_same = left_input_columns.iter().all(|left_input_column| {
+                hj_left_requirements.contains(left_input_column)
+            });
+
+            let right_input_columns = collect_columns_in_plan_schema(hj.right());
+            let keep_right_same = right_input_columns.iter().all(|right_input_column| {
+                hj_right_requirements.contains(right_input_column)
+            });
+
+            match (keep_left_same, keep_right_same) {
+                (false, false) => {
+                    let left_projection_exprs = hj_left_requirements
+                        .iter()
+                        .map(|req| {
+                            let name = req.name().to_owned();
+                            (Arc::new(req.clone()) as Arc<dyn PhysicalExpr>, name)
+                        })
+                        .collect::<Vec<_>>();
+                    let new_left_projection = ProjectionExec::try_new(
+                        left_projection_exprs,
+                        hj.left().clone(),
+                    )?;
+                    let new_left_projection_arc =
+                        Arc::new(new_left_projection.clone()) as Arc<dyn ExecutionPlan>;
+                    let new_left_requirements =
+                        collect_columns_in_plan_schema(&new_left_projection_arc);
+                    let new_left_node = ProjectionOptimizer {
+                        plan: new_left_projection_arc,
+                        required_columns: new_left_requirements,
+                        schema_mapping: HashMap::new(),
+                        children_nodes: vec![self.children_nodes[0].clone()],
+                    };
+
+                    let right_projection_exprs = hj_right_requirements
+                        .iter()
+                        .map(|req| {
+                            let name = req.name().to_owned();
+                            (Arc::new(req.clone()) as Arc<dyn PhysicalExpr>, name)
+                        })
+                        .collect::<Vec<_>>();
+                    let new_right_projection = ProjectionExec::try_new(
+                        right_projection_exprs,
+                        hj.right().clone(),
+                    )?;
+                    let new_right_projection_arc =
+                        Arc::new(new_right_projection.clone()) as Arc<dyn ExecutionPlan>;
+                    let new_right_requirements =
+                        collect_columns_in_plan_schema(&new_right_projection_arc);
+                    let new_right_node = ProjectionOptimizer {
+                        plan: new_right_projection_arc,
+                        required_columns: new_right_requirements,
+                        schema_mapping: HashMap::new(),
+                        children_nodes: vec![self.children_nodes[1].clone()],
+                    };
+
+                    let mut left_mapping =
+                        hj_left_requirements.iter().cloned().collect_vec();
+                    left_mapping.sort_by_key(|col| col.index());
+                    let left_mapping = left_mapping
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, col)| (col.clone(), Column::new(col.name(), idx)))
+                        .collect::<HashMap<_, _>>();
+                    let mut right_mapping =
+                        hj_right_requirements.into_iter().collect_vec();
+                    right_mapping.sort_by_key(|col| col.index());
+                    let right_mapping = right_mapping
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, col)| (col.clone(), Column::new(col.name(), idx)))
+                        .collect::<HashMap<_, _>>();
+
+                    let new_on = update_join_on(hj.on(), &left_mapping, &right_mapping);
+                    let new_filter = hj.filter().map(|filter| {
+                        JoinFilter::new(
+                            filter.expression().clone(),
+                            filter
+                                .column_indices()
+                                .iter()
+                                .map(|col_ind| {
+                                    if col_ind.side == JoinSide::Left {
+                                        ColumnIndex {
+                                            index: left_mapping
+                                                .iter()
+                                                .find(|(initial, _)| {
+                                                    initial.index() == col_ind.index
+                                                })
+                                                .unwrap()
+                                                .1
+                                                .index(),
+                                            side: JoinSide::Left,
+                                        }
+                                    } else {
+                                        ColumnIndex {
+                                            index: right_mapping
+                                                .iter()
+                                                .find(|(initial, _)| {
+                                                    initial.index() == col_ind.index
+                                                })
+                                                .unwrap()
+                                                .1
+                                                .index(),
+                                            side: JoinSide::Right,
+                                        }
+                                    }
+                                })
+                                .collect(),
+                            filter.schema().clone(),
+                        )
+                    });
+
+                    let new_projection = hj.projection.clone().map(|projection| {
+                        projection
+                            .iter()
+                            .map(|ind| {
+                                if ind < &hj.left().schema().fields().len() {
+                                    left_mapping
+                                        .iter()
+                                        .find(|(initial, _)| initial.index() == *ind)
+                                        .unwrap()
+                                        .1
+                                        .index()
+                                } else {
+                                    right_mapping
+                                        .iter()
+                                        .find(|(initial, _)| {
+                                            initial.index() == *ind - join_left_input_size
+                                        })
+                                        .unwrap()
+                                        .1
+                                        .index()
+                                        + hj_left_requirements.len()
+                                }
+                            })
+                            .collect()
+                    });
+                    println!("new_projection: {:?}", new_projection);
+
+                    let new_hash_join = HashJoinExec::try_new(
+                        new_left_node.plan.clone(),
+                        new_right_node.plan.clone(),
+                        new_on,
+                        new_filter,
+                        hj.join_type(),
+                        new_projection,
+                        *hj.partition_mode(),
+                        hj.null_equals_null(),
+                    )?;
+                    return Ok(ProjectionOptimizer {
+                        plan: Arc::new(new_hash_join),
+                        required_columns: HashSet::new(),
+                        schema_mapping: HashMap::new(),
+                        children_nodes: vec![new_left_node, new_right_node],
+                    });
+                }
+                (false, true) => {}
+                (true, false) => {}
+                (true, true) => {}
+            }
+        }
         let left_size = hj.left().schema().fields().len();
         // HashJoinExec extends the requirements with the columns in its equivalence and non-equivalence conditions.
         match hj.join_type() {
@@ -1173,12 +1428,8 @@ impl ProjectionOptimizer {
                 self.children_nodes[1].plan.schema(),
             ));
 
-        let (analyzed_join_left, analyzed_join_right) = analyze_requirements_of_joins(
-            hj.left(),
-            hj.right(),
-            &self.required_columns,
-            left_size,
-        );
+        let (analyzed_join_left, analyzed_join_right) =
+            analyze_requirements_of_joins(hj.schema(), &self.required_columns, left_size);
 
         match hj.join_type() {
             JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full => {
@@ -1449,8 +1700,7 @@ impl ProjectionOptimizer {
                 self.children_nodes[1].plan.schema(),
             ));
         let (analyzed_join_left, analyzed_join_right) = analyze_requirements_of_joins(
-            nlj.left(),
-            nlj.right(),
+            nlj.schema(),
             &self.required_columns,
             left_size,
         );
@@ -1677,8 +1927,7 @@ impl ProjectionOptimizer {
                 self.children_nodes[1].plan.schema(),
             ));
         let (analyzed_join_left, analyzed_join_right) = analyze_requirements_of_joins(
-            smj.left(),
-            smj.right(),
+            smj.schema(),
             &self.required_columns,
             left_size,
         );
@@ -1944,8 +2193,7 @@ impl ProjectionOptimizer {
                 self.children_nodes[1].plan.schema(),
             ));
         let (analyzed_join_left, analyzed_join_right) = analyze_requirements_of_joins(
-            shj.left(),
-            shj.right(),
+            shj.schema(),
             &self.required_columns,
             left_size,
         );
@@ -3327,6 +3575,8 @@ impl PhysicalOptimizerRule for OptimizeProjections {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        print_plan(&plan);
+
         // Collect initial columns requirements from the plan's schema.
         let initial_requirements = collect_columns_in_plan_schema(&plan);
         let mut optimizer = ProjectionOptimizer::new_default(plan);
@@ -3455,18 +3705,16 @@ fn analyze_requirements(node: &ProjectionOptimizer) -> ColumnRequirements {
 /// - The second element represents the column requirements for the right child.
 ///
 fn analyze_requirements_of_joins(
-    left_child: &Arc<dyn ExecutionPlan>,
-    right_child: &Arc<dyn ExecutionPlan>,
+    schema: SchemaRef,
     required_columns: &HashSet<Column>,
     left_size: usize,
 ) -> (ColumnRequirements, ColumnRequirements) {
-    let columns_in_schema = collect_columns_in_plan_schema(left_child)
-        .into_iter()
-        .chain(
-            collect_columns_in_plan_schema(right_child)
-                .into_iter()
-                .map(|col| Column::new(col.name(), col.index() + left_size)),
-        );
+    let columns_in_schema = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| Column::new(field.name(), idx))
+        .collect::<Vec<_>>();
     let requirement_map = columns_in_schema
         .into_iter()
         .map(|col| {
@@ -3902,10 +4150,10 @@ fn collect_columns_in_join_conditions(
     equivalence_columns
         .into_iter()
         .chain(non_equivalence_columns)
-        .collect()
+        .collect::<HashSet<_>>()
 }
 
-/// Collect all column indices from the given projection expressions.
+/// Collect all column indices from the given projection expressions in the index order.
 fn collect_column_indices(exprs: &[(Arc<dyn PhysicalExpr>, String)]) -> Vec<usize> {
     // Collect indices and remove duplicates.
     let mut indexs = exprs
@@ -3976,7 +4224,7 @@ fn update_expr_with_projection(
                     .find_map(|(index, (projected_expr, alias))| {
                         projected_expr.as_any().downcast_ref::<Column>().and_then(
                             |projected_column| {
-                                column.name().eq(projected_column.name()).then(|| {
+                                column.eq(projected_column).then(|| {
                                     state = RewriteState::RewrittenValid;
                                     Arc::new(Column::new(alias, index)) as _
                                 })
@@ -4442,8 +4690,9 @@ fn rewrite_hash_join(
         None,
         *hj.partition_mode(),
         hj.null_equals_null(),
-    )
-    .map(|plan| Arc::new(plan) as _)
+    )?
+    .with_projection(hj.projection.clone())
+    .map(|hj| Arc::new(hj) as _)
 }
 
 fn rewrite_nested_loop_join(
@@ -5510,7 +5759,8 @@ mod tests {
     #[test]
     fn test_hash_join_after_projection() -> Result<()> {
         // sql like
-        // SELECT t1.c as c_from_left, t1.b as b_from_left, t1.a as a_from_left, t2.c as c_from_right FROM t1 JOIN t2 ON t1.b = t2.c WHERE t1.b - (1 + t2.a) <= t2.a + t1.c
+        // SELECT t1.c as c_from_left, t1.b as b_from_left, t1.a as a_from_left, t2.c as c_from_right
+        // FROM t1 JOIN t2 ON t1.b = t2.c WHERE t1.b - (1 + t2.a) <= t2.a + t1.c
         let left_csv = create_simple_csv_exec();
         let right_csv = create_simple_csv_exec();
 
@@ -5584,10 +5834,11 @@ mod tests {
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
 
         // HashJoinExec only returns result after projection. Because there are some alias columns in the projection, the ProjectionExec is not removed.
-        let expected = ["ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, c@4 as c_from_right]", 
-        "  HashJoinExec: mode=Auto, join_type=Inner, on=[(b@1, c@1)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2", 
-        "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false", 
-        "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, c], has_header=false"];
+        let expected = [
+            "ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, c@3 as c_from_right]", 
+            "  HashJoinExec: mode=Auto, join_type=Inner, on=[(b@1, c@1)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2, projection=[a@0, b@1, c@2, c@4]", 
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false", 
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, c], has_header=false"];
         assert_eq!(get_plan_string(&after_optimize), expected);
 
         let projection: Arc<dyn ExecutionPlan> = Arc::new(ProjectionExec::try_new(
