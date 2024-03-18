@@ -2933,7 +2933,7 @@ mod tests {
         for join_type in all_join_types {
             let join = left.clone().join(
                 right.clone(),
-                join_type.clone(),
+                join_type,
                 &["c1", "c2"],
                 &["c2_c1", "c2_c2"],
                 None,
