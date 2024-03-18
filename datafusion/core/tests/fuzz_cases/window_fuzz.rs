@@ -27,7 +27,7 @@ use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::windows::{
     create_window_expr, BoundedWindowAggExec, WindowAggExec,
 };
-use datafusion::physical_plan::InputOrderMode::{Linear, PartiallySorted, Sorted};
+use datafusion::physical_plan::InputOrderMode::{Linear, Sorted};
 use datafusion::physical_plan::{collect, InputOrderMode};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_common::{Result, ScalarValue};
