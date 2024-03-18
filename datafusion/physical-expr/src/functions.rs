@@ -32,8 +32,8 @@
 
 use crate::sort_properties::SortProperties;
 use crate::{
-    array_expressions, conditional_expressions, datetime_expressions, math_expressions,
-    string_expressions, PhysicalExpr, ScalarFunctionExpr,
+    array_expressions, conditional_expressions, math_expressions, string_expressions,
+    PhysicalExpr, ScalarFunctionExpr,
 };
 use arrow::{
     array::ArrayRef,
@@ -255,24 +255,6 @@ pub fn create_physical_fun(
         }
 
         // array functions
-        BuiltinScalarFunction::ArrayElement => Arc::new(|args| {
-            make_scalar_function_inner(array_expressions::array_element)(args)
-        }),
-        BuiltinScalarFunction::ArrayExcept => Arc::new(|args| {
-            make_scalar_function_inner(array_expressions::array_except)(args)
-        }),
-        BuiltinScalarFunction::ArrayPopFront => Arc::new(|args| {
-            make_scalar_function_inner(array_expressions::array_pop_front)(args)
-        }),
-        BuiltinScalarFunction::ArrayPopBack => Arc::new(|args| {
-            make_scalar_function_inner(array_expressions::array_pop_back)(args)
-        }),
-        BuiltinScalarFunction::ArrayPosition => Arc::new(|args| {
-            make_scalar_function_inner(array_expressions::array_position)(args)
-        }),
-        BuiltinScalarFunction::ArrayPositions => Arc::new(|args| {
-            make_scalar_function_inner(array_expressions::array_positions)(args)
-        }),
         BuiltinScalarFunction::ArrayRemove => Arc::new(|args| {
             make_scalar_function_inner(array_expressions::array_remove)(args)
         }),
@@ -290,18 +272,6 @@ pub fn create_physical_fun(
         }),
         BuiltinScalarFunction::ArrayReplaceAll => Arc::new(|args| {
             make_scalar_function_inner(array_expressions::array_replace_all)(args)
-        }),
-        BuiltinScalarFunction::ArrayReverse => Arc::new(|args| {
-            make_scalar_function_inner(array_expressions::array_reverse)(args)
-        }),
-        BuiltinScalarFunction::ArraySlice => Arc::new(|args| {
-            make_scalar_function_inner(array_expressions::array_slice)(args)
-        }),
-        BuiltinScalarFunction::ArrayIntersect => Arc::new(|args| {
-            make_scalar_function_inner(array_expressions::array_intersect)(args)
-        }),
-        BuiltinScalarFunction::ArrayUnion => Arc::new(|args| {
-            make_scalar_function_inner(array_expressions::array_union)(args)
         }),
 
         // string functions
@@ -366,8 +336,6 @@ pub fn create_physical_fun(
         BuiltinScalarFunction::ConcatWithSeparator => Arc::new(|args| {
             make_scalar_function_inner(string_expressions::concat_ws)(args)
         }),
-        BuiltinScalarFunction::MakeDate => Arc::new(datetime_expressions::make_date),
-        BuiltinScalarFunction::ToChar => Arc::new(datetime_expressions::to_char),
         BuiltinScalarFunction::InitCap => Arc::new(|args| match args[0].data_type() {
             DataType::Utf8 => {
                 make_scalar_function_inner(string_expressions::initcap::<i32>)(args)
