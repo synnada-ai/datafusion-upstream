@@ -36,7 +36,7 @@ use arrow::array::ArrayRef;
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::stats::Precision;
-use datafusion_common::{internal_err, not_impl_err, plan_datafusion_err, Result};
+use datafusion_common::{internal_err, not_impl_err, Result};
 use datafusion_execution::TaskContext;
 use datafusion_expr::Accumulator;
 use datafusion_physical_expr::{
@@ -452,11 +452,6 @@ impl AggregateExec {
         }
 
         // grouping by something else and we need to just materialize all results
-        if let InputOrderMode::PartiallySorted(_) = self.input_order_mode {
-            return Err(plan_datafusion_err!(
-                "AggregateExec cannot receive input in the PartiallySorted mode."
-            ));
-        }
         Ok(StreamType::GroupedHash(GroupedHashAggregateStream::new(
             self, context, partition,
         )?))

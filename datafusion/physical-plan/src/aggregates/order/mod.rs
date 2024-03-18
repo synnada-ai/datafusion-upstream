@@ -15,32 +15,43 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use datafusion_common::plan_datafusion_err;
+use arrow_array::ArrayRef;
+use arrow_schema::Schema;
 use datafusion_common::Result;
 use datafusion_expr::EmitTo;
+use datafusion_physical_expr::PhysicalSortExpr;
 
 mod full;
+mod partial;
 
 use crate::InputOrderMode;
 pub(crate) use full::GroupOrderingFull;
+pub(crate) use partial::GroupOrderingPartial;
 
 /// Ordering information for each group in the hash table
 #[derive(Debug)]
 pub(crate) enum GroupOrdering {
     /// Groups are not ordered
     None,
+    /// Groups are ordered by some pre-set of the group keys
+    Partial(GroupOrderingPartial),
     /// Groups are entirely contiguous,
     Full(GroupOrderingFull),
 }
 
 impl GroupOrdering {
     /// Create a `GroupOrdering` for the the specified ordering
-    pub fn try_new(mode: &InputOrderMode) -> Result<Self> {
+    pub fn try_new(
+        input_schema: &Schema,
+        mode: &InputOrderMode,
+        ordering: &[PhysicalSortExpr],
+    ) -> Result<Self> {
         match mode {
             InputOrderMode::Linear => Ok(GroupOrdering::None),
-            InputOrderMode::PartiallySorted(_order_indices) => Err(plan_datafusion_err!(
-                "AggregateExec cannot receive input in the PartiallySorted mode."
-            )),
+            InputOrderMode::PartiallySorted(order_indices) => {
+                GroupOrderingPartial::try_new(input_schema, order_indices, ordering)
+                    .map(GroupOrdering::Partial)
+            }
             InputOrderMode::Sorted => Ok(GroupOrdering::Full(GroupOrderingFull::new())),
         }
     }
@@ -49,6 +60,7 @@ impl GroupOrdering {
     pub fn emit_to(&self) -> Option<EmitTo> {
         match self {
             GroupOrdering::None => None,
+            GroupOrdering::Partial(partial) => partial.emit_to(),
             GroupOrdering::Full(full) => full.emit_to(),
         }
     }
@@ -57,6 +69,7 @@ impl GroupOrdering {
     pub fn input_done(&mut self) {
         match self {
             GroupOrdering::None => {}
+            GroupOrdering::Partial(partial) => partial.input_done(),
             GroupOrdering::Full(full) => full.input_done(),
         }
     }
@@ -66,6 +79,7 @@ impl GroupOrdering {
     pub fn remove_groups(&mut self, n: usize) {
         match self {
             GroupOrdering::None => {}
+            GroupOrdering::Partial(partial) => partial.remove_groups(n),
             GroupOrdering::Full(full) => full.remove_groups(n),
         }
     }
@@ -80,9 +94,21 @@ impl GroupOrdering {
     /// * `group_indices`: indices for each row in the batch
     ///
     /// * `hashes`: hash values for each row in the batch
-    pub fn new_groups(&mut self, total_num_groups: usize) -> Result<()> {
+    pub fn new_groups(
+        &mut self,
+        batch_group_values: &[ArrayRef],
+        group_indices: &[usize],
+        total_num_groups: usize,
+    ) -> Result<()> {
         match self {
             GroupOrdering::None => {}
+            GroupOrdering::Partial(partial) => {
+                partial.new_groups(
+                    batch_group_values,
+                    group_indices,
+                    total_num_groups,
+                )?;
+            }
             GroupOrdering::Full(full) => {
                 full.new_groups(total_num_groups);
             }
@@ -95,6 +121,7 @@ impl GroupOrdering {
         std::mem::size_of::<Self>()
             + match self {
                 GroupOrdering::None => 0,
+                GroupOrdering::Partial(partial) => partial.size(),
                 GroupOrdering::Full(full) => full.size(),
             }
     }

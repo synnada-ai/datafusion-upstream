@@ -67,7 +67,6 @@ use datafusion_physical_expr::window::WindowExpr;
 use datafusion_physical_expr::{
     LexOrdering, PhysicalExpr, PhysicalSortExpr, PhysicalSortRequirement,
 };
-use datafusion_physical_plan::aggregates::AggregateExec;
 use datafusion_physical_plan::repartition::RepartitionExec;
 use datafusion_physical_plan::sorts::partial_sort::PartialSortExec;
 use datafusion_physical_plan::windows::get_window_mode;
@@ -280,10 +279,7 @@ fn add_sort_on_top(
 fn replace_partial_mode_with_full_mode(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    if let Some(aggregate) = plan.as_any().downcast_ref::<AggregateExec>() {
-        // If None, return original plan as is
-        Ok(replace_mode_of_aggregate(aggregate)?.unwrap_or(plan))
-    } else if let Some(window) = plan.as_any().downcast_ref::<BoundedWindowAggExec>() {
+    if let Some(window) = plan.as_any().downcast_ref::<BoundedWindowAggExec>() {
         // If None, return original plan as is
         Ok(replace_mode_of_window(window)?.unwrap_or(plan))
     } else {
@@ -311,40 +307,6 @@ fn replace_partial_mode_with_full_mode(
         } else {
             Ok(plan)
         }
-    }
-}
-
-fn replace_mode_of_aggregate(
-    aggregate: &AggregateExec,
-) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-    let groupby_exprs = aggregate.group_by().input_exprs();
-    let (mut ordering, gb_ordered_indices) = aggregate
-        .input
-        .equivalence_properties()
-        .find_longest_permutation(&groupby_exprs);
-    if !gb_ordered_indices.is_empty() && gb_ordered_indices.len() < groupby_exprs.len() {
-        // Partially Sorted Mode
-        let all_indices = (0..groupby_exprs.len()).collect::<Vec<_>>();
-        let missing_indices = set_difference(all_indices, &gb_ordered_indices);
-        let missing_partition_bys = get_at_indices(&groupby_exprs, missing_indices)?;
-        ordering.extend(with_default_ordering(missing_partition_bys));
-
-        let child = aggregate.input().clone();
-        let new_child = add_sort_on_top(child, ordering);
-
-        Ok(Some(Arc::new(
-            AggregateExec::try_new(
-                *aggregate.mode(),
-                aggregate.group_by().clone(),
-                aggregate.aggr_expr().to_vec(),
-                aggregate.filter_expr().to_vec(),
-                new_child,
-                aggregate.input_schema.clone(),
-            )?
-            .with_limit(aggregate.limit()),
-        )))
-    } else {
-        Ok(None)
     }
 }
 
