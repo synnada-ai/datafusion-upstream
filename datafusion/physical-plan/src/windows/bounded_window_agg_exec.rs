@@ -47,10 +47,7 @@ use arrow::{
 };
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::stats::Precision;
-use datafusion_common::utils::{
-    evaluate_partition_ranges, get_arrayref_at_indices, get_at_indices,
-    get_record_batch_at_indices, get_row_at_idx,
-};
+use datafusion_common::utils::{evaluate_partition_ranges, get_arrayref_at_indices, get_at_indices, get_record_batch_at_indices, get_row_at_idx, set_difference};
 use datafusion_common::{arrow_datafusion_err, exec_err, DataFusionError, Result};
 use datafusion_execution::TaskContext;
 use datafusion_expr::window_state::{PartitionBatchState, WindowAggState};
@@ -99,7 +96,7 @@ impl BoundedWindowAggExec {
         window_expr: Vec<Arc<dyn WindowExpr>>,
         input: Arc<dyn ExecutionPlan>,
         partition_keys: Vec<Arc<dyn PhysicalExpr>>,
-        input_order_mode: InputOrderMode,
+        mut input_order_mode: InputOrderMode,
     ) -> Result<Self> {
         let schema = create_schema(&input.schema(), &window_expr)?;
         let schema = Arc::new(schema);
@@ -116,7 +113,14 @@ impl BoundedWindowAggExec {
                     (0..partition_by_exprs.len()).collect::<Vec<_>>()
                 }
             }
-            InputOrderMode::PartiallySorted(ordered_indices) => ordered_indices.clone(),
+            InputOrderMode::PartiallySorted(ordered_indices) => {
+                let all_indices = (0..partition_by_exprs.len()).collect::<Vec<_>>();
+                let mut indices = ordered_indices.clone();
+                let missing_indices = set_difference(&all_indices, ordered_indices);
+                indices.extend(missing_indices);
+                input_order_mode = InputOrderMode::Sorted;
+                indices
+            },
             InputOrderMode::Linear => {
                 vec![]
             }

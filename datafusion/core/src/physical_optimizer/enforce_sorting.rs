@@ -67,6 +67,7 @@ use datafusion_physical_plan::sorts::partial_sort::PartialSortExec;
 use datafusion_physical_plan::ExecutionPlanProperties;
 
 use itertools::izip;
+use datafusion_physical_plan::windows::{get_desired_input_order_mode, should_reverse_window_exprs, window_required_input_ordering};
 
 /// This rule inspects [`SortExec`]'s in the given physical plan and removes the
 /// ones it can prove unnecessary.
@@ -430,53 +431,41 @@ fn adjust_window_sort_removal(
 
     let plan = window_tree.plan.as_any();
     let child_plan = &window_tree.children[0].plan;
-    let (window_expr, new_window) =
-        if let Some(exec) = plan.downcast_ref::<WindowAggExec>() {
-            let window_expr = exec.window_expr();
-            let new_window =
-                get_best_fitting_window(window_expr, child_plan, &exec.partition_keys)?;
-            (window_expr, new_window)
-        } else if let Some(exec) = plan.downcast_ref::<BoundedWindowAggExec>() {
-            let window_expr = exec.window_expr();
-            let new_window =
-                get_best_fitting_window(window_expr, child_plan, &exec.partition_keys)?;
-            (window_expr, new_window)
-        } else {
-            return plan_err!("Expected WindowAggExec or BoundedWindowAggExec");
-        };
-
-    window_tree.plan = if let Some(new_window) = new_window {
-        // We were able to change the window to accommodate the input, use it:
-        new_window
+    let (window_exprs, partition_keys) = if let Some(exec) = plan.downcast_ref::<WindowAggExec>() {
+        (exec.window_expr(), &exec.partition_keys)
+    } else if let Some(exec) = plan.downcast_ref::<BoundedWindowAggExec>() {
+        (exec.window_expr(), &exec.partition_keys)
     } else {
-        // We were unable to change the window to accommodate the input, so we
-        // will insert a sort.
-        let reqs = window_tree
-            .plan
-            .required_input_ordering()
-            .swap_remove(0)
-            .unwrap_or_default();
+        return plan_err!("Expected WindowAggExec or BoundedWindowAggExec");
+    };
+    let window_exprs = if let Some(reversed_window_exprs) = should_reverse_window_exprs(&window_exprs, child_plan)?{
+        reversed_window_exprs
+    } else {
+        window_exprs.to_vec()
+    };
+    let partitionby_exprs = window_exprs[0].partition_by();
+    let (mode, indices) = get_desired_input_order_mode(child_plan, partitionby_exprs);
+    let reqs = window_required_input_ordering(&window_exprs, &indices)?;
 
-        // Satisfy the ordering requirement so that the window can run:
-        let mut child_node = window_tree.children.swap_remove(0);
-        child_node = add_sort_above(child_node, reqs, None);
-        let child_plan = child_node.plan.clone();
-        window_tree.children.push(child_node);
+    // Satisfy the ordering requirement so that the window can run:
+    let mut child_node = window_tree.children.swap_remove(0);
+    child_node = add_sort_above(child_node, reqs, None);
+    let child_plan = child_node.plan.clone();
+    window_tree.children.push(child_node);
 
-        if window_expr.iter().all(|e| e.uses_bounded_memory()) {
-            Arc::new(BoundedWindowAggExec::try_new(
-                window_expr.to_vec(),
-                child_plan,
-                window_expr[0].partition_by().to_vec(),
-                InputOrderMode::Sorted,
-            )?) as _
-        } else {
-            Arc::new(WindowAggExec::try_new(
-                window_expr.to_vec(),
-                child_plan,
-                window_expr[0].partition_by().to_vec(),
-            )?) as _
-        }
+    window_tree.plan = if window_exprs.iter().all(|e| e.uses_bounded_memory()) {
+        Arc::new(BoundedWindowAggExec::try_new(
+            window_exprs,
+            child_plan,
+            partition_keys.to_vec(),
+            mode,
+        )?) as _
+    } else {
+        Arc::new(WindowAggExec::try_new(
+            window_exprs,
+            child_plan,
+            partition_keys.to_vec(),
+        )?) as _
     };
 
     window_tree.data = false;
