@@ -2911,7 +2911,6 @@ mod tests {
                 &["c2_c1", "c2_c2"],
                 None,
             )?;
-            println!("join_type: {:?}", join_type);
             let physical_plan = join.create_physical_plan().await?;
             let out_partitioning = physical_plan.output_partitioning();
             let join_schema = physical_plan.schema();

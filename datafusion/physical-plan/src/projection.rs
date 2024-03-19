@@ -73,7 +73,6 @@ impl ProjectionExec {
             .iter()
             .map(|(_, alias)| alias.to_string())
             .collect::<Vec<_>>();
-
         // construct a map from the input expressions to the output expression of the Projection
         let projection_mapping = ProjectionMapping::try_new(expr, &input_schema)?;
         expr = projection_mapping
