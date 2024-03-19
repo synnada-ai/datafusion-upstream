@@ -79,7 +79,6 @@ use datafusion_physical_plan::aggregates::{
 };
 use datafusion_physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion_physical_plan::displayable;
 use datafusion_physical_plan::insert::FileSinkExec;
 use datafusion_physical_plan::joins::utils::{
     ColumnIndex, JoinFilter, JoinOn, JoinOnRef,
@@ -96,13 +95,6 @@ use datafusion_physical_plan::union::{InterleaveExec, UnionExec};
 use datafusion_physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
 
 use itertools::Itertools;
-
-fn print_plan(plan: &Arc<dyn ExecutionPlan>) -> Result<()> {
-    let formatted = displayable(plan.as_ref()).indent(true).to_string();
-    let actual: Vec<&str> = formatted.trim().lines().collect();
-    println!("{:#?}", actual);
-    Ok(())
-}
 
 /// The tree node for the rule of [`OptimizeProjections`]. It stores the necessary
 /// fields for column requirements and changed indices of columns.
@@ -139,9 +131,6 @@ impl ProjectionOptimizer {
     /// to leaf nodes. It only addresses the self and child node, and make
     /// the necessary changes on them, does not deep dive.
     fn adjust_node_with_requirements(mut self) -> Result<Self> {
-        // println!("1)NODE");
-        // print_plan(&self.plan);
-        // println!("reqs: {:?}", self.required_columns);
         // If the node is a source provider, no need a change.
         if self.children_nodes.is_empty() {
             // We also clean the requirements, since we would like
@@ -150,19 +139,14 @@ impl ProjectionOptimizer {
             return Ok(self);
         }
 
-        let x: ProjectionOptimizer = if self.plan.as_any().is::<ProjectionExec>() {
+        if self.plan.as_any().is::<ProjectionExec>() {
             // If the node is a projection, it is analyzed and may be rewritten
             // to make the projection more efficient, or even it may be removed.
             self.optimize_projections()
         } else {
             // If the node is any other plan, a projection may be inserted to its input.
             self.try_projection_insertion()
-        }?;
-        // println!("2)NODE");
-        // print_plan(&x.plan);
-        // println!("reqs: {:?}", x.children_nodes[0].required_columns);
-        // println!("maps: {:?}", x.schema_mapping);
-        Ok(x)
+        }
     }
 
     /// The function tries 4 cases:
@@ -211,7 +195,7 @@ impl ProjectionOptimizer {
             return match self.try_embed_to_hash_join()? {
                 join if join.transformed => {
                     // Re-run on the new HashJoin node
-                    join.data.adjust_node_with_requirements()
+                    return join.data.adjust_node_with_requirements();
                 }
                 projection => Ok(projection.data),
             };
@@ -240,7 +224,7 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
-    /// If it is beneficial. unifies the projection and its input, which is also a [`ProjectionExec`].
+    /// If it is beneficial, unifies the projection and its input, which is also a [`ProjectionExec`].
     fn try_unify_projections(mut self) -> Result<Transformed<Self>> {
         // These are known to be a ProjectionExec.
         let Some(projection) = self.plan.as_any().downcast_ref::<ProjectionExec>() else {
@@ -253,6 +237,7 @@ impl ProjectionOptimizer {
         else {
             return Ok(Transformed::no(self));
         };
+
         // Projection can be beneficial if it caches any computation which are used more than once.
         if caching_projections(projection, child_projection)? {
             return Ok(Transformed::no(self));
@@ -390,7 +375,7 @@ impl ProjectionOptimizer {
         }
 
         let new_hash_join =
-            Arc::new(hash_join.with_projection(Some(projection_index.to_vec()))?)
+            Arc::new(hash_join.with_projection(Some(projection_index.clone()))?)
                 as Arc<dyn ExecutionPlan>;
 
         // Build projection expressions for update_expr. Zip the projection_index with the new_hash_join output schema fields.
@@ -1247,6 +1232,7 @@ impl ProjectionOptimizer {
                     .flat_map(|(_, right_on)| collect_columns(right_on))
                     .collect::<HashSet<_>>(),
             );
+
             hj_right_requirements.extend(
                 hj.filter()
                     .map(|filter| {
@@ -1309,6 +1295,7 @@ impl ProjectionOptimizer {
                     let mut ordered_hj_right_requirements =
                         hj_right_requirements.iter().cloned().collect_vec();
                     ordered_hj_right_requirements.sort_by_key(|col| col.index());
+
                     let right_projection_exprs = ordered_hj_right_requirements
                         .iter()
                         .map(|req| {
@@ -1316,6 +1303,7 @@ impl ProjectionOptimizer {
                             (Arc::new(req.clone()) as Arc<dyn PhysicalExpr>, name)
                         })
                         .collect::<Vec<_>>();
+
                     let new_right_projection = ProjectionExec::try_new(
                         right_projection_exprs,
                         hj.right().clone(),
@@ -1412,25 +1400,6 @@ impl ProjectionOptimizer {
                             })
                             .collect()
                     });
-                    if HashJoinExec::try_new(
-                        new_left_node.plan.clone(),
-                        new_right_node.plan.clone(),
-                        new_on.clone(),
-                        new_filter.clone(),
-                        hj.join_type(),
-                        new_projection.clone(),
-                        *hj.partition_mode(),
-                        hj.null_equals_null(),
-                    )
-                    .is_err()
-                    {
-                        print_plan(&new_left_node.plan);
-                        print_plan(&new_right_node.plan);
-                        println!("new_on :{:?}", new_on);
-                        println!("new_filter :{:?}", new_filter);
-                        println!(" hj.join_type(), :{:?}", hj.join_type(),);
-                        println!("projection :{:?}", new_projection);
-                    }
 
                     let new_hash_join = HashJoinExec::try_new(
                         new_left_node.plan.clone(),
@@ -1484,7 +1453,7 @@ impl ProjectionOptimizer {
                         .map(|(idx, col)| (col.clone(), Column::new(col.name(), idx)))
                         .collect::<HashMap<_, _>>();
                     let mut right_mapping =
-                        hj_right_requirements.into_iter().collect_vec();
+                        hj_right_requirements.iter().cloned().collect_vec();
                     right_mapping.sort_by_key(|col| col.index());
                     let right_mapping = right_mapping
                         .into_iter()
@@ -1556,28 +1525,10 @@ impl ProjectionOptimizer {
                             })
                             .collect()
                     });
-                    if HashJoinExec::try_new(
-                        new_left_node.plan.clone(),
-                        hj.right().clone(),
-                        new_on.clone(),
-                        new_filter.clone(),
-                        hj.join_type(),
-                        new_projection.clone(),
-                        *hj.partition_mode(),
-                        hj.null_equals_null(),
-                    )
-                    .is_err()
-                    {
-                        print_plan(&new_left_node.plan);
-                        print_plan(&hj.right());
-                        println!("new_on :{:?}", new_on);
-                        println!("new_filter :{:?}", new_filter);
-                        println!(" hj.join_type(), :{:?}", hj.join_type(),);
-                        println!("projection :{:?}", new_projection);
-                    }
+
                     let new_hash_join = HashJoinExec::try_new(
                         new_left_node.plan.clone(),
-                        hj.right().clone(),
+                        self.children_nodes[1].plan.clone(),
                         new_on,
                         new_filter,
                         hj.join_type(),
@@ -1585,20 +1536,20 @@ impl ProjectionOptimizer {
                         *hj.partition_mode(),
                         hj.null_equals_null(),
                     )?;
+                    let mut right_ = self.children_nodes[1].clone();
+                    right_.required_columns = hj_right_requirements;
                     return Ok(ProjectionOptimizer {
                         plan: Arc::new(new_hash_join),
                         required_columns: HashSet::new(),
                         schema_mapping: HashMap::new(),
-                        children_nodes: vec![
-                            new_left_node,
-                            self.children_nodes[1].clone(),
-                        ],
+                        children_nodes: vec![new_left_node, right_],
                     });
                 }
                 (true, false) => {
                     let mut ordered_hj_right_requirements =
                         hj_right_requirements.iter().cloned().collect_vec();
                     ordered_hj_right_requirements.sort_by_key(|col| col.index());
+
                     let right_projection_exprs = ordered_hj_right_requirements
                         .iter()
                         .map(|req| {
@@ -1606,6 +1557,7 @@ impl ProjectionOptimizer {
                             (Arc::new(req.clone()) as Arc<dyn PhysicalExpr>, name)
                         })
                         .collect::<Vec<_>>();
+
                     let new_right_projection = ProjectionExec::try_new(
                         right_projection_exprs,
                         hj.right().clone(),
@@ -1702,27 +1654,9 @@ impl ProjectionOptimizer {
                             })
                             .collect()
                     });
-                    if HashJoinExec::try_new(
-                        hj.left().clone(),
-                        new_right_node.plan.clone(),
-                        new_on.clone(),
-                        new_filter.clone(),
-                        hj.join_type(),
-                        new_projection.clone(),
-                        *hj.partition_mode(),
-                        hj.null_equals_null(),
-                    )
-                    .is_err()
-                    {
-                        print_plan(&hj.left());
-                        print_plan(&new_right_node.plan);
-                        println!("new_on :{:?}", new_on);
-                        println!("new_filter :{:?}", new_filter);
-                        println!(" hj.join_type(), :{:?}", hj.join_type(),);
-                        println!("projection :{:?}", new_projection);
-                    }
+
                     let new_hash_join = HashJoinExec::try_new(
-                        hj.left().clone(),
+                        self.children_nodes[0].plan.clone(),
                         new_right_node.plan.clone(),
                         new_on,
                         new_filter,
@@ -1731,14 +1665,13 @@ impl ProjectionOptimizer {
                         *hj.partition_mode(),
                         hj.null_equals_null(),
                     )?;
+                    let mut left_ = self.children_nodes[0].clone();
+                    left_.required_columns = hj_left_requirements;
                     return Ok(ProjectionOptimizer {
                         plan: Arc::new(new_hash_join),
                         required_columns: HashSet::new(),
                         schema_mapping: HashMap::new(),
-                        children_nodes: vec![
-                            self.children_nodes[0].clone(),
-                            new_right_node,
-                        ],
+                        children_nodes: vec![left_, new_right_node],
                     });
                 }
                 (true, true) => {
@@ -1965,25 +1898,7 @@ impl ProjectionOptimizer {
                             })
                             .collect()
                     });
-                    if HashJoinExec::try_new(
-                        new_left_node.plan.clone(),
-                        new_right_node.plan.clone(),
-                        new_on.clone(),
-                        new_filter.clone(),
-                        hj.join_type(),
-                        new_projection.clone(),
-                        *hj.partition_mode(),
-                        hj.null_equals_null(),
-                    )
-                    .is_err()
-                    {
-                        print_plan(&new_left_node.plan);
-                        print_plan(&new_right_node.plan);
-                        println!("new_on :{:?}", new_on);
-                        println!("new_filter :{:?}", new_filter);
-                        println!(" hj.join_type(), :{:?}", hj.join_type(),);
-                        println!("projection :{:?}", new_projection);
-                    }
+
                     let new_hash_join = HashJoinExec::try_new(
                         new_left_node.plan.clone(),
                         new_right_node.plan.clone(),
@@ -2108,25 +2023,7 @@ impl ProjectionOptimizer {
                             })
                             .collect()
                     });
-                    if HashJoinExec::try_new(
-                        new_left_node.plan.clone(),
-                        hj.right().clone(),
-                        new_on.clone(),
-                        new_filter.clone(),
-                        hj.join_type(),
-                        new_projection.clone(),
-                        *hj.partition_mode(),
-                        hj.null_equals_null(),
-                    )
-                    .is_err()
-                    {
-                        print_plan(&new_left_node.plan);
-                        print_plan(&hj.right());
-                        println!("new_on :{:?}", new_on);
-                        println!("new_filter :{:?}", new_filter);
-                        println!(" hj.join_type(), :{:?}", hj.join_type(),);
-                        println!("projection :{:?}", new_projection);
-                    }
+
                     let new_hash_join = HashJoinExec::try_new(
                         new_left_node.plan.clone(),
                         hj.right().clone(),
@@ -2254,25 +2151,7 @@ impl ProjectionOptimizer {
                             })
                             .collect()
                     });
-                    if HashJoinExec::try_new(
-                        hj.left().clone(),
-                        new_right_node.plan.clone(),
-                        new_on.clone(),
-                        new_filter.clone(),
-                        hj.join_type(),
-                        new_projection.clone(),
-                        *hj.partition_mode(),
-                        hj.null_equals_null(),
-                    )
-                    .is_err()
-                    {
-                        print_plan(&hj.left());
-                        print_plan(&new_right_node.plan);
-                        println!("new_on :{:?}", new_on);
-                        println!("new_filter :{:?}", new_filter);
-                        println!(" hj.join_type(), :{:?}", hj.join_type(),);
-                        println!("projection :{:?}", new_projection);
-                    }
+
                     let new_hash_join = HashJoinExec::try_new(
                         hj.left().clone(),
                         new_right_node.plan.clone(),
@@ -2351,25 +2230,7 @@ impl ProjectionOptimizer {
                                 analyzed_join_left,
                                 analyzed_join_right,
                             )?;
-                        if HashJoinExec::try_new(
-                            new_left_child.plan.clone(),
-                            new_right_child.plan.clone(),
-                            new_on.clone(),
-                            new_filter.clone(),
-                            hj.join_type(),
-                            None,
-                            *hj.partition_mode(),
-                            hj.null_equals_null(),
-                        )
-                        .is_err()
-                        {
-                            print_plan(&new_left_child.plan);
-                            print_plan(&new_right_child.plan);
-                            println!("new_on :{:?}", new_on);
-                            println!("new_filter :{:?}", new_filter);
-                            println!(" hj.join_type(), :{:?}", hj.join_type(),);
-                            println!("projection :None");
-                        }
+
                         let plan = Arc::new(HashJoinExec::try_new(
                             new_left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -2408,25 +2269,7 @@ impl ProjectionOptimizer {
 
                         right_child.required_columns =
                             update_right_child_requirements(&required_columns, left_size);
-                        if HashJoinExec::try_new(
-                            new_left_child.plan.clone(),
-                            right_child.plan.clone(),
-                            new_on.clone(),
-                            new_filter.clone(),
-                            hj.join_type(),
-                            None,
-                            *hj.partition_mode(),
-                            hj.null_equals_null(),
-                        )
-                        .is_err()
-                        {
-                            print_plan(&new_left_child.plan);
-                            print_plan(&right_child.plan);
-                            println!("new_on :{:?}", new_on);
-                            println!("new_filter :{:?}", new_filter);
-                            println!(" hj.join_type(), :{:?}", hj.join_type(),);
-                            println!("projection :None",);
-                        }
+
                         let plan = Arc::new(HashJoinExec::try_new(
                             new_left_child.plan.clone(),
                             right_child.plan.clone(),
@@ -2472,25 +2315,7 @@ impl ProjectionOptimizer {
 
                         left_child.required_columns =
                             collect_left_used_columns(required_columns, left_size);
-                        if HashJoinExec::try_new(
-                            left_child.plan.clone(),
-                            new_right_child.plan.clone(),
-                            new_on.clone(),
-                            new_filter.clone(),
-                            hj.join_type(),
-                            None,
-                            *hj.partition_mode(),
-                            hj.null_equals_null(),
-                        )
-                        .is_err()
-                        {
-                            print_plan(&left_child.plan);
-                            print_plan(&new_right_child.plan);
-                            println!("new_on :{:?}", new_on);
-                            println!("new_filter :{:?}", new_filter);
-                            println!(" hj.join_type(), :{:?}", hj.join_type(),);
-                            println!("projection :None",);
-                        }
+
                         let plan = Arc::new(HashJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -2535,25 +2360,7 @@ impl ProjectionOptimizer {
 
                         let (new_left_child, left_schema_mapping) =
                             self.insert_projection_below_left_child(analyzed_join_left)?;
-                        if HashJoinExec::try_new(
-                            new_left_child.plan.clone(),
-                            right_child.plan.clone(),
-                            new_on.clone(),
-                            new_filter.clone(),
-                            hj.join_type(),
-                            None,
-                            *hj.partition_mode(),
-                            hj.null_equals_null(),
-                        )
-                        .is_err()
-                        {
-                            print_plan(&new_left_child.plan);
-                            print_plan(&right_child.plan);
-                            println!("new_on :{:?}", new_on);
-                            println!("new_filter :{:?}", new_filter);
-                            println!(" hj.join_type(), :{:?}", hj.join_type(),);
-                            println!("projection :None",);
-                        }
+
                         let plan = Arc::new(HashJoinExec::try_new(
                             new_left_child.plan.clone(),
                             right_child.plan.clone(),
@@ -2606,25 +2413,7 @@ impl ProjectionOptimizer {
                         );
                         let (new_right_child, right_schema_mapping) = self
                             .insert_projection_below_right_child(analyzed_join_right)?;
-                        if HashJoinExec::try_new(
-                            left_child.plan.clone(),
-                            new_right_child.plan.clone(),
-                            new_on.clone(),
-                            new_filter.clone(),
-                            hj.join_type(),
-                            None,
-                            *hj.partition_mode(),
-                            hj.null_equals_null(),
-                        )
-                        .is_err()
-                        {
-                            print_plan(&left_child.plan);
-                            print_plan(&new_right_child.plan);
-                            println!("new_on :{:?}", new_on);
-                            println!("new_filter :{:?}", new_filter);
-                            println!(" hj.join_type(), :{:?}", hj.join_type(),);
-                            println!("projection :None",);
-                        }
+
                         let plan = Arc::new(HashJoinExec::try_new(
                             left_child.plan.clone(),
                             new_right_child.plan.clone(),
@@ -4194,38 +3983,73 @@ impl ProjectionOptimizer {
                 )?;
                 update_mapping(&mut self, all_mappings)
             } else if let Some(hj) = plan_any.downcast_ref::<HashJoinExec>() {
-                let projection = hj.projection.clone();
-                let left_input_size = self.children_nodes[0].plan.schema().fields().len();
-                let left_size = projection
-                    .clone()
-                    .unwrap_or((0..hj.schema().fields().len()).collect())
-                    .iter()
-                    .filter(|idx| **idx < left_input_size)
-                    .count();
                 let left_mapping = all_mappings.swap_remove(0);
                 let right_mapping = all_mappings.swap_remove(0);
-                let new_mapping = left_mapping
-                    .iter()
-                    .map(|(initial, new)| (initial.clone(), new.clone()))
-                    .chain(right_mapping.iter().map(|(initial, new)| {
+                let projection = hj.projection.clone();
+                let new_on = update_join_on(hj.on(), &left_mapping, &right_mapping);
+                let new_filter = hj.filter().map(|filter| {
+                    JoinFilter::new(
+                        filter.expression().clone(),
+                        filter
+                            .column_indices()
+                            .iter()
+                            .map(|col_idx| match col_idx.side {
+                                JoinSide::Left => ColumnIndex {
+                                    index: left_mapping
+                                        .iter()
+                                        .find(|(old_column, _new_column)| {
+                                            old_column.index() == col_idx.index
+                                        })
+                                        .map(|(_old_column, new_column)| {
+                                            new_column.index()
+                                        })
+                                        .unwrap_or(col_idx.index),
+                                    side: JoinSide::Left,
+                                },
+                                JoinSide::Right => ColumnIndex {
+                                    index: right_mapping
+                                        .iter()
+                                        .find(|(old_column, _new_column)| {
+                                            old_column.index() == col_idx.index
+                                        })
+                                        .map(|(_old_column, new_column)| {
+                                            new_column.index()
+                                        })
+                                        .unwrap_or(col_idx.index),
+                                    side: JoinSide::Right,
+                                },
+                            })
+                            .collect(),
+                        filter.schema().clone(),
+                    )
+                });
+                let index_mapping = left_mapping
+                    .into_iter()
+                    .map(|(col1, col2)| (col1.index(), col2.index()))
+                    .chain(right_mapping.into_iter().map(|(col1, col2)| {
                         (
-                            Column::new(initial.name(), initial.index() + left_size),
-                            Column::new(new.name(), new.index() + left_size),
+                            col1.index() + hj.children()[0].schema().fields().len(),
+                            col2.index()
+                                + self.children_nodes[0].plan.schema().fields().len(),
                         )
                     }))
                     .collect::<HashMap<_, _>>();
-
-                self.plan = rewrite_hash_join(
-                    hj,
+                let new_projection = projection.map(|mut prj| {
+                    prj.iter_mut()
+                        .for_each(|idx| *idx = *index_mapping.get(idx).unwrap_or(idx));
+                    prj
+                });
+                self.plan = HashJoinExec::try_new(
                     self.children_nodes[0].plan.clone(),
                     self.children_nodes[1].plan.clone(),
-                    &left_mapping,
-                    &right_mapping,
-                    projection,
-                    new_mapping,
-                )?;
-
-                // self.schema_mapping  = empty;
+                    new_on,
+                    new_filter,
+                    hj.join_type(),
+                    new_projection,
+                    *hj.partition_mode(),
+                    hj.null_equals_null(),
+                )
+                .map(|plan| Arc::new(plan) as _)?;
                 self.schema_mapping = HashMap::new();
             } else if let Some(nlj) = plan_any.downcast_ref::<NestedLoopJoinExec>() {
                 let left_size = self.children_nodes[0].plan.schema().fields().len();
@@ -4436,12 +4260,14 @@ impl ProjectionOptimizer {
                 unreachable!()
             }
         } else {
-            self.plan = self.plan.with_new_children(
+            let res = self.plan.clone().with_new_children(
                 self.children_nodes
                     .iter()
                     .map(|child| child.plan.clone())
                     .collect(),
-            )?;
+            );
+
+            self.plan = res?;
         }
 
         Ok(Transformed::yes(self))
@@ -4528,12 +4354,6 @@ impl ConcreteTreeNode for ProjectionOptimizer {
 
     fn with_new_children(mut self, children: Vec<Self>) -> Result<Self> {
         self.children_nodes = children;
-        // println!("INDEX UPDATE");
-        // print_plan(&self.plan);
-        // self.children_nodes.iter().for_each(|c| {
-        //     print_plan(&c.plan);
-        //     println!("MAP: {:?}", c.schema_mapping);
-        // });
 
         self = match self.index_updater()? {
             new_node if new_node.transformed => new_node.data,
@@ -4568,8 +4388,6 @@ impl PhysicalOptimizerRule for OptimizeProjections {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        println!("INITIAL");
-        print_plan(&plan);
         // Collect initial columns requirements from the plan's schema.
         let initial_requirements = collect_columns_in_plan_schema(&plan);
 
@@ -4586,8 +4404,7 @@ impl PhysicalOptimizerRule for OptimizeProjections {
         // optimized plan satisfies the initial schema order.
         optimized = optimized
             .map_data(|node| satisfy_initial_schema(node, initial_requirements))?;
-        // println!("FINAL");
-        // print_plan(&optimized.data.plan);
+
         Ok(optimized.data.plan)
     }
 
@@ -5147,25 +4964,12 @@ fn collect_columns_in_join_conditions(
         .collect::<HashSet<_>>()
 }
 
-/// Collect all column indices from the given projection expressions in the index order.
-fn collect_column_indices(exprs: &[(Arc<dyn PhysicalExpr>, String)]) -> Vec<usize> {
-    // Collect indices and remove duplicates.
-    let mut indexs = exprs
-        .iter()
-        .flat_map(|(expr, _)| collect_columns(expr))
-        .map(|x| x.index())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    indexs.sort();
-    indexs
-}
-
 fn collect_column_indices_hj(exprs: &[(Arc<dyn PhysicalExpr>, String)]) -> Vec<usize> {
     // Collect indices and remove duplicates.
     exprs
         .iter()
-        .map(|(expr, _)| expr.as_any().downcast_ref::<Column>().unwrap().index())
+        .flat_map(|(expr, _)| collect_columns(expr))
+        .map(|col| col.index())
         .collect::<Vec<_>>()
 }
 
@@ -5185,9 +4989,9 @@ enum RewriteState {
 /// 1. When `sync_with_child` is `true`:
 ///
 ///    The function updates the indices of `expr` if the expression resides
-///    in the input plan. For instance, given the expressions `a@1 + b@2`
-///    and `c@0` with the input schema `c@2, a@0, b@1`, the expressions are
-///    updated to `a@0 + b@1` and `c@2`.
+///    in the projecting input plan. For instance, given the expressions
+///    `a@1 + b@2` and `c@0` with the input schema `c@2, a@0, b@1`, the expressions
+///    are updated to `a@0 + b@1` and `c@2`.
 ///
 /// 2. When `sync_with_child` is `false`:
 ///
@@ -5626,111 +5430,6 @@ fn rewrite_sort_preserving_merge(
     Ok(Arc::new(
         SortPreservingMergeExec::new(new_sort_exprs, input_plan).with_fetch(sort.fetch()),
     ) as _)
-}
-
-/// Rewrites a hash join execution plan with updated column indices.
-///
-/// Updates the join conditions and filter expressions in a hash join plan based on provided column index mappings
-/// for both left and right input plans.
-///
-/// # Arguments
-/// * `hj` - The original `HashJoinExec` plan.
-/// * `left_input_plan` - The left input execution plan.
-/// * `right_input_plan` - The right input execution plan.
-/// * `left_mapping` - A hashmap with old and new column index mappings for the left input.
-/// * `right_mapping` - A hashmap with old and new column index mappings for the right input.
-/// * `left_size` - The size of the left input columns set.
-///
-/// # Returns
-/// A `Result` containing the new `HashJoinExec` wrapped in an `Arc`.
-fn rewrite_hash_join(
-    hj: &HashJoinExec,
-    left_input_plan: Arc<dyn ExecutionPlan>,
-    right_input_plan: Arc<dyn ExecutionPlan>,
-    left_mapping: &HashMap<Column, Column>,
-    right_mapping: &HashMap<Column, Column>,
-    mut projection: Option<Vec<usize>>,
-    new_mapping: HashMap<Column, Column>,
-) -> Result<Arc<dyn ExecutionPlan>> {
-    let new_on = update_join_on(hj.on(), left_mapping, right_mapping);
-    let new_filter = hj.filter().map(|filter| {
-        JoinFilter::new(
-            filter.expression().clone(),
-            filter
-                .column_indices()
-                .iter()
-                .map(|col_idx| match col_idx.side {
-                    JoinSide::Left => ColumnIndex {
-                        index: left_mapping
-                            .iter()
-                            .find(|(old_column, _new_column)| {
-                                old_column.index() == col_idx.index
-                            })
-                            .map(|(_old_column, new_column)| new_column.index())
-                            .unwrap_or(col_idx.index),
-                        side: JoinSide::Left,
-                    },
-                    JoinSide::Right => ColumnIndex {
-                        index: right_mapping
-                            .iter()
-                            .find(|(old_column, _new_column)| {
-                                old_column.index() == col_idx.index
-                            })
-                            .map(|(_old_column, new_column)| new_column.index())
-                            .unwrap_or(col_idx.index),
-                        side: JoinSide::Right,
-                    },
-                })
-                .collect(),
-            filter.schema().clone(),
-        )
-    });
-    let index_mapping = new_mapping
-        .into_iter()
-        .map(|(initial, target)| (initial.index(), target.index()))
-        .collect::<HashMap<_, _>>();
-    projection = projection.map(|mut prj| {
-        prj.iter_mut().for_each(|idx| {
-            *idx = *index_mapping
-                .get(idx)
-                .clone()
-                .map(|index| index)
-                .unwrap_or(idx)
-        });
-        prj
-    });
-
-    if HashJoinExec::try_new(
-        left_input_plan.clone(),
-        right_input_plan.clone(),
-        new_on.clone(),
-        new_filter.clone(),
-        hj.join_type(),
-        projection.clone(),
-        *hj.partition_mode(),
-        hj.null_equals_null(),
-    )
-    .is_err()
-    {
-        print_plan(&left_input_plan);
-        print_plan(&right_input_plan);
-        println!("new_on :{:?}", new_on);
-        println!("new_filter :{:?}", new_filter);
-        println!(" hj.join_type(), :{:?}", hj.join_type(),);
-        println!("projection :{:?}", projection);
-    }
-
-    HashJoinExec::try_new(
-        left_input_plan,
-        right_input_plan,
-        new_on,
-        new_filter,
-        hj.join_type(),
-        projection,
-        *hj.partition_mode(),
-        hj.null_equals_null(),
-    )
-    .map(|plan| Arc::new(plan) as _)
 }
 
 fn rewrite_nested_loop_join(
@@ -6413,22 +6112,6 @@ mod tests {
                 .eq(&expected_expr));
         }
 
-        Ok(())
-    }
-
-    #[test]
-    fn test_collect_column_indices() -> Result<()> {
-        let expr = Arc::new(BinaryExpr::new(
-            Arc::new(Column::new("b", 7)),
-            Operator::Minus,
-            Arc::new(BinaryExpr::new(
-                Arc::new(Literal::new(ScalarValue::Int32(Some(1)))),
-                Operator::Plus,
-                Arc::new(Column::new("a", 1)),
-            )),
-        ));
-        let column_indices = collect_column_indices(&[(expr, "b-(1+a)".to_string())]);
-        assert_eq!(column_indices, vec![1, 7]);
         Ok(())
     }
 
