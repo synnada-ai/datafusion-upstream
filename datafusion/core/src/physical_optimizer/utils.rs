@@ -27,8 +27,8 @@ use crate::physical_plan::union::UnionExec;
 use crate::physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
 use crate::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
-use datafusion_physical_expr::{LexRequirement, PhysicalSortRequirement};
 use datafusion_physical_expr::equivalence::collapse_lex_req;
+use datafusion_physical_expr::{LexRequirement, PhysicalSortRequirement};
 use datafusion_physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion_physical_plan::tree_node::PlanContext;
 

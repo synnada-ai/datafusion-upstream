@@ -38,7 +38,12 @@ use datafusion_expr::{
     WindowUDF,
 };
 use datafusion_physical_expr::equivalence::collapse_lex_req;
-use datafusion_physical_expr::{reverse_order_bys, window::{BuiltInWindowFunctionExpr, SlidingAggregateWindowExpr}, AggregateExpr, EquivalenceProperties, LexOrdering, PhysicalSortRequirement, LexRequirement};
+use datafusion_physical_expr::{
+    reverse_order_bys,
+    window::{BuiltInWindowFunctionExpr, SlidingAggregateWindowExpr},
+    AggregateExpr, EquivalenceProperties, LexOrdering, LexRequirement,
+    PhysicalSortRequirement,
+};
 
 mod bounded_window_agg_exec;
 mod window_agg_exec;
@@ -482,23 +487,27 @@ pub fn get_best_fitting_window(
     }
 }
 
-pub fn get_desired_input_order_mode(input: &Arc<dyn ExecutionPlan>, partitionby_exprs: &[Arc<dyn PhysicalExpr>]) -> (InputOrderMode, Vec<usize>){
+pub fn get_desired_input_order_mode(
+    input: &Arc<dyn ExecutionPlan>,
+    partitionby_exprs: &[Arc<dyn PhysicalExpr>],
+) -> (InputOrderMode, Vec<usize>) {
     let input_eqs = input.equivalence_properties();
     let is_bounded = input.execution_mode().is_bounded();
     let (_, mut indices) = input_eqs.find_longest_permutation(partitionby_exprs);
-    let (mut mode, mut indices) = if indices.len() == partitionby_exprs.len() && !indices.is_empty(){
-        // Sorted mode, already satisfied
-        (InputOrderMode::Sorted, indices)
-    } else if !indices.is_empty(){
-        // Partially Sorted. We want it to be fully Sorted
-        let all_indices = (0..partitionby_exprs.len()).collect::<Vec<_>>();
-        let missing_indices = set_difference(&all_indices, &indices);
-        indices.extend(missing_indices);
-        (InputOrderMode::Sorted, indices)
-    } else {
-        (InputOrderMode::Linear, vec![])
-    };
-    if is_bounded{
+    let (mut mode, mut indices) =
+        if indices.len() == partitionby_exprs.len() && !indices.is_empty() {
+            // Sorted mode, already satisfied
+            (InputOrderMode::Sorted, indices)
+        } else if !indices.is_empty() {
+            // Partially Sorted. We want it to be fully Sorted
+            let all_indices = (0..partitionby_exprs.len()).collect::<Vec<_>>();
+            let missing_indices = set_difference(&all_indices, &indices);
+            indices.extend(missing_indices);
+            (InputOrderMode::Sorted, indices)
+        } else {
+            (InputOrderMode::Linear, vec![])
+        };
+    if is_bounded {
         let all_indices = (0..partitionby_exprs.len()).collect::<Vec<_>>();
         let missing_indices = set_difference(&all_indices, &indices);
         indices.extend(missing_indices);
@@ -507,12 +516,18 @@ pub fn get_desired_input_order_mode(input: &Arc<dyn ExecutionPlan>, partitionby_
     (mode, indices)
 }
 
-pub fn window_required_input_ordering(window_exprs: &[Arc<dyn WindowExpr>], ordered_pb_indices: &[usize]) -> Result<LexRequirement>{
+pub fn window_required_input_ordering(
+    window_exprs: &[Arc<dyn WindowExpr>],
+    ordered_pb_indices: &[usize],
+) -> Result<LexRequirement> {
     let partitionby_exprs = window_exprs[0].partition_by();
     let orderby_keys = window_exprs[0].order_by();
     let mut reqs = vec![];
 
-    let pb_reqs = get_at_indices(partitionby_exprs, ordered_pb_indices)?.into_iter().map(|expr| PhysicalSortRequirement::new(expr, None)).collect::<Vec<_>>();
+    let pb_reqs = get_at_indices(partitionby_exprs, ordered_pb_indices)?
+        .into_iter()
+        .map(|expr| PhysicalSortRequirement::new(expr, None))
+        .collect::<Vec<_>>();
     reqs.extend(pb_reqs);
     reqs.extend(PhysicalSortRequirement::from_sort_exprs(orderby_keys));
     Ok(reqs)
@@ -542,15 +557,18 @@ pub fn should_reverse_window_exprs(
     let partitionby_exprs = window_exprs[0].partition_by();
     let orderby_keys = window_exprs[0].order_by();
     let input_eqs = input.equivalence_properties().clone();
-    let leading_obs = orderby_keys.first().map(|sort_expr|vec![sort_expr.clone()]).unwrap_or_default();
+    let leading_obs = orderby_keys
+        .first()
+        .map(|sort_expr| vec![sort_expr.clone()])
+        .unwrap_or_default();
     // Treat partition by exprs as constant. During analysis of requirements are satisfied.
     let partition_by_eqs = input_eqs.add_constants(partitionby_exprs.iter().cloned());
-    if partition_by_eqs.ordering_satisfy(&leading_obs){
+    if partition_by_eqs.ordering_satisfy(&leading_obs) {
         // If satisfied no need to reverse
         return Ok(None);
     } else {
         let reverse_ob = reverse_order_bys(&leading_obs);
-        if partition_by_eqs.ordering_satisfy(&reverse_ob){
+        if partition_by_eqs.ordering_satisfy(&reverse_ob) {
             // reverse ordering is satisfied.
             if let Some(reversed_window_expr) = window_exprs
                 .iter()

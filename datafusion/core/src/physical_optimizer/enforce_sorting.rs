@@ -66,8 +66,11 @@ use datafusion_physical_plan::repartition::RepartitionExec;
 use datafusion_physical_plan::sorts::partial_sort::PartialSortExec;
 use datafusion_physical_plan::{displayable, ExecutionPlanProperties};
 
+use datafusion_physical_plan::windows::{
+    get_desired_input_order_mode, should_reverse_window_exprs,
+    window_required_input_ordering,
+};
 use itertools::izip;
-use datafusion_physical_plan::windows::{get_desired_input_order_mode, should_reverse_window_exprs, window_required_input_ordering};
 
 /// This rule inspects [`SortExec`]'s in the given physical plan and removes the
 /// ones it can prove unnecessary.
@@ -158,6 +161,7 @@ impl PhysicalOptimizerRule for EnforceSorting {
         plan: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        // print_plan(&plan);
         let plan_requirements = PlanWithCorrespondingSort::new_default(plan);
         // Execute a bottom-up traversal to enforce sorting requirements,
         // remove unnecessary sorts, and optimize sort-sensitive operators:
@@ -438,14 +442,17 @@ fn adjust_window_sort_removal(
 
     let plan = window_tree.plan.as_any();
     let child_plan = &window_tree.children[0].plan;
-    let (window_exprs, partition_keys) = if let Some(exec) = plan.downcast_ref::<WindowAggExec>() {
-        (exec.window_expr(), &exec.partition_keys)
-    } else if let Some(exec) = plan.downcast_ref::<BoundedWindowAggExec>() {
-        (exec.window_expr(), &exec.partition_keys)
-    } else {
-        return plan_err!("Expected WindowAggExec or BoundedWindowAggExec");
-    };
-    let window_exprs = if let Some(reversed_window_exprs) = should_reverse_window_exprs(&window_exprs, child_plan)?{
+    let (window_exprs, partition_keys) =
+        if let Some(exec) = plan.downcast_ref::<WindowAggExec>() {
+            (exec.window_expr(), &exec.partition_keys)
+        } else if let Some(exec) = plan.downcast_ref::<BoundedWindowAggExec>() {
+            (exec.window_expr(), &exec.partition_keys)
+        } else {
+            return plan_err!("Expected WindowAggExec or BoundedWindowAggExec");
+        };
+    let window_exprs = if let Some(reversed_window_exprs) =
+        should_reverse_window_exprs(&window_exprs, child_plan)?
+    {
         // println!("reversing");
         reversed_window_exprs
     } else {
