@@ -439,8 +439,10 @@ fn adjust_window_sort_removal(
         return plan_err!("Expected WindowAggExec or BoundedWindowAggExec");
     };
     let window_exprs = if let Some(reversed_window_exprs) = should_reverse_window_exprs(&window_exprs, child_plan)?{
+        println!("reversing");
         reversed_window_exprs
     } else {
+        println!("not reversing");
         window_exprs.to_vec()
     };
     let partitionby_exprs = window_exprs[0].partition_by();
