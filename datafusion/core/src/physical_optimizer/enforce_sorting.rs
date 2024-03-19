@@ -439,19 +439,19 @@ fn adjust_window_sort_removal(
         return plan_err!("Expected WindowAggExec or BoundedWindowAggExec");
     };
     let window_exprs = if let Some(reversed_window_exprs) = should_reverse_window_exprs(&window_exprs, child_plan)?{
-        println!("reversing");
+        // println!("reversing");
         reversed_window_exprs
     } else {
-        println!("not reversing");
+        // println!("not reversing");
         window_exprs.to_vec()
     };
     let partitionby_exprs = window_exprs[0].partition_by();
     let (mode, indices) = get_desired_input_order_mode(child_plan, partitionby_exprs);
     let reqs = window_required_input_ordering(&window_exprs, &indices)?;
-
+    // println!("reqs: {:?}", reqs);
     // Satisfy the ordering requirement so that the window can run:
     let mut child_node = window_tree.children.swap_remove(0);
-    child_node = add_sort_above(child_node, reqs, None);
+    child_node = add_sort_above_with_check(child_node, reqs, None);
     let child_plan = child_node.plan.clone();
     window_tree.children.push(child_node);
 

@@ -28,6 +28,7 @@ use crate::physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
 use crate::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
 use datafusion_physical_expr::{LexRequirement, PhysicalSortRequirement};
+use datafusion_physical_expr::equivalence::collapse_lex_req;
 use datafusion_physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion_physical_plan::tree_node::PlanContext;
 
@@ -38,6 +39,7 @@ pub fn add_sort_above<T: Clone + Default>(
     sort_requirements: LexRequirement,
     fetch: Option<usize>,
 ) -> PlanContext<T> {
+    let sort_requirements = collapse_lex_req(sort_requirements);
     let mut sort_expr = PhysicalSortRequirement::to_sort_exprs(sort_requirements);
     sort_expr.retain(|sort_expr| {
         !node
