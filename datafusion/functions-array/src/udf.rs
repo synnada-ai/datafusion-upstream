@@ -21,6 +21,7 @@ use arrow::array::{NullArray, StringArray};
 use arrow::datatypes::DataType;
 use arrow::datatypes::Field;
 use arrow::datatypes::IntervalUnit::MonthDayNano;
+use arrow_schema::DataType::{LargeUtf8, List, Utf8};
 use datafusion_common::exec_err;
 use datafusion_common::plan_err;
 use datafusion_common::Result;
@@ -126,7 +127,7 @@ impl ScalarUDFImpl for StringToArray {
         &self.signature
     }
 
-    fn return_type(&self, arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
+    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         use DataType::*;
         Ok(match arg_types[0] {
             Utf8 | LargeUtf8 => {
@@ -140,7 +141,7 @@ impl ScalarUDFImpl for StringToArray {
         })
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> datafusion_common::Result<ColumnarValue> {
+    fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
         let mut args = ColumnarValue::values_to_arrays(args)?;
         // Case: delimiter is NULL, needs to be handled as well.
         if args[1].as_any().is::<NullArray>() {
@@ -148,10 +149,10 @@ impl ScalarUDFImpl for StringToArray {
         };
 
         match args[0].data_type() {
-            arrow::datatypes::DataType::Utf8 => {
+            Utf8 => {
                 crate::kernels::string_to_array::<i32>(&args).map(ColumnarValue::Array)
             }
-            arrow::datatypes::DataType::LargeUtf8 => {
+            LargeUtf8 => {
                 crate::kernels::string_to_array::<i64>(&args).map(ColumnarValue::Array)
             }
             other => {
@@ -427,6 +428,62 @@ impl ScalarUDFImpl for ArraySort {
 }
 
 make_udf_function!(
+    ArrayResize,
+    array_resize,
+    array size value,
+    "returns an array with the specified size filled with the given value.",
+    array_resize_udf
+);
+
+#[derive(Debug)]
+pub(super) struct ArrayResize {
+    signature: Signature,
+    aliases: Vec<String>,
+}
+
+impl ArrayResize {
+    pub fn new() -> Self {
+        Self {
+            signature: Signature::variadic_any(Volatility::Immutable),
+            aliases: vec!["array_resize".to_string(), "list_resize".to_string()],
+        }
+    }
+}
+
+impl ScalarUDFImpl for ArrayResize {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        "array_resize"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+        use DataType::*;
+        match &arg_types[0] {
+            List(field) | FixedSizeList(field, _) => Ok(List(field.clone())),
+            LargeList(field) => Ok(LargeList(field.clone())),
+            _ => exec_err!(
+                "Not reachable, data_type should be List, LargeList or FixedSizeList"
+            ),
+        }
+    }
+
+    fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(args)?;
+        crate::kernels::array_resize(&args).map(ColumnarValue::Array)
+    }
+
+    fn aliases(&self) -> &[String] {
+        &self.aliases
+    }
+}
+
+make_udf_function!(
     Cardinality,
     cardinality,
     array,
@@ -589,6 +646,58 @@ impl ScalarUDFImpl for ArrayEmpty {
 }
 
 make_udf_function!(
+    ArrayRepeat,
+    array_repeat,
+    element count, // arg name
+    "returns an array containing element `count` times.", // doc
+    array_repeat_udf // internal function name
+);
+#[derive(Debug)]
+pub(super) struct ArrayRepeat {
+    signature: Signature,
+    aliases: Vec<String>,
+}
+
+impl ArrayRepeat {
+    pub fn new() -> Self {
+        Self {
+            signature: Signature::variadic_any(Volatility::Immutable),
+            aliases: vec![String::from("array_repeat"), String::from("list_repeat")],
+        }
+    }
+}
+
+impl ScalarUDFImpl for ArrayRepeat {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        "array_repeat"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+        Ok(List(Arc::new(Field::new(
+            "item",
+            arg_types[0].clone(),
+            true,
+        ))))
+    }
+
+    fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(args)?;
+        crate::kernels::array_repeat(&args).map(ColumnarValue::Array)
+    }
+
+    fn aliases(&self) -> &[String] {
+        &self.aliases
+    }
+}
+
+make_udf_function!(
     ArrayLength,
     array_length,
     array,
@@ -703,6 +812,55 @@ impl ScalarUDFImpl for Flatten {
     fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
         let args = ColumnarValue::values_to_arrays(args)?;
         crate::kernels::flatten(&args).map(ColumnarValue::Array)
+    }
+
+    fn aliases(&self) -> &[String] {
+        &self.aliases
+    }
+}
+
+make_udf_function!(
+    ArrayReverse,
+    array_reverse,
+    array,
+    "reverses the order of elements in the array.",
+    array_reverse_udf
+);
+
+#[derive(Debug)]
+pub(super) struct ArrayReverse {
+    signature: Signature,
+    aliases: Vec<String>,
+}
+
+impl crate::udf::ArrayReverse {
+    pub fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+            aliases: vec!["array_reverse".to_string(), "list_reverse".to_string()],
+        }
+    }
+}
+
+impl ScalarUDFImpl for crate::udf::ArrayReverse {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        "array_reserse"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+        Ok(arg_types[0].clone())
+    }
+
+    fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(args)?;
+        crate::kernels::array_reverse(&args).map(ColumnarValue::Array)
     }
 
     fn aliases(&self) -> &[String] {
