@@ -30,6 +30,7 @@ use datafusion_common::config::OptimizerOptions;
 use datafusion_common::plan_err;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_physical_expr::intervals::utils::{check_support, is_datatype_supported};
+use datafusion_physical_plan::displayable;
 use datafusion_physical_plan::joins::SymmetricHashJoinExec;
 
 /// The PipelineChecker rule rejects non-runnable query plans that use
@@ -44,12 +45,19 @@ impl PipelineChecker {
     }
 }
 
+fn print_plan(plan: &Arc<dyn ExecutionPlan>) {
+    let formatted = displayable(plan.as_ref()).indent(true).to_string();
+    let actual: Vec<&str> = formatted.trim().lines().collect();
+    println!("{:#?}", actual);
+}
+
 impl PhysicalOptimizerRule for PipelineChecker {
     fn optimize(
         &self,
         plan: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        // print_plan(&plan);
         plan.transform_up(&|p| check_finiteness_requirements(p, &config.optimizer))
             .data()
     }

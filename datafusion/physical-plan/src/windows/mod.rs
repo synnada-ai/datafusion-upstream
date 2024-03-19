@@ -484,7 +484,7 @@ pub fn get_best_fitting_window(
 
 pub fn get_desired_input_order_mode(input: &Arc<dyn ExecutionPlan>, partitionby_exprs: &[Arc<dyn PhysicalExpr>]) -> (InputOrderMode, Vec<usize>){
     let input_eqs = input.equivalence_properties();
-    let is_unbounded = input.execution_mode().is_unbounded();
+    let is_bounded = input.execution_mode().is_bounded();
     let (_, mut indices) = input_eqs.find_longest_permutation(partitionby_exprs);
     let (mut mode, mut indices) = if indices.len() == partitionby_exprs.len() && !indices.is_empty(){
         // Sorted mode, already satisfied
@@ -498,7 +498,7 @@ pub fn get_desired_input_order_mode(input: &Arc<dyn ExecutionPlan>, partitionby_
     } else {
         (InputOrderMode::Linear, vec![])
     };
-    if !is_unbounded{
+    if is_bounded{
         let all_indices = (0..partitionby_exprs.len()).collect::<Vec<_>>();
         let missing_indices = set_difference(&all_indices, &indices);
         indices.extend(missing_indices);

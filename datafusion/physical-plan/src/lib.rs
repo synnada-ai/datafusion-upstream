@@ -508,6 +508,11 @@ impl ExecutionMode {
         matches!(self, ExecutionMode::Unbounded)
     }
 
+    /// Check whether the execution mode is bounded or not.
+    pub fn is_bounded(&self) -> bool {
+        matches!(self, ExecutionMode::Bounded)
+    }
+
     /// Check whether the execution is pipeline friendly. If so, operator can
     /// execute safely.
     pub fn pipeline_friendly(&self) -> bool {
