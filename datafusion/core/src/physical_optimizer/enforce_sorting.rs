@@ -54,17 +54,15 @@ use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use crate::physical_plan::sorts::sort::SortExec;
 use crate::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use crate::physical_plan::tree_node::PlanContext;
-use crate::physical_plan::windows::{
-    get_best_fitting_window, BoundedWindowAggExec, WindowAggExec,
-};
-use crate::physical_plan::{Distribution, ExecutionPlan, InputOrderMode};
+use crate::physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
+use crate::physical_plan::{Distribution, ExecutionPlan};
 
 use datafusion_common::plan_err;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_physical_expr::{PhysicalSortExpr, PhysicalSortRequirement};
 use datafusion_physical_plan::repartition::RepartitionExec;
 use datafusion_physical_plan::sorts::partial_sort::PartialSortExec;
-use datafusion_physical_plan::{displayable, ExecutionPlanProperties};
+use datafusion_physical_plan::ExecutionPlanProperties;
 
 use datafusion_physical_plan::windows::{
     get_desired_input_order_mode, should_reverse_window_exprs,
@@ -418,18 +416,11 @@ fn analyze_immediate_sort_removal(
     Transformed::no(node)
 }
 
-fn print_plan(plan: &Arc<dyn ExecutionPlan>) {
-    let formatted = displayable(plan.as_ref()).indent(true).to_string();
-    let actual: Vec<&str> = formatted.trim().lines().collect();
-    println!("{:#?}", actual);
-}
-
 /// Adjusts a [`WindowAggExec`] or a [`BoundedWindowAggExec`] to determine
 /// whether it may allow removing a sort.
 fn adjust_window_sort_removal(
     mut window_tree: PlanWithCorrespondingSort,
 ) -> Result<PlanWithCorrespondingSort> {
-    // print_plan(&window_tree.plan);
     // Window operators have a single child we need to adjust:
     let child_node = remove_corresponding_sort_from_sub_plan(
         window_tree.children.swap_remove(0),
@@ -451,23 +442,15 @@ fn adjust_window_sort_removal(
             return plan_err!("Expected WindowAggExec or BoundedWindowAggExec");
         };
     let window_exprs = if let Some(reversed_window_exprs) =
-        should_reverse_window_exprs(&window_exprs, child_plan)?
+        should_reverse_window_exprs(window_exprs, child_plan)?
     {
-        // println!("reversing");
         reversed_window_exprs
     } else {
-        // println!("not reversing");
         window_exprs.to_vec()
     };
-    // print_plan(&child_plan);
     let partitionby_exprs = window_exprs[0].partition_by();
     let (mode, indices) = get_desired_input_order_mode(child_plan, partitionby_exprs);
-    // println!("child_plan.output_ordering: {:?}", child_plan.output_ordering());
-    // println!("partitionby_exprs: {:?}", partitionby_exprs);
-    // println!("mode: {:?}", mode);
-    // println!("indices: {:?}", indices);
     let reqs = window_required_input_ordering(&window_exprs, &indices)?;
-    // println!("reqs: {:?}", reqs);
     // Satisfy the ordering requirement so that the window can run:
     let mut child_node = window_tree.children.swap_remove(0);
     child_node = add_sort_above_with_check(child_node, reqs, None);

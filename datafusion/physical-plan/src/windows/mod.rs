@@ -501,7 +501,7 @@ pub fn get_desired_input_order_mode(
         } else if !indices.is_empty() {
             // Partially Sorted. We want it to be fully Sorted
             let all_indices = (0..partitionby_exprs.len()).collect::<Vec<_>>();
-            let missing_indices = set_difference(&all_indices, &indices);
+            let missing_indices = set_difference(all_indices, &indices);
             indices.extend(missing_indices);
             (InputOrderMode::Sorted, indices)
         } else {
@@ -509,7 +509,7 @@ pub fn get_desired_input_order_mode(
         };
     if is_bounded {
         let all_indices = (0..partitionby_exprs.len()).collect::<Vec<_>>();
-        let missing_indices = set_difference(&all_indices, &indices);
+        let missing_indices = set_difference(all_indices, &indices);
         indices.extend(missing_indices);
         mode = InputOrderMode::Sorted;
     }
