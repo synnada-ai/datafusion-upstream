@@ -51,7 +51,9 @@ use datafusion_common::utils::{
     evaluate_partition_ranges, get_arrayref_at_indices, get_at_indices,
     get_record_batch_at_indices, get_row_at_idx,
 };
-use datafusion_common::{arrow_datafusion_err, exec_err, DataFusionError, Result};
+use datafusion_common::{
+    arrow_datafusion_err, exec_err, internal_err, DataFusionError, Result,
+};
 use datafusion_execution::TaskContext;
 use datafusion_expr::window_state::{PartitionBatchState, WindowAggState};
 use datafusion_expr::ColumnarValue;
@@ -179,7 +181,7 @@ impl BoundedWindowAggExec {
                 })
             }
             InputOrderMode::PartiallySorted(_) => {
-                return exec_err!("BoundedWindowAggExec cannot work in InputOrderMode::PartiallySorted mode.");
+                return internal_err!("BoundedWindowAggExec cannot work in InputOrderMode::PartiallySorted mode.");
             }
             InputOrderMode::Linear => Box::new(LinearSearch::new(input_schema)),
         })
