@@ -253,11 +253,9 @@ impl ProjectionOptimizer {
             projected_exprs.push((expr, alias.clone()));
         }
 
-        let new_plan = ProjectionExec::try_new(
-            projected_exprs.clone(),
-            child_projection.input().clone(),
-        )
-        .map(|e| Arc::new(e) as _)?;
+        let new_plan =
+            ProjectionExec::try_new(projected_exprs, child_projection.input().clone())
+                .map(|e| Arc::new(e) as _)?;
 
         Ok(Transformed::yes(Self {
             plan: new_plan,
@@ -1023,7 +1021,7 @@ impl ProjectionOptimizer {
             }
             // Left child needs a projection.
             (false, true) => {
-                let required_columns = self.required_columns.clone();
+                let required_columns = mem::take(&mut self.required_columns);
                 let mut right_child = self.children_nodes.swap_remove(1);
 
                 let (new_left_child, mut left_schema_mapping) =
@@ -1052,7 +1050,7 @@ impl ProjectionOptimizer {
             }
             // Right child needs a projection.
             (true, false) => {
-                let required_columns = self.required_columns.clone();
+                let required_columns = mem::take(&mut self.required_columns);
                 let mut left_child = self.children_nodes.swap_remove(0);
                 let (new_right_child, mut right_schema_mapping) =
                     self.insert_projection_below_right_child(analyzed_join_right)?;
@@ -1483,7 +1481,6 @@ impl ProjectionOptimizer {
                 let hj_right_requirements = collect_right_hj_right_requirements(
                     &self.required_columns,
                     &join_projection,
-                    join_left_input_size,
                     hj.right().schema(),
                     hj.on(),
                     hj.filter(),
@@ -1707,7 +1704,7 @@ impl ProjectionOptimizer {
                         }
                     }
                     (false, true) => {
-                        let required_columns = self.required_columns.clone();
+                        let required_columns = mem::take(&mut self.required_columns);
                         let mut right_child = self.children_nodes.swap_remove(1);
                         let new_filter = update_non_equivalence_conditions(
                             nlj.filter(),
@@ -1742,7 +1739,7 @@ impl ProjectionOptimizer {
                         }
                     }
                     (true, false) => {
-                        let required_columns = self.required_columns.clone();
+                        let required_columns = mem::take(&mut self.required_columns);
                         let mut left_child = self.children_nodes.swap_remove(0);
                         let new_filter = update_non_equivalence_conditions(
                             nlj.filter(),
@@ -1943,7 +1940,7 @@ impl ProjectionOptimizer {
                         }
                     }
                     (false, true) => {
-                        let required_columns = self.required_columns.clone();
+                        let required_columns = mem::take(&mut self.required_columns);
                         let mut right_child = self.children_nodes.swap_remove(1);
                         let new_on = update_equivalence_conditions(
                             smj.on(),
@@ -1986,7 +1983,7 @@ impl ProjectionOptimizer {
                         }
                     }
                     (true, false) => {
-                        let required_columns = self.required_columns.clone();
+                        let required_columns = mem::take(&mut self.required_columns);
                         let mut left_child = self.children_nodes.swap_remove(0);
                         let new_on = update_equivalence_conditions(
                             smj.on(),
@@ -2221,7 +2218,7 @@ impl ProjectionOptimizer {
                         }
                     }
                     (false, true) => {
-                        let required_columns = self.required_columns.clone();
+                        let required_columns = mem::take(&mut self.required_columns);
                         let mut right_child = self.children_nodes.swap_remove(1);
                         let new_on = update_equivalence_conditions(
                             shj.on(),
@@ -2265,7 +2262,7 @@ impl ProjectionOptimizer {
                         }
                     }
                     (true, false) => {
-                        let required_columns = self.required_columns.clone();
+                        let required_columns = mem::take(&mut self.required_columns);
                         let mut left_child = self.children_nodes.swap_remove(0);
                         let new_on = update_equivalence_conditions(
                             shj.on(),
@@ -2643,15 +2640,14 @@ impl ProjectionOptimizer {
                     .collect();
             }
         } else {
-            self.children_nodes[0].required_columns = self
-                .required_columns
-                .iter()
-                .filter(|col| {
-                    col.index()
-                        < w_agg.schema().fields().len() - w_agg.window_expr().len()
-                })
-                .cloned()
-                .collect();
+            self.children_nodes[0].required_columns =
+                mem::take(&mut self.required_columns)
+                    .into_iter()
+                    .filter(|col| {
+                        col.index()
+                            < w_agg.schema().fields().len() - w_agg.window_expr().len()
+                    })
+                    .collect();
         }
         Ok(self)
     }
@@ -2683,16 +2679,15 @@ impl ProjectionOptimizer {
                     .iter()
                     .any(|expr| expr.clone().with_new_expressions(vec![]).is_none())
                 {
-                    self.children_nodes[0].required_columns = self
-                        .required_columns
-                        .iter()
-                        .filter(|col| {
-                            col.index()
-                                < bw_agg.schema().fields().len()
-                                    - bw_agg.window_expr().len()
-                        })
-                        .cloned()
-                        .collect();
+                    self.children_nodes[0].required_columns =
+                        mem::take(&mut self.required_columns)
+                            .into_iter()
+                            .filter(|col| {
+                                col.index()
+                                    < bw_agg.schema().fields().len()
+                                        - bw_agg.window_expr().len()
+                            })
+                            .collect();
                     return Ok(self);
                 }
                 let (new_child, schema_mapping, window_usage) =
@@ -2751,15 +2746,14 @@ impl ProjectionOptimizer {
                     .collect();
             }
         } else {
-            self.children_nodes[0].required_columns = self
-                .required_columns
-                .iter()
-                .filter(|col| {
-                    col.index()
-                        < bw_agg.schema().fields().len() - bw_agg.window_expr().len()
-                })
-                .cloned()
-                .collect();
+            self.children_nodes[0].required_columns =
+                mem::take(&mut self.required_columns)
+                    .into_iter()
+                    .filter(|col| {
+                        col.index()
+                            < bw_agg.schema().fields().len() - bw_agg.window_expr().len()
+                    })
+                    .collect();
         }
         Ok(self)
     }
@@ -3066,8 +3060,8 @@ impl ProjectionOptimizer {
     fn index_updater(mut self: ProjectionOptimizer) -> Result<Transformed<Self>> {
         let mut all_mappings = self
             .children_nodes
-            .iter()
-            .map(|node| node.schema_mapping.clone())
+            .iter_mut()
+            .map(|node| mem::take(&mut node.schema_mapping))
             .collect::<Vec<_>>();
         if !all_mappings.iter().all(|map| map.is_empty()) {
             // The self plan will update its column indices according to the changes its children schemas.
@@ -3648,7 +3642,7 @@ fn satisfy_initial_schema(
         Ok(po)
     } else {
         let mut initial_requirements_ordered =
-            initial_requirements.clone().into_iter().collect_vec();
+            initial_requirements.into_iter().collect_vec();
         initial_requirements_ordered.sort_by_key(|expr| expr.index());
         let projected_exprs = initial_requirements_ordered
             .into_iter()
@@ -4328,7 +4322,6 @@ fn collect_hj_right_requirements(
 fn collect_right_hj_right_requirements(
     all_requirements: &HashSet<Column>,
     join_projection: &[usize],
-    join_left_input_size: usize,
     join_right_schema: SchemaRef,
     on: &[(PhysicalExprRef, PhysicalExprRef)],
     filter: Option<&JoinFilter>,
@@ -4742,16 +4735,15 @@ fn update_hj_children(
         hj_left_requirements.iter().cloned().collect_vec();
     ordered_hj_left_requirements.sort_by_key(|col| col.index());
     let left_projection_exprs = ordered_hj_left_requirements
-        .iter()
+        .into_iter()
         .map(|req| {
             let name = req.name().to_owned();
-            (Arc::new(req.clone()) as Arc<dyn PhysicalExpr>, name)
+            (Arc::new(req) as Arc<dyn PhysicalExpr>, name)
         })
         .collect::<Vec<_>>();
     let new_left_projection =
         ProjectionExec::try_new(left_projection_exprs, hj.left().clone())?;
-    let new_left_projection_arc =
-        Arc::new(new_left_projection.clone()) as Arc<dyn ExecutionPlan>;
+    let new_left_projection_arc = Arc::new(new_left_projection) as Arc<dyn ExecutionPlan>;
     let new_left_requirements = collect_columns_in_plan_schema(&new_left_projection_arc);
     let new_left_node = ProjectionOptimizer {
         plan: new_left_projection_arc,
@@ -4764,17 +4756,17 @@ fn update_hj_children(
         hj_right_requirements.iter().cloned().collect_vec();
     ordered_hj_right_requirements.sort_by_key(|col| col.index());
     let right_projection_exprs = ordered_hj_right_requirements
-        .iter()
+        .into_iter()
         .map(|req| {
             let name = req.name().to_owned();
-            (Arc::new(req.clone()) as Arc<dyn PhysicalExpr>, name)
+            (Arc::new(req) as Arc<dyn PhysicalExpr>, name)
         })
         .collect::<Vec<_>>();
 
     let new_right_projection =
         ProjectionExec::try_new(right_projection_exprs, hj.right().clone())?;
     let new_right_projection_arc =
-        Arc::new(new_right_projection.clone()) as Arc<dyn ExecutionPlan>;
+        Arc::new(new_right_projection) as Arc<dyn ExecutionPlan>;
     let new_right_requirements =
         collect_columns_in_plan_schema(&new_right_projection_arc);
     let new_right_node = ProjectionOptimizer {
@@ -4797,16 +4789,15 @@ fn update_hj_left_child(
         hj_left_requirements.iter().cloned().collect_vec();
     ordered_hj_left_requirements.sort_by_key(|col| col.index());
     let left_projection_exprs = ordered_hj_left_requirements
-        .iter()
+        .into_iter()
         .map(|req| {
             let name = req.name().to_owned();
-            (Arc::new(req.clone()) as Arc<dyn PhysicalExpr>, name)
+            (Arc::new(req) as Arc<dyn PhysicalExpr>, name)
         })
         .collect::<Vec<_>>();
     let new_left_projection =
         ProjectionExec::try_new(left_projection_exprs, hj.left().clone())?;
-    let new_left_projection_arc =
-        Arc::new(new_left_projection.clone()) as Arc<dyn ExecutionPlan>;
+    let new_left_projection_arc = Arc::new(new_left_projection) as Arc<dyn ExecutionPlan>;
     let new_left_requirements = collect_columns_in_plan_schema(&new_left_projection_arc);
     let new_left_node = ProjectionOptimizer {
         plan: new_left_projection_arc,
@@ -4831,16 +4822,16 @@ fn update_hj_right_child(
         hj_right_requirements.iter().cloned().collect_vec();
     ordered_hj_right_requirements.sort_by_key(|col| col.index());
     let right_projection_exprs = ordered_hj_right_requirements
-        .iter()
+        .into_iter()
         .map(|req| {
             let name = req.name().to_owned();
-            (Arc::new(req.clone()) as Arc<dyn PhysicalExpr>, name)
+            (Arc::new(req) as Arc<dyn PhysicalExpr>, name)
         })
         .collect::<Vec<_>>();
     let new_right_projection =
         ProjectionExec::try_new(right_projection_exprs, hj.right().clone())?;
     let new_right_projection_arc =
-        Arc::new(new_right_projection.clone()) as Arc<dyn ExecutionPlan>;
+        Arc::new(new_right_projection) as Arc<dyn ExecutionPlan>;
     let new_right_requirements =
         collect_columns_in_plan_schema(&new_right_projection_arc);
     let new_right_node = ProjectionOptimizer {
@@ -4885,7 +4876,7 @@ fn update_hj_projection(
     right_mapping: HashMap<Column, Column>,
     join_left_input_size: usize,
 ) -> Option<Vec<usize>> {
-    projection.clone().map(|projection| {
+    projection.map(|projection| {
         projection
             .iter()
             .map(|ind| {
@@ -4893,18 +4884,16 @@ fn update_hj_projection(
                     left_mapping
                         .iter()
                         .find(|(initial, _)| initial.index() == *ind)
-                        .unwrap()
-                        .1
-                        .index()
+                        .map(|(_, target)| target.index())
+                        .unwrap_or(*ind)
                 } else {
                     right_mapping
                         .iter()
                         .find(|(initial, _)| {
                             initial.index() == *ind - join_left_input_size
                         })
-                        .unwrap()
-                        .1
-                        .index()
+                        .map(|(_, target)| target.index())
+                        .unwrap_or(*ind)
                         + hj_left_requirements.len()
                 }
             })
@@ -4950,9 +4939,8 @@ fn rewrite_hj_filter(
                             index: left_mapping
                                 .iter()
                                 .find(|(initial, _)| initial.index() == col_ind.index)
-                                .unwrap()
-                                .1
-                                .index(),
+                                .map(|(_, target)| target.index())
+                                .unwrap_or(col_ind.index),
                             side: JoinSide::Left,
                         }
                     } else {
@@ -4960,9 +4948,8 @@ fn rewrite_hj_filter(
                             index: right_mapping
                                 .iter()
                                 .find(|(initial, _)| initial.index() == col_ind.index)
-                                .unwrap()
-                                .1
-                                .index(),
+                                .map(|(_, target)| target.index())
+                                .unwrap_or(col_ind.index),
                             side: JoinSide::Right,
                         }
                     }
@@ -5073,17 +5060,6 @@ fn rewrite_sort_preserving_merge(
     Ok(Arc::new(
         SortPreservingMergeExec::new(new_sort_exprs, input_plan).with_fetch(sort.fetch()),
     ) as _)
-}
-
-fn rewrite_hash_join(
-    nlj: &NestedLoopJoinExec,
-    left_input_plan: Arc<dyn ExecutionPlan>,
-    right_input_plan: Arc<dyn ExecutionPlan>,
-    left_mapping: &HashMap<Column, Column>,
-    right_mapping: &HashMap<Column, Column>,
-    left_size: usize,
-) -> Result<Arc<dyn ExecutionPlan>> {
-    todo!()
 }
 
 fn rewrite_nested_loop_join(
@@ -5427,7 +5403,7 @@ mod tests {
     use datafusion_common::config::ConfigOptions;
     use datafusion_common::{JoinSide, JoinType, Result, ScalarValue, Statistics};
     use datafusion_execution::object_store::ObjectStoreUrl;
-    use datafusion_expr::{ColumnarValue, Operator};
+    use datafusion_expr::{Operator, ScalarFunctionDefinition};
     use datafusion_physical_expr::expressions::{
         BinaryExpr, CaseExpr, CastExpr, Column, Literal, NegativeExpr,
     };
@@ -5511,7 +5487,9 @@ mod tests {
             Arc::new(NegativeExpr::new(Arc::new(Column::new("f", 4)))),
             Arc::new(ScalarFunctionExpr::new(
                 "scalar_expr",
-                Arc::new(|_: &[ColumnarValue]| unimplemented!("not implemented")),
+                ScalarFunctionDefinition::Name(
+                    "dummy".to_owned().into_boxed_str().into(),
+                ),
                 vec![
                     Arc::new(BinaryExpr::new(
                         Arc::new(Column::new("b", 1)),
@@ -5578,7 +5556,9 @@ mod tests {
             Arc::new(NegativeExpr::new(Arc::new(Column::new("f", 5)))),
             Arc::new(ScalarFunctionExpr::new(
                 "scalar_expr",
-                Arc::new(|_: &[ColumnarValue]| unimplemented!("not implemented")),
+                ScalarFunctionDefinition::Name(
+                    "dummy".to_owned().into_boxed_str().into(),
+                ),
                 vec![
                     Arc::new(BinaryExpr::new(
                         Arc::new(Column::new("b", 1)),
@@ -5648,7 +5628,9 @@ mod tests {
             Arc::new(NegativeExpr::new(Arc::new(Column::new("f", 4)))),
             Arc::new(ScalarFunctionExpr::new(
                 "scalar_expr",
-                Arc::new(|_: &[ColumnarValue]| unimplemented!("not implemented")),
+                ScalarFunctionDefinition::Name(
+                    "dummy".to_owned().into_boxed_str().into(),
+                ),
                 vec![
                     Arc::new(BinaryExpr::new(
                         Arc::new(Column::new("b", 1)),
@@ -5715,7 +5697,9 @@ mod tests {
             Arc::new(NegativeExpr::new(Arc::new(Column::new("f_new", 5)))),
             Arc::new(ScalarFunctionExpr::new(
                 "scalar_expr",
-                Arc::new(|_: &[ColumnarValue]| unimplemented!("not implemented")),
+                ScalarFunctionDefinition::Name(
+                    "dummy".to_owned().into_boxed_str().into(),
+                ),
                 vec![
                     Arc::new(BinaryExpr::new(
                         Arc::new(Column::new("b_new", 1)),
