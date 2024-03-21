@@ -3170,7 +3170,10 @@ impl ProjectionOptimizer {
             } else if let Some(hj) = plan_any.downcast_ref::<HashJoinExec>() {
                 let left_mapping = all_mappings.swap_remove(0);
                 let right_mapping = all_mappings.swap_remove(0);
-                let projection = hj.projection.clone();
+                let projection = hj
+                    .projection
+                    .clone()
+                    .unwrap_or((0..hj.schema().fields().len()).collect());
                 let new_on = update_join_on(hj.on(), &left_mapping, &right_mapping);
                 let new_filter = hj.filter().map(|filter| {
                     JoinFilter::new(
@@ -3208,34 +3211,142 @@ impl ProjectionOptimizer {
                         filter.schema().clone(),
                     )
                 });
-                let index_mapping = left_mapping
-                    .into_iter()
-                    .map(|(col1, col2)| (col1.index(), col2.index()))
-                    .chain(right_mapping.into_iter().map(|(col1, col2)| {
-                        (
-                            col1.index() + hj.children()[0].schema().fields().len(),
-                            col2.index()
-                                + self.children_nodes[0].plan.schema().fields().len(),
+
+                match hj.join_type() {
+                    JoinType::Inner
+                    | JoinType::Left
+                    | JoinType::Right
+                    | JoinType::Full => {
+                        let index_mapping = left_mapping
+                            .iter()
+                            .map(|(col1, col2)| (col1.index(), col2.index()))
+                            .chain(right_mapping.iter().map(|(col1, col2)| {
+                                (
+                                    col1.index()
+                                        + hj.children()[0].schema().fields().len(),
+                                    col2.index()
+                                        + self.children_nodes[0]
+                                            .plan
+                                            .schema()
+                                            .fields()
+                                            .len(),
+                                )
+                            }))
+                            .collect::<HashMap<_, _>>();
+                        let new_projection = projection
+                            .into_iter()
+                            .map(|idx| *index_mapping.get(&idx).unwrap_or(&idx))
+                            .collect::<Vec<_>>();
+                        let some_projection = new_projection
+                            .first()
+                            .map(|first| *first != 0)
+                            .unwrap_or(true)
+                            || !new_projection.windows(2).all(|w| w[0] + 1 == w[1]);
+
+                        self.plan = HashJoinExec::try_new(
+                            self.children_nodes[0].plan.clone(),
+                            self.children_nodes[1].plan.clone(),
+                            new_on,
+                            new_filter,
+                            hj.join_type(),
+                            if some_projection {
+                                Some(new_projection)
+                            } else {
+                                None
+                            },
+                            *hj.partition_mode(),
+                            hj.null_equals_null(),
                         )
-                    }))
-                    .collect::<HashMap<_, _>>();
-                let new_projection = projection.map(|mut prj| {
-                    prj.iter_mut()
-                        .for_each(|idx| *idx = *index_mapping.get(idx).unwrap_or(idx));
-                    prj
-                });
-                self.plan = HashJoinExec::try_new(
-                    self.children_nodes[0].plan.clone(),
-                    self.children_nodes[1].plan.clone(),
-                    new_on,
-                    new_filter,
-                    hj.join_type(),
-                    new_projection,
-                    *hj.partition_mode(),
-                    hj.null_equals_null(),
-                )
-                .map(|plan| Arc::new(plan) as _)?;
-                self.schema_mapping = HashMap::new();
+                        .map(|plan| Arc::new(plan) as _)?;
+                        self.schema_mapping = left_mapping
+                            .into_iter()
+                            .chain(right_mapping.iter().map(|(col1, col2)| {
+                                (
+                                    Column::new(
+                                        col1.name(),
+                                        col1.index()
+                                            + hj.children()[0].schema().fields().len(),
+                                    ),
+                                    Column::new(
+                                        col2.name(),
+                                        col2.index()
+                                            + self.children_nodes[0]
+                                                .plan
+                                                .schema()
+                                                .fields()
+                                                .len(),
+                                    ),
+                                )
+                            }))
+                            .collect::<HashMap<_, _>>();
+                    }
+                    JoinType::LeftSemi | JoinType::LeftAnti => {
+                        let index_mapping = left_mapping
+                            .iter()
+                            .map(|(col1, col2)| (col1.index(), col2.index()))
+                            .collect::<HashMap<_, _>>();
+                        let new_projection = projection
+                            .into_iter()
+                            .map(|idx| *index_mapping.get(&idx).unwrap_or(&idx))
+                            .collect::<Vec<_>>();
+                        let some_projection = new_projection
+                            .first()
+                            .map(|first| *first != 0)
+                            .unwrap_or(true)
+                            || !new_projection.windows(2).all(|w| w[0] + 1 == w[1]);
+
+                        self.plan = HashJoinExec::try_new(
+                            self.children_nodes[0].plan.clone(),
+                            self.children_nodes[1].plan.clone(),
+                            new_on,
+                            new_filter,
+                            hj.join_type(),
+                            if some_projection {
+                                Some(new_projection)
+                            } else {
+                                None
+                            },
+                            *hj.partition_mode(),
+                            hj.null_equals_null(),
+                        )
+                        .map(|plan| Arc::new(plan) as _)?;
+                        self.schema_mapping = left_mapping;
+                    }
+                    JoinType::RightSemi | JoinType::RightAnti => {
+                        let index_mapping = right_mapping
+                            .iter()
+                            .map(|(col1, col2)| (col1.index(), col2.index()))
+                            .collect::<HashMap<_, _>>();
+
+                        let mut new_projection = projection
+                            .into_iter()
+                            .map(|idx| *index_mapping.get(&idx).unwrap_or(&idx))
+                            .collect::<Vec<_>>();
+                        new_projection.sort_by_key(|ind| *ind);
+                        let some_projection = new_projection
+                            .first()
+                            .map(|first| *first != 0)
+                            .unwrap_or(true)
+                            || !new_projection.windows(2).all(|w| w[0] + 1 == w[1]);
+
+                        self.plan = HashJoinExec::try_new(
+                            self.children_nodes[0].plan.clone(),
+                            self.children_nodes[1].plan.clone(),
+                            new_on,
+                            new_filter,
+                            hj.join_type(),
+                            if some_projection {
+                                Some(new_projection)
+                            } else {
+                                None
+                            },
+                            *hj.partition_mode(),
+                            hj.null_equals_null(),
+                        )
+                        .map(|plan| Arc::new(plan) as _)?;
+                        self.schema_mapping = right_mapping;
+                    }
+                }
             } else if let Some(nlj) = plan_any.downcast_ref::<NestedLoopJoinExec>() {
                 let left_size = self.children_nodes[0].plan.schema().fields().len();
                 let left_mapping = all_mappings.swap_remove(0);
