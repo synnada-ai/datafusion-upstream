@@ -79,6 +79,7 @@ use datafusion_physical_plan::aggregates::{
 };
 use datafusion_physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion_physical_plan::displayable;
 use datafusion_physical_plan::insert::FileSinkExec;
 use datafusion_physical_plan::joins::utils::{
     ColumnIndex, JoinFilter, JoinOn, JoinOnRef,
@@ -95,6 +96,13 @@ use datafusion_physical_plan::union::{InterleaveExec, UnionExec};
 use datafusion_physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
 
 use itertools::Itertools;
+
+fn print_plan(plan: &Arc<dyn ExecutionPlan>) -> Result<()> {
+    let formatted = displayable(plan.as_ref()).indent(true).to_string();
+    let actual: Vec<&str> = formatted.trim().lines().collect();
+    println!("{:#?}", actual);
+    Ok(())
+}
 
 /// The tree node for the rule of [`OptimizeProjections`]. It stores the necessary
 /// fields for column requirements and changed indices of columns.
@@ -3949,20 +3957,12 @@ fn is_projection_removable(projection: &ProjectionExec) -> bool {
 
 /// Tries to rewrite the [`AggregateExpr`] with the existing expressions to keep on optimization.
 fn is_agg_expr_rewritable(aggr_expr: &[Arc<(dyn AggregateExpr)>]) -> bool {
-    aggr_expr.iter().any(|expr| {
-        expr.clone()
-            .with_new_expressions(expr.expressions())
-            .is_some()
-    })
+    aggr_expr.iter().all(|expr| expr.expressions().is_empty())
 }
 
 /// Tries to rewrite the [`WindowExpr`] with the existing expressions to keep on optimization.
 fn is_window_expr_rewritable(window_expr: &[Arc<(dyn WindowExpr)>]) -> bool {
-    window_expr.iter().any(|expr| {
-        expr.clone()
-            .with_new_expressions(expr.expressions())
-            .is_some()
-    })
+    window_expr.iter().all(|expr| expr.expressions().is_empty())
 }
 
 /// Updates a source provider's projected columns according to the given
@@ -4192,7 +4192,7 @@ fn collect_alias_free_columns(
 /// Collects all fields of a schema from a given execution plan and converts them into a [`HashSet`] of [`Column`].
 ///
 /// # Arguments
-/// * `plan`: Reference to an Arc of a dynamic ExecutionPlan trait object.
+/// * `plan`: Reference to an Arc of an ExecutionPlan trait object.
 ///
 /// # Returns
 /// A `HashSet<Column>` containing all columns from the plan's schema.
@@ -5514,9 +5514,13 @@ mod tests {
     use datafusion_common::config::ConfigOptions;
     use datafusion_common::{JoinSide, JoinType, Result, ScalarValue, Statistics};
     use datafusion_execution::object_store::ObjectStoreUrl;
-    use datafusion_expr::{Operator, ScalarFunctionDefinition};
+    use datafusion_expr::{Operator, ScalarFunctionDefinition, WindowFrame};
     use datafusion_physical_expr::expressions::{
-        BinaryExpr, CaseExpr, CastExpr, Column, Literal, NegativeExpr,
+        rank, BinaryExpr, CaseExpr, CastExpr, Column, Literal, NegativeExpr, RowNumber,
+        Sum,
+    };
+    use datafusion_physical_expr::window::{
+        BuiltInWindowExpr, BuiltInWindowFunctionExpr,
     };
     use datafusion_physical_expr::{
         Partitioning, PhysicalExpr, PhysicalSortExpr, ScalarFunctionExpr,
@@ -5525,6 +5529,7 @@ mod tests {
         HashJoinExec, PartitionMode, SymmetricHashJoinExec,
     };
     use datafusion_physical_plan::union::UnionExec;
+    use datafusion_physical_plan::InputOrderMode;
 
     fn create_simple_csv_exec() -> Arc<dyn ExecutionPlan> {
         let schema = Arc::new(Schema::new(vec![
@@ -6534,8 +6539,8 @@ mod tests {
                 FilterExec(sum > 0):   |sum@0           |
                 ProjectionExec:        |c@0+x@1 as sum  |
                 SortExec(c@0, x@1):    |c@0             |x@1             |
-                ProjectionExec:        |c@2             |a@0 as x        |
-                CsvExec:               |a               |b               |c               |d               |e               |
+                ProjectionExec:        |c@1             |a@0 as x        |
+                CsvExec:               |a               |c               |
         */
 
         let csv = create_simple_csv_exec();
@@ -6626,6 +6631,328 @@ mod tests {
             "        CsvExec: file_groups={1 group: [[x]]}, projection=[a, c], has_header=false"];
 
         assert_eq!(get_plan_string(&after_optimize), expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_optimize_projections_left_anti() -> Result<()> {
+        /*
+                                                        INITIAL PLAN:
+                AggregateExec(gb(a@2), sum(rownumber@1)): |gb(a)           |sum(rownumber)  |
+                HashJoin(a@1=b@1, rownumber@4<rank@5)     |a@1             |rownumber@0     |a@1             |
+                    SortExec(rownumber@4, d@2):           |rownumber       |a               |d               |d               |rownumber       |
+                    ProjectionExec:                       |rownumber@5     |a@0             |d@3             |d@3             |rownumber@5     |
+                    WindowExec(rownumber)                 |a               |b               |c               |d               |e               |rownumber       |
+                    CsvExec:                              |a               |b               |c               |d               |e               |
+                    BoundedWindowExec(rank())             |a               |b               |c               |d               |e               |rank            |
+                    CsvExec:                              |a               |b               |c               |d               |e               |
+                =============================================================================================================
+                                                        OPTIMIZED PLAN:
+                AggregateExec(gb(a@2), sum(rownumber@1)): |gb(a)           |sum(rownumber)  |
+                HashJoin(a@1=b@0, rownumber@4<avg(b)@5)   |a@1             |rownumber@0     |a@1             |
+                    ProjectionExec:                       |rownumber@0     |a@1             |rownumber@3     |
+                    SortExec(rownumber@3, d@2):           |rownumber@5     |a@0             |d@3             |rownumber@5     |
+                    ProjectionExec:                       |rownumber@5     |a@0             |d@3             |rownumber@5     |
+                    WindowExec(rownumber)                 |a               |b               |c               |d               |e               |rownumber       |
+                    CsvExec:                              |a               |b               |c               |d               |e               |
+                    ProjectionExec:                       |b@1             |rank()@5        |
+                    BoundedWindowExec(rank())             |a               |b               |c               |d               |e               |rank()          |
+                    CsvExec:                              |a               |b               |c               |d               |e               |
+        */
+
+        let csv_left = create_simple_csv_exec();
+        let window = Arc::new(WindowAggExec::try_new(
+            vec![Arc::new(BuiltInWindowExpr::new(
+                Arc::new(RowNumber::new("ROW_NUMBER()".to_string(), &DataType::Int32)),
+                &[],
+                &[],
+                Arc::new(WindowFrame::new(None)),
+            ))],
+            csv_left,
+            vec![],
+        )?);
+        let projection = Arc::new(ProjectionExec::try_new(
+            vec![
+                (
+                    Arc::new(Column::new("ROW_NUMBER()", 5)),
+                    "ROW_NUMBER()".to_string(),
+                ),
+                (Arc::new(Column::new("a", 0)), "a".to_string()),
+                (Arc::new(Column::new("d", 3)), "d".to_string()),
+                (Arc::new(Column::new("d", 3)), "d".to_string()),
+                (
+                    Arc::new(Column::new("ROW_NUMBER()", 5)),
+                    "ROW_NUMBER()".to_string(),
+                ),
+            ],
+            window,
+        )?);
+        let sort = Arc::new(SortExec::new(
+            vec![
+                PhysicalSortExpr {
+                    expr: Arc::new(Column::new("ROW_NUMBER()", 4)),
+                    options: SortOptions::default(),
+                },
+                PhysicalSortExpr {
+                    expr: Arc::new(Column::new("d", 2)),
+                    options: SortOptions::default(),
+                },
+            ],
+            projection,
+        ));
+
+        let csv_right = create_simple_csv_exec();
+        let bounded_window = Arc::new(BoundedWindowAggExec::try_new(
+            vec![Arc::new(BuiltInWindowExpr::new(
+                Arc::new(rank("RANK()".to_string(), &DataType::Int32)),
+                &[],
+                &[],
+                Arc::new(WindowFrame::new(None)),
+            ))],
+            csv_right,
+            vec![],
+            InputOrderMode::Linear,
+        )?);
+
+        let join = Arc::new(HashJoinExec::try_new(
+            sort,
+            bounded_window,
+            vec![(Arc::new(Column::new("a", 1)), Arc::new(Column::new("b", 1)))],
+            Some(JoinFilter::new(
+                Arc::new(BinaryExpr::new(
+                    Arc::new(Column::new("ROW_NUMBER()", 0)),
+                    Operator::Lt,
+                    Arc::new(Column::new("RANK", 1)),
+                )),
+                vec![
+                    ColumnIndex {
+                        index: 4,
+                        side: JoinSide::Left,
+                    },
+                    ColumnIndex {
+                        index: 5,
+                        side: JoinSide::Right,
+                    },
+                ],
+                Schema::new(vec![
+                    Field::new("inter_rownumber", DataType::Int32, true),
+                    Field::new("inter_avg_b", DataType::Float32, true),
+                ]),
+            )),
+            &JoinType::LeftAnti,
+            Some(vec![1, 0, 1]),
+            PartitionMode::Auto,
+            true,
+        )?);
+        let aggregate = Arc::new(AggregateExec::try_new(
+            AggregateMode::Single,
+            PhysicalGroupBy::new(
+                vec![(Arc::new(Column::new("a", 2)), "a".to_owned())],
+                vec![],
+                vec![],
+            ),
+            vec![Arc::new(Sum::new(
+                Arc::new(Column::new("ROW_NUMBER()", 1)),
+                "SUM(ROW_NUMBER())",
+                DataType::Int64,
+            ))],
+            vec![None],
+            join.clone(),
+            join.schema(),
+        )?) as Arc<dyn ExecutionPlan>;
+
+        let initial = get_plan_string(&aggregate);
+
+        let expected_initial = [
+            "AggregateExec: mode=Single, gby=[a@2 as a], aggr=[SUM(ROW_NUMBER())]", 
+            "  HashJoinExec: mode=Auto, join_type=LeftAnti, on=[(a@1, b@1)], filter=ROW_NUMBER()@0 < RANK@1, projection=[a@1, ROW_NUMBER()@0, a@1]", 
+            "    SortExec: expr=[ROW_NUMBER()@4 ASC,d@2 ASC]", 
+            "      ProjectionExec: expr=[ROW_NUMBER()@5 as ROW_NUMBER(), a@0 as a, d@3 as d, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]", 
+            "        WindowAggExec: wdw=[ROW_NUMBER(): Ok(Field { name: \"ROW_NUMBER()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }]", 
+            "          CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
+            "    BoundedWindowAggExec: wdw=[RANK(): Ok(Field { name: \"RANK()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }], mode=[Linear]", 
+            "      CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"];
+
+        assert_eq!(initial, expected_initial);
+
+        let after_optimize =
+            OptimizeProjections::new().optimize(aggregate, &ConfigOptions::new())?;
+
+        let expected = [
+            "AggregateExec: mode=Single, gby=[a@2 as a], aggr=[SUM(ROW_NUMBER())]", 
+            "  HashJoinExec: mode=Auto, join_type=LeftAnti, on=[(a@1, b@0)], filter=ROW_NUMBER()@0 < RANK@1, projection=[a@1, ROW_NUMBER()@0, a@1]", 
+            "    ProjectionExec: expr=[ROW_NUMBER()@0 as ROW_NUMBER(), a@1 as a, ROW_NUMBER()@3 as ROW_NUMBER()]", 
+            "      SortExec: expr=[ROW_NUMBER()@3 ASC,d@2 ASC]", 
+            "        ProjectionExec: expr=[ROW_NUMBER()@5 as ROW_NUMBER(), a@0 as a, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]", 
+            "          WindowAggExec: wdw=[ROW_NUMBER(): Ok(Field { name: \"ROW_NUMBER()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }]", 
+            "            CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
+            "    ProjectionExec: expr=[b@1 as b, RANK()@5 as RANK()]", 
+            "      BoundedWindowAggExec: wdw=[RANK(): Ok(Field { name: \"RANK()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }], mode=[Linear]", 
+            "        CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"];
+
+        assert_eq!(get_plan_string(&after_optimize), expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_optimize_projections_right_semi() -> Result<()> {
+        /*
+                                                        INITIAL PLAN:
+                AggregateExec(gb(a@2), sum(rank@1)):      |gb(a)           |sum(rank)       |
+                HashJoin(a@1=b@1, rownumber@4<rank@5)     |a@0             |rank@0          |a@0             |
+                    SortExec(rownumber@4, d@2):           |rownumber       |a               |d               |d               |rownumber       |
+                    ProjectionExec:                       |rownumber@5     |a@0             |d@3             |d@3             |rownumber@5     |
+                    WindowExec(rownumber)                 |a               |b               |c               |d               |e               |rownumber       |
+                    CsvExec:                              |a               |b               |c               |d               |e               |
+                    BoundedWindowExec(rank())             |a               |b               |c               |d               |e               |rank            |
+                    CsvExec:                              |a               |b               |c               |d               |e               |
+                =============================================================================================================
+                                                        OPTIMIZED PLAN:
+                AggregateExec(gb(a@2), sum(rownumber@1)): |gb(a)           |sum(rownumber)  |
+                HashJoin(a@1=b@0, rownumber@4<avg(b)@5)   |a@1             |rownumber@0     |a@1             |
+                    ProjectionExec:                       |rownumber@0     |a@1             |rownumber@3     |
+                    SortExec(rownumber@3, d@2):           |rownumber@5     |a@0             |d@3             |rownumber@5     |
+                    ProjectionExec:                       |rownumber@5     |a@0             |d@3             |rownumber@5     |
+                    WindowExec(rownumber)                 |a               |b               |c               |d               |e               |rownumber       |
+                    CsvExec:                              |a               |b               |c               |d               |e               |
+                    ProjectionExec:                       |b@1             |rank()@5        |
+                    BoundedWindowExec(rank())             |a               |b               |c               |d               |e               |rank()          |
+                    CsvExec:                              |a               |b               |c               |d               |e               |
+        */
+
+        let csv_left = create_simple_csv_exec();
+        let window = Arc::new(WindowAggExec::try_new(
+            vec![Arc::new(BuiltInWindowExpr::new(
+                Arc::new(RowNumber::new("ROW_NUMBER()".to_string(), &DataType::Int32)),
+                &[],
+                &[],
+                Arc::new(WindowFrame::new(None)),
+            ))],
+            csv_left,
+            vec![],
+        )?);
+        let projection = Arc::new(ProjectionExec::try_new(
+            vec![
+                (
+                    Arc::new(Column::new("ROW_NUMBER()", 5)),
+                    "ROW_NUMBER()".to_string(),
+                ),
+                (Arc::new(Column::new("a", 0)), "a".to_string()),
+                (Arc::new(Column::new("d", 3)), "d".to_string()),
+                (Arc::new(Column::new("d", 3)), "d".to_string()),
+                (
+                    Arc::new(Column::new("ROW_NUMBER()", 5)),
+                    "ROW_NUMBER()".to_string(),
+                ),
+            ],
+            window,
+        )?);
+        let sort = Arc::new(SortExec::new(
+            vec![
+                PhysicalSortExpr {
+                    expr: Arc::new(Column::new("ROW_NUMBER()", 4)),
+                    options: SortOptions::default(),
+                },
+                PhysicalSortExpr {
+                    expr: Arc::new(Column::new("d", 2)),
+                    options: SortOptions::default(),
+                },
+            ],
+            projection,
+        ));
+
+        let csv_right = create_simple_csv_exec();
+        let bounded_window = Arc::new(BoundedWindowAggExec::try_new(
+            vec![Arc::new(BuiltInWindowExpr::new(
+                Arc::new(rank("RANK()".to_string(), &DataType::Int32)),
+                &[],
+                &[],
+                Arc::new(WindowFrame::new(None)),
+            ))],
+            csv_right,
+            vec![],
+            InputOrderMode::Linear,
+        )?);
+
+        let join = Arc::new(HashJoinExec::try_new(
+            sort,
+            bounded_window,
+            vec![(Arc::new(Column::new("a", 1)), Arc::new(Column::new("b", 1)))],
+            Some(JoinFilter::new(
+                Arc::new(BinaryExpr::new(
+                    Arc::new(Column::new("ROW_NUMBER()", 0)),
+                    Operator::Lt,
+                    Arc::new(Column::new("RANK", 1)),
+                )),
+                vec![
+                    ColumnIndex {
+                        index: 4,
+                        side: JoinSide::Left,
+                    },
+                    ColumnIndex {
+                        index: 5,
+                        side: JoinSide::Right,
+                    },
+                ],
+                Schema::new(vec![
+                    Field::new("inter_rownumber", DataType::Int32, true),
+                    Field::new("inter_avg_b", DataType::Float32, true),
+                ]),
+            )),
+            &JoinType::RightSemi,
+            Some(vec![1, 0, 1]),
+            PartitionMode::Auto,
+            true,
+        )?);
+        let aggregate = Arc::new(AggregateExec::try_new(
+            AggregateMode::Single,
+            PhysicalGroupBy::new(
+                vec![(Arc::new(Column::new("a", 2)), "a".to_owned())],
+                vec![],
+                vec![],
+            ),
+            vec![Arc::new(Sum::new(
+                Arc::new(Column::new("RANK()", 1)),
+                "SUM(RANK())",
+                DataType::Int64,
+            ))],
+            vec![None],
+            join.clone(),
+            join.schema(),
+        )?) as Arc<dyn ExecutionPlan>;
+
+        let initial = get_plan_string(&aggregate);
+
+        let expected_initial = [
+            "AggregateExec: mode=Single, gby=[a@2 as a], aggr=[SUM(RANK())]", 
+            "  HashJoinExec: mode=Auto, join_type=RightSemi, on=[(a@1, b@1)], filter=ROW_NUMBER()@0 < RANK@1, projection=[b@1, a@0, b@1]", 
+            "    SortExec: expr=[ROW_NUMBER()@4 ASC,d@2 ASC]", 
+            "      ProjectionExec: expr=[ROW_NUMBER()@5 as ROW_NUMBER(), a@0 as a, d@3 as d, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]", 
+            "        WindowAggExec: wdw=[ROW_NUMBER(): Ok(Field { name: \"ROW_NUMBER()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }]", 
+            "          CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
+            "    BoundedWindowAggExec: wdw=[RANK(): Ok(Field { name: \"RANK()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }], mode=[Linear]", 
+            "      CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"];
+
+        assert_eq!(initial, expected_initial);
+
+        let after_optimize =
+            OptimizeProjections::new().optimize(aggregate, &ConfigOptions::new())?;
+
+        let expected = [
+            "AggregateExec: mode=Single, gby=[a@2 as a], aggr=[SUM(RANK())]", 
+            "  HashJoinExec: mode=Auto, join_type=RightSemi, on=[(a@0, b@1)], filter=ROW_NUMBER()@0 < RANK@1, projection=[a@0, a@0, a@0]", 
+            "    ProjectionExec: expr=[a@0 as a, ROW_NUMBER()@2 as ROW_NUMBER()]", 
+            "      SortExec: expr=[ROW_NUMBER()@2 ASC,d@1 ASC]", 
+            "        ProjectionExec: expr=[a@0 as a, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]", 
+            "          WindowAggExec: wdw=[ROW_NUMBER(): Ok(Field { name: \"ROW_NUMBER()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }]", 
+            "            CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
+            "    ProjectionExec: expr=[a@0 as a, b@1 as b, RANK()@5 as RANK()]", 
+            "      BoundedWindowAggExec: wdw=[RANK(): Ok(Field { name: \"RANK()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }], mode=[Linear]", 
+            "        CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"];
+
+        assert_eq!(get_plan_string(&after_optimize), expected);
+
         Ok(())
     }
 }
