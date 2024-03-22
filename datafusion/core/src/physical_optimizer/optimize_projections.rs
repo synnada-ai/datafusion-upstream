@@ -280,14 +280,15 @@ impl ProjectionOptimizer {
     /// 1. Projection must have all column expressions without aliases.
     /// 2. Projection input is fully required by the projection output requirements.
     fn try_remove_projection(mut self) -> Result<Transformed<Self>> {
-        // It must be a projection
+        // It must be a projection.
         let Some(projection_exec) = self.plan.as_any().downcast_ref::<ProjectionExec>()
         else {
             return Ok(Transformed::no(self));
         };
 
         // The projection must have all column expressions without aliases.
-        let Some(projection_columns) = collect_alias_free_columns(projection_exec.expr())
+        let Some(projection_columns) =
+            try_collect_alias_free_columns(projection_exec.expr())
         else {
             return Ok(Transformed::no(self));
         };
@@ -451,7 +452,9 @@ impl ProjectionOptimizer {
         };
         // If there is any non-column or alias-carrier expression, Projection should not be removed.
         // This process can be moved into CsvExec, but it could be a conflict of their responsibility.
-        if let Some(projection_columns) = collect_alias_free_columns(projection.expr()) {
+        if let Some(projection_columns) =
+            try_collect_alias_free_columns(projection.expr())
+        {
             let mut file_scan = csv.base_config().clone();
             let new_projections = new_projections_for_columns(
                 &projection_columns,
@@ -3591,7 +3594,7 @@ impl ProjectionOptimizer {
 
         // Is the projection really required? First, we need to
         // have all column expression in the projection for removal.
-        let Some(projection_columns) = collect_alias_free_columns(projection.expr())
+        let Some(projection_columns) = try_collect_alias_free_columns(projection.expr())
         else {
             return Ok(self);
         };
@@ -3754,9 +3757,7 @@ fn satisfy_initial_schema(
     mut po: ProjectionOptimizer,
     initial_requirements: HashSet<Column>,
 ) -> Result<ProjectionOptimizer> {
-    if collect_columns_in_plan_schema(&po.plan) == initial_requirements
-        && po.schema_mapping.is_empty()
-    {
+    if po.schema_mapping.is_empty() {
         // The initial schema is already satisfied, no further action required.
         Ok(po)
     } else {
@@ -4087,6 +4088,7 @@ fn removed_column_count(
 
 /// Maps the indices of required columns in a parent projection node to the corresponding indices in its child.
 ///
+/// # Example
 /// Projection is required to have columns at "@0:a - @1:b - @2:c"
 ///
 /// Projection does "a@2 as a, b@0 as b, c@1 as c"
@@ -4095,7 +4097,7 @@ fn removed_column_count(
 ///
 /// # Arguments
 /// * `requirements`: Reference to a `HashSet<Column>` representing the parent's column requirements.
-/// * `projection_columns`: Slice of `Column` representing the columns in the projection.
+/// * `projection_columns`: Slice of `Column` representing the column expressions in the projection.
 ///
 /// # Returns
 /// A `HashSet<Column>` with updated column indices reflecting the child's perspective.
@@ -4176,7 +4178,7 @@ fn collect_left_used_columns(
 /// any renaming or constructs a non-`Column` physical expression. If all
 /// expressions are `Column`, then they are collected and returned. If not,
 /// the function returns `None`.
-fn collect_alias_free_columns(
+fn try_collect_alias_free_columns(
     exprs: &[(Arc<dyn PhysicalExpr>, String)],
 ) -> Option<Vec<Column>> {
     let mut columns = vec![];
