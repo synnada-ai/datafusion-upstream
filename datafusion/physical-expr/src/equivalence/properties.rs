@@ -2240,7 +2240,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn test_eliminate_redundant_monotonic_sorts() -> Result<()> {
+    fn test_eliminate_redundant_monotonic_sorts_cast() -> Result<()> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("a", DataType::Date32, true),
             Field::new("b", DataType::Utf8, true),
@@ -2283,6 +2283,64 @@ mod tests {
         }];
 
         assert!(properties.ordering_satisfy(sort));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_eliminate_redundant_monotonic_sorts_scalar_fn() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Int32, true),
+            Field::new("c", DataType::Int32, true),
+        ]));
+        let sort_options = SortOptions {
+            descending: false,
+            nulls_first: true,
+        };
+        let col_c = col("c", schema.as_ref())?;
+        let mut properties = EquivalenceProperties::new(schema.clone())
+            .with_reorder(
+                ["a", "b", "c"]
+                    .into_iter()
+                    .map(|c| {
+                        col(c, schema.as_ref()).map(|expr| PhysicalSortExpr {
+                            expr,
+                            options: sort_options,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            )
+            // b is constant, so it should be removed from the sort order
+            .add_constants(Some(col("b", schema.as_ref())?));
+
+        let round_c = &create_physical_expr(
+            &BuiltinScalarFunction::Round,
+            &[col_c.clone()],
+            &schema,
+            &ExecutionProps::default(),
+        )?;
+        // Following expression will be made equal with Column(a) which is leading ordering.
+        // Given this equality check whether expected ordering satisfied by the system.
+        let test_exprs = vec![
+            // -------- TEST CASE 1 -----------//
+            (
+                // ROUND(c)
+                round_c.clone(),
+                // (c ASC)
+                (col_c.clone(), sort_options),
+            ),
+        ];
+        // If round(c) is a monotonic expression of c, then `order by c` is satisfied given `round(c)=a` (where `a` is leading ordering).
+        for (expr, (expected_expr, expected_options)) in test_exprs {
+            properties.add_equal_conditions(&expr, &col("a", schema.as_ref())?);
+
+            let sort = &[PhysicalSortExpr {
+                expr: expected_expr,
+                options: expected_options,
+            }];
+            assert!(properties.ordering_satisfy(sort));
+        }
 
         Ok(())
     }

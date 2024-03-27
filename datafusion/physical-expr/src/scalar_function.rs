@@ -41,6 +41,7 @@ use crate::PhysicalExpr;
 
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
+use arrow_schema::SortOptions;
 use datafusion_common::{internal_err, Result};
 use datafusion_expr::{
     expr_vec_fmt, BuiltinScalarFunction, ColumnarValue, FuncMonotonicity,
@@ -217,6 +218,28 @@ impl PhysicalExpr for ScalarFunctionExpr {
             .as_ref()
             .map(|monotonicity| out_ordering(monotonicity, children))
             .unwrap_or(SortProperties::Unordered)
+    }
+
+    /// If it is known that [`ScalarFunctionExpr`] have an ordering. Its input should have same corresponding orderings
+    /// according to monotonicity features.
+    fn get_children_ordering(&self, ordering: SortOptions) -> Vec<SortProperties> {
+        let n_children = self.args.len();
+        if let Some(monotonicity) = &self.monotonicity {
+            monotonicity
+                .iter()
+                .zip(&self.args)
+                .map(|(monotonicity, _child)| {
+                    if let Some(same_direction) = monotonicity {
+                        let ordering = if *same_direction { ordering } else { !ordering };
+                        SortProperties::Ordered(ordering)
+                    } else {
+                        SortProperties::Unordered
+                    }
+                })
+                .collect()
+        } else {
+            vec![SortProperties::Unordered; n_children]
+        }
     }
 }
 
