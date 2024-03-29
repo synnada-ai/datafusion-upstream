@@ -79,7 +79,6 @@ use datafusion_physical_plan::aggregates::{
 };
 use datafusion_physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion_physical_plan::displayable;
 use datafusion_physical_plan::insert::FileSinkExec;
 use datafusion_physical_plan::joins::utils::{
     ColumnIndex, JoinFilter, JoinOn, JoinOnRef,
@@ -96,13 +95,6 @@ use datafusion_physical_plan::union::{InterleaveExec, UnionExec};
 use datafusion_physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
 
 use itertools::Itertools;
-
-fn print_plan(plan: &Arc<dyn ExecutionPlan>) -> Result<()> {
-    let formatted = displayable(plan.as_ref()).indent(true).to_string();
-    let actual: Vec<&str> = formatted.trim().lines().collect();
-    println!("{:#?}", actual);
-    Ok(())
-}
 
 /// The tree node for the rule of [`OptimizeProjections`]. It stores the necessary
 /// fields for column requirements and changed indices of columns.
@@ -1477,7 +1469,6 @@ impl ProjectionOptimizer {
                 }
             }
             JoinType::RightSemi | JoinType::RightAnti => {
-                let join_left_input_size = hj.left().schema().fields().len();
                 let join_projection = hj
                     .projection
                     .clone()
@@ -1529,11 +1520,7 @@ impl ProjectionOptimizer {
 
                         let new_projection = update_hj_projection_right(
                             hj.projection.clone(),
-                            hj.left().schema(),
-                            hj_left_requirements,
-                            left_mapping,
                             right_mapping,
-                            join_left_input_size,
                         );
 
                         let new_hash_join = HashJoinExec::try_new(
@@ -1572,11 +1559,7 @@ impl ProjectionOptimizer {
                             rewrite_hj_filter(hj.filter(), &left_mapping, &right_mapping);
                         let new_projection = update_hj_projection_right(
                             hj.projection.clone(),
-                            hj.left().schema(),
-                            hj_left_requirements,
                             left_mapping,
-                            right_mapping,
-                            join_left_input_size,
                         );
 
                         let new_hash_join = HashJoinExec::try_new(
@@ -1616,11 +1599,7 @@ impl ProjectionOptimizer {
                             rewrite_hj_filter(hj.filter(), &left_mapping, &right_mapping);
                         let new_projection = update_hj_projection_right(
                             hj.projection.clone(),
-                            hj.left().schema(),
-                            hj_left_requirements,
-                            left_mapping,
                             right_mapping,
-                            join_left_input_size,
                         );
 
                         let new_hash_join = HashJoinExec::try_new(
@@ -5016,11 +4995,7 @@ fn update_hj_projection(
 
 fn update_hj_projection_right(
     projection: Option<Vec<usize>>,
-    hj_left_schema: SchemaRef,
-    hj_left_requirements: HashSet<Column>,
-    left_mapping: HashMap<Column, Column>,
     right_mapping: HashMap<Column, Column>,
-    join_left_input_size: usize,
 ) -> Option<Vec<usize>> {
     projection.map(|projection| {
         projection
@@ -5543,9 +5518,7 @@ mod tests {
         rank, BinaryExpr, CaseExpr, CastExpr, Column, Literal, NegativeExpr, RowNumber,
         Sum,
     };
-    use datafusion_physical_expr::window::{
-        BuiltInWindowExpr, BuiltInWindowFunctionExpr,
-    };
+    use datafusion_physical_expr::window::BuiltInWindowExpr;
     use datafusion_physical_expr::{
         Partitioning, PhysicalExpr, PhysicalSortExpr, ScalarFunctionExpr,
     };
