@@ -1527,7 +1527,7 @@ impl ProjectionOptimizer {
                         let new_filter =
                             rewrite_hj_filter(hj.filter(), &left_mapping, &right_mapping);
 
-                        let new_projection = update_hj_projection(
+                        let new_projection = update_hj_projection_right(
                             hj.projection.clone(),
                             hj.left().schema(),
                             hj_left_requirements,
@@ -1570,7 +1570,7 @@ impl ProjectionOptimizer {
                             update_join_on(hj.on(), &left_mapping, &right_mapping);
                         let new_filter =
                             rewrite_hj_filter(hj.filter(), &left_mapping, &right_mapping);
-                        let new_projection = update_hj_projection(
+                        let new_projection = update_hj_projection_right(
                             hj.projection.clone(),
                             hj.left().schema(),
                             hj_left_requirements,
@@ -1614,7 +1614,7 @@ impl ProjectionOptimizer {
                             update_join_on(hj.on(), &left_mapping, &right_mapping);
                         let new_filter =
                             rewrite_hj_filter(hj.filter(), &left_mapping, &right_mapping);
-                        let new_projection = update_hj_projection(
+                        let new_projection = update_hj_projection_right(
                             hj.projection.clone(),
                             hj.left().schema(),
                             hj_left_requirements,
@@ -5014,6 +5014,28 @@ fn update_hj_projection(
     })
 }
 
+fn update_hj_projection_right(
+    projection: Option<Vec<usize>>,
+    hj_left_schema: SchemaRef,
+    hj_left_requirements: HashSet<Column>,
+    left_mapping: HashMap<Column, Column>,
+    right_mapping: HashMap<Column, Column>,
+    join_left_input_size: usize,
+) -> Option<Vec<usize>> {
+    projection.map(|projection| {
+        projection
+            .iter()
+            .map(|ind| {
+                right_mapping
+                    .iter()
+                    .find(|(initial, _)| initial.index() == *ind)
+                    .map(|(_, target)| target.index())
+                    .unwrap_or(*ind)
+            })
+            .collect()
+    })
+}
+
 /// Rewrites a filter execution plan with updated column indices.
 ///
 /// This function updates the column indices in a filter's predicate based on a provided mapping.
@@ -6527,24 +6549,6 @@ mod tests {
     #[test]
 
     fn test_optimize_projections_filter_sort() -> Result<()> {
-        /*
-                                                        INITIAL PLAN:
-                FilterExec(sum > 0):   |sum@0           |
-                ProjectionExec:        |c@2+x@0 as sum  |
-                ProjectionExec:        |x@2             |x@0             |c@1             |
-                SortExec(c@1, x@2):    |x@0             |c@1             |x@2             |
-                ProjectionExec:        |x@1             |c@0             |a@2 as x        |
-                ProjectionExec:        |c@2             |e@4 as x        |a@0             |
-                CsvExec:               |a               |b               |c               |d               |e               |
-                =============================================================================================================
-                                                        OPTIMIZED PLAN:
-                FilterExec(sum > 0):   |sum@0           |
-                ProjectionExec:        |c@0+x@1 as sum  |
-                SortExec(c@0, x@1):    |c@0             |x@1             |
-                ProjectionExec:        |c@1             |a@0 as x        |
-                CsvExec:               |a               |c               |
-        */
-
         let csv = create_simple_csv_exec();
 
         let projection1 = Arc::new(ProjectionExec::try_new(
@@ -6638,30 +6642,6 @@ mod tests {
 
     #[test]
     fn test_optimize_projections_left_anti() -> Result<()> {
-        /*
-                                                        INITIAL PLAN:
-                AggregateExec(gb(a@2), sum(rownumber@1)): |gb(a)           |sum(rownumber)  |
-                HashJoin(a@1=b@1, rownumber@4<rank@5)     |a@1             |rownumber@0     |a@1             |
-                    SortExec(rownumber@4, d@2):           |rownumber       |a               |d               |d               |rownumber       |
-                    ProjectionExec:                       |rownumber@5     |a@0             |d@3             |d@3             |rownumber@5     |
-                    WindowExec(rownumber)                 |a               |b               |c               |d               |e               |rownumber       |
-                    CsvExec:                              |a               |b               |c               |d               |e               |
-                    BoundedWindowExec(rank())             |a               |b               |c               |d               |e               |rank            |
-                    CsvExec:                              |a               |b               |c               |d               |e               |
-                =============================================================================================================
-                                                        OPTIMIZED PLAN:
-                AggregateExec(gb(a@2), sum(rownumber@1)): |gb(a)           |sum(rownumber)  |
-                HashJoin(a@1=b@0, rownumber@4<avg(b)@5)   |a@1             |rownumber@0     |a@1             |
-                    ProjectionExec:                       |rownumber@0     |a@1             |rownumber@3     |
-                    SortExec(rownumber@3, d@2):           |rownumber@5     |a@0             |d@3             |rownumber@5     |
-                    ProjectionExec:                       |rownumber@5     |a@0             |d@3             |rownumber@5     |
-                    WindowExec(rownumber)                 |a               |b               |c               |d               |e               |rownumber       |
-                    CsvExec:                              |a               |b               |c               |d               |e               |
-                    ProjectionExec:                       |b@1             |rank()@5        |
-                    BoundedWindowExec(rank())             |a               |b               |c               |d               |e               |rank()          |
-                    CsvExec:                              |a               |b               |c               |d               |e               |
-        */
-
         let csv_left = create_simple_csv_exec();
         let window = Arc::new(WindowAggExec::try_new(
             vec![Arc::new(BuiltInWindowExpr::new(
@@ -6799,30 +6779,6 @@ mod tests {
 
     #[test]
     fn test_optimize_projections_right_semi() -> Result<()> {
-        /*
-                                                        INITIAL PLAN:
-                AggregateExec(gb(a@2), sum(rank@1)):      |gb(a)           |sum(rank)       |
-                HashJoin(a@1=b@1, rownumber@4<rank@5)     |a@0             |rank@0          |a@0             |
-                    SortExec(rownumber@4, d@2):           |rownumber       |a               |d               |d               |rownumber       |
-                    ProjectionExec:                       |rownumber@5     |a@0             |d@3             |d@3             |rownumber@5     |
-                    WindowExec(rownumber)                 |a               |b               |c               |d               |e               |rownumber       |
-                    CsvExec:                              |a               |b               |c               |d               |e               |
-                    BoundedWindowExec(rank())             |a               |b               |c               |d               |e               |rank            |
-                    CsvExec:                              |a               |b               |c               |d               |e               |
-                =============================================================================================================
-                                                        OPTIMIZED PLAN:
-                AggregateExec(gb(a@2), sum(rownumber@1)): |gb(a)           |sum(rownumber)  |
-                HashJoin(a@1=b@0, rownumber@4<avg(b)@5)   |a@1             |rownumber@0     |a@1             |
-                    ProjectionExec:                       |rownumber@0     |a@1             |rownumber@3     |
-                    SortExec(rownumber@3, d@2):           |rownumber@5     |a@0             |d@3             |rownumber@5     |
-                    ProjectionExec:                       |rownumber@5     |a@0             |d@3             |rownumber@5     |
-                    WindowExec(rownumber)                 |a               |b               |c               |d               |e               |rownumber       |
-                    CsvExec:                              |a               |b               |c               |d               |e               |
-                    ProjectionExec:                       |b@1             |rank()@5        |
-                    BoundedWindowExec(rank())             |a               |b               |c               |d               |e               |rank()          |
-                    CsvExec:                              |a               |b               |c               |d               |e               |
-        */
-
         let csv_left = create_simple_csv_exec();
         let window = Arc::new(WindowAggExec::try_new(
             vec![Arc::new(BuiltInWindowExpr::new(
@@ -6910,13 +6866,13 @@ mod tests {
         let aggregate = Arc::new(AggregateExec::try_new(
             AggregateMode::Single,
             PhysicalGroupBy::new(
-                vec![(Arc::new(Column::new("a", 2)), "a".to_owned())],
+                vec![(Arc::new(Column::new("b", 2)), "b".to_owned())],
                 vec![],
                 vec![],
             ),
             vec![Arc::new(Sum::new(
-                Arc::new(Column::new("RANK()", 1)),
-                "SUM(RANK())",
+                Arc::new(Column::new("a", 1)),
+                "SUM(a)",
                 DataType::Int64,
             ))],
             vec![None],
@@ -6927,7 +6883,7 @@ mod tests {
         let initial = get_plan_string(&aggregate);
 
         let expected_initial = [
-            "AggregateExec: mode=Single, gby=[a@2 as a], aggr=[SUM(RANK())]", 
+            "AggregateExec: mode=Single, gby=[b@2 as b], aggr=[SUM(a)]", 
             "  HashJoinExec: mode=Auto, join_type=RightSemi, on=[(a@1, b@1)], filter=ROW_NUMBER()@0 < RANK@1, projection=[b@1, a@0, b@1]", 
             "    SortExec: expr=[ROW_NUMBER()@4 ASC,d@2 ASC]", 
             "      ProjectionExec: expr=[ROW_NUMBER()@5 as ROW_NUMBER(), a@0 as a, d@3 as d, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]", 
@@ -6942,8 +6898,8 @@ mod tests {
             OptimizeProjections::new().optimize(aggregate, &ConfigOptions::new())?;
 
         let expected = [
-            "AggregateExec: mode=Single, gby=[a@2 as a], aggr=[SUM(RANK())]", 
-            "  HashJoinExec: mode=Auto, join_type=RightSemi, on=[(a@0, b@1)], filter=ROW_NUMBER()@0 < RANK@1, projection=[a@0, a@0, a@0]", 
+            "AggregateExec: mode=Single, gby=[b@2 as b], aggr=[SUM(a)]", 
+            "  HashJoinExec: mode=Auto, join_type=RightSemi, on=[(a@0, b@1)], filter=ROW_NUMBER()@0 < RANK@1, projection=[b@1, a@0, b@1]", 
             "    ProjectionExec: expr=[a@0 as a, ROW_NUMBER()@2 as ROW_NUMBER()]", 
             "      SortExec: expr=[ROW_NUMBER()@2 ASC,d@1 ASC]", 
             "        ProjectionExec: expr=[a@0 as a, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]", 
