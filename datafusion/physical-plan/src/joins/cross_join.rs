@@ -345,14 +345,18 @@ fn build_batch(
     schema: &Schema,
 ) -> Result<RecordBatch> {
     // Repeat value on the left n times
-    let left_copies: Vec<Arc<dyn Array>> = get_arrayref_at_indices(
-        left_data.columns(),
-        &PrimitiveArray::<UInt32Type>::from_value(left_index as u32, batch.num_rows()),
-    )?;
+    let arrays = left_data
+        .columns()
+        .iter()
+        .map(|arr| {
+            let scalar = ScalarValue::try_from_array(arr, left_index)?;
+            scalar.to_array_of_size(batch.num_rows())
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     RecordBatch::try_new_with_options(
         Arc::new(schema.clone()),
-        left_copies
+        arrays
             .iter()
             .chain(batch.columns().iter())
             .cloned()
