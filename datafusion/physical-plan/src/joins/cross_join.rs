@@ -33,10 +33,11 @@ use crate::{
     SendableRecordBatchStream, Statistics,
 };
 
-use arrow::datatypes::{Fields, Schema, SchemaRef};
+use arrow::datatypes::{Fields, Schema, SchemaRef, UInt32Type};
 use arrow::record_batch::RecordBatch;
-use arrow_array::RecordBatchOptions;
+use arrow_array::{Array, PrimitiveArray, RecordBatchOptions};
 use datafusion_common::stats::Precision;
+use datafusion_common::utils::get_arrayref_at_indices;
 use datafusion_common::{JoinType, Result, ScalarValue};
 use datafusion_execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion_execution::TaskContext;
@@ -257,7 +258,7 @@ impl ExecutionPlan for CrossJoinExec {
             schema: self.schema.clone(),
             left_fut,
             right: stream,
-            right_batch: Arc::new(parking_lot::Mutex::new(None)),
+            right_batch: RecordBatch::new_empty(self.schema().clone()),
             left_index: 0,
             join_metrics,
         }))
@@ -326,7 +327,7 @@ struct CrossJoinStream {
     /// Current value on the left
     left_index: usize,
     /// Current batch being processed from the right side
-    right_batch: Arc<parking_lot::Mutex<Option<RecordBatch>>>,
+    right_batch: RecordBatch,
     /// join execution metrics
     join_metrics: BuildProbeJoinMetrics,
 }
@@ -344,18 +345,14 @@ fn build_batch(
     schema: &Schema,
 ) -> Result<RecordBatch> {
     // Repeat value on the left n times
-    let arrays = left_data
-        .columns()
-        .iter()
-        .map(|arr| {
-            let scalar = ScalarValue::try_from_array(arr, left_index)?;
-            scalar.to_array_of_size(batch.num_rows())
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let left_copies: Vec<Arc<dyn Array>> = get_arrayref_at_indices(
+        left_data.columns(),
+        &PrimitiveArray::<UInt32Type>::from_value(left_index as u32, batch.num_rows()),
+    )?;
 
     RecordBatch::try_new_with_options(
         Arc::new(schema.clone()),
-        arrays
+        left_copies
             .iter()
             .chain(batch.columns().iter())
             .cloned()
@@ -397,13 +394,11 @@ impl CrossJoinStream {
 
         if self.left_index > 0 && self.left_index < left_data.num_rows() {
             let join_timer = self.join_metrics.join_time.timer();
-            let right_batch = {
-                let right_batch = self.right_batch.lock();
-                right_batch.clone().unwrap()
-            };
             let result =
-                build_batch(self.left_index, &right_batch, left_data, &self.schema);
-            self.join_metrics.input_rows.add(right_batch.num_rows());
+                build_batch(self.left_index, &self.right_batch, left_data, &self.schema);
+            self.join_metrics
+                .input_rows
+                .add(self.right_batch.num_rows());
             if let Ok(ref batch) = result {
                 join_timer.done();
                 self.join_metrics.output_batches.add(1);
@@ -428,9 +423,7 @@ impl CrossJoinStream {
                         self.join_metrics.output_rows.add(batch.num_rows());
                     }
                     self.left_index = 1;
-
-                    let mut right_batch = self.right_batch.lock();
-                    *right_batch = Some(batch);
+                    self.right_batch = batch;
 
                     Some(result)
                 }
