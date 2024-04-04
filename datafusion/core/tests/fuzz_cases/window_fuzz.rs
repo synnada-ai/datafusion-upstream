@@ -28,7 +28,7 @@ use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::windows::{
     create_window_expr, BoundedWindowAggExec, WindowAggExec,
 };
-use datafusion::physical_plan::InputOrderMode::{Linear, PartiallySorted, Sorted};
+use datafusion::physical_plan::InputOrderMode::{Linear, Sorted};
 use datafusion::physical_plan::{collect, InputOrderMode};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_common::{Result, ScalarValue};
@@ -99,17 +99,6 @@ async fn window_bounded_window_random_comparison() -> Result<()> {
         (vec!["c", "b"], vec!["a", "b"], Linear),
         (vec!["c", "b"], vec!["a", "c"], Linear),
         (vec!["c", "b"], vec!["a", "b", "c"], Linear),
-        (vec!["c", "a"], vec!["a"], PartiallySorted(vec![1])),
-        (vec!["c", "a"], vec!["b"], PartiallySorted(vec![1])),
-        (vec!["c", "a"], vec!["c"], PartiallySorted(vec![1])),
-        (vec!["c", "a"], vec!["a", "b"], PartiallySorted(vec![1])),
-        (vec!["c", "a"], vec!["b", "c"], PartiallySorted(vec![1])),
-        (vec!["c", "a"], vec!["a", "c"], PartiallySorted(vec![1])),
-        (
-            vec!["c", "a"],
-            vec!["a", "b", "c"],
-            PartiallySorted(vec![1]),
-        ),
         (vec!["c", "b", "a"], vec!["a"], Sorted),
         (vec!["c", "b", "a"], vec!["b"], Sorted),
         (vec!["c", "b", "a"], vec!["c"], Sorted),

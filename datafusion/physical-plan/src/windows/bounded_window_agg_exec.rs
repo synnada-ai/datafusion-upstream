@@ -51,7 +51,9 @@ use datafusion_common::utils::{
     evaluate_partition_ranges, get_arrayref_at_indices, get_at_indices,
     get_record_batch_at_indices, get_row_at_idx,
 };
-use datafusion_common::{arrow_datafusion_err, exec_err, DataFusionError, Result};
+use datafusion_common::{
+    arrow_datafusion_err, exec_err, internal_err, DataFusionError, Result,
+};
 use datafusion_execution::TaskContext;
 use datafusion_expr::window_state::{PartitionBatchState, WindowAggState};
 use datafusion_expr::ColumnarValue;
@@ -178,9 +180,10 @@ impl BoundedWindowAggExec {
                     input_schema,
                 })
             }
-            InputOrderMode::Linear | InputOrderMode::PartiallySorted(_) => Box::new(
-                LinearSearch::new(ordered_partition_by_indices, input_schema),
-            ),
+            InputOrderMode::PartiallySorted(_) => {
+                return internal_err!("BoundedWindowAggExec cannot work in InputOrderMode::PartiallySorted mode.");
+            }
+            InputOrderMode::Linear => Box::new(LinearSearch::new(input_schema)),
         })
     }
 
@@ -439,11 +442,6 @@ pub struct LinearSearch {
     input_buffer_hashes: VecDeque<u64>,
     /// Used during hash value calculation.
     random_state: RandomState,
-    /// Input ordering and partition by key ordering need not be the same, so
-    /// this vector stores the mapping between them. For instance, if the input
-    /// is ordered by a, b and the window expression contains a PARTITION BY b, a
-    /// clause, this attribute stores [1, 0].
-    ordered_partition_by_indices: Vec<usize>,
     /// We use this [`RawTable`] to calculate unique partitions for each new
     /// RecordBatch. First entry in the tuple is the hash value, the second
     /// entry is the unique ID for each partition (increments from 0 to n).
@@ -570,32 +568,12 @@ impl PartitionSearcher for LinearSearch {
         self.input_buffer_hashes.drain(0..n_out);
     }
 
-    fn mark_partition_end(&self, partition_buffers: &mut PartitionBatches) {
-        // We should be in the `PartiallySorted` case, otherwise we can not
-        // tell when we are at the end of a given partition.
-        if !self.ordered_partition_by_indices.is_empty() {
-            if let Some((last_row, _)) = partition_buffers.last() {
-                let last_sorted_cols = self
-                    .ordered_partition_by_indices
-                    .iter()
-                    .map(|idx| last_row[*idx].clone())
-                    .collect::<Vec<_>>();
-                for (row, partition_batch_state) in partition_buffers.iter_mut() {
-                    let sorted_cols = self
-                        .ordered_partition_by_indices
-                        .iter()
-                        .map(|idx| &row[*idx]);
-                    // All the partitions other than `last_sorted_cols` are done.
-                    // We are sure that we will no longer receive values for these
-                    // partitions (arrival of a new value would violate ordering).
-                    partition_batch_state.is_end = !sorted_cols.eq(&last_sorted_cols);
-                }
-            }
-        }
+    fn mark_partition_end(&self, _partition_buffers: &mut PartitionBatches) {
+        // In Linear mode, We cannot mark a partition as ended
     }
 
     fn is_mode_linear(&self) -> bool {
-        self.ordered_partition_by_indices.is_empty()
+        true
     }
 
     fn input_schema(&self) -> &SchemaRef {
@@ -605,11 +583,10 @@ impl PartitionSearcher for LinearSearch {
 
 impl LinearSearch {
     /// Initialize a new [`LinearSearch`] partition searcher.
-    fn new(ordered_partition_by_indices: Vec<usize>, input_schema: SchemaRef) -> Self {
+    fn new(input_schema: SchemaRef) -> Self {
         LinearSearch {
             input_buffer_hashes: VecDeque::new(),
             random_state: Default::default(),
-            ordered_partition_by_indices,
             row_map_batch: RawTable::with_capacity(256),
             row_map_out: RawTable::with_capacity(256),
             input_schema,
