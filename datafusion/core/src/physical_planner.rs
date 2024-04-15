@@ -85,6 +85,7 @@ use datafusion_expr::expr::{
     WindowFunction,
 };
 use datafusion_expr::expr_rewriter::unnormalize_cols;
+use datafusion_expr::expr_vec_fmt;
 use datafusion_expr::logical_plan::builder::wrap_projection_for_join_if_necessary;
 use datafusion_expr::{
     expr_vec_fmt, DescribeTable, DmlStatement, RecursiveQuery, ScalarFunctionDefinition,
@@ -107,7 +108,7 @@ fn create_function_physical_name(
     fun: &str,
     distinct: bool,
     args: &[Expr],
-    order_by: Option<Vec<Expr>>,
+    order_by: Option<&Vec<Expr>>,
 ) -> Result<String> {
     let names: Vec<String> = args
         .iter()
@@ -250,25 +251,22 @@ fn create_physical_name(e: &Expr, is_first_expr: bool) -> Result<String> {
             args,
             order_by,
             ..
-        }) => create_function_physical_name(
-            &fun.to_string(),
-            false,
-            args,
-            Some(order_by.clone()),
-        ),
+        }) => {
+            create_function_physical_name(&fun.to_string(), false, args, Some(order_by))
+        }
         Expr::AggregateFunction(AggregateFunction {
             func_def,
             distinct,
             args,
             filter,
-            order_by: _,
+            order_by,
             null_treatment: _,
         }) => match func_def {
             AggregateFunctionDefinition::BuiltIn(..) => create_function_physical_name(
                 func_def.name(),
                 *distinct,
                 args,
-                order_by.clone(),
+                order_by.as_ref(),
             ),
             AggregateFunctionDefinition::UDF(fun) => {
                 // TODO: Add support for filter by in AggregateUDF
