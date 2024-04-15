@@ -79,7 +79,7 @@ use datafusion_physical_plan::aggregates::{
 };
 use datafusion_physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion_physical_plan::insert::FileSinkExec;
+use datafusion_physical_plan::insert::DataSinkExec;
 use datafusion_physical_plan::joins::utils::{
     ColumnIndex, JoinFilter, JoinOn, JoinOnRef,
 };
@@ -3504,7 +3504,7 @@ impl ProjectionOptimizer {
                     return Ok(Transformed::no(self));
                 };
                 update_mapping(&mut self, all_mappings)
-            } else if let Some(_file_sink) = plan_any.downcast_ref::<FileSinkExec>() {
+            } else if let Some(_file_sink) = plan_any.downcast_ref::<DataSinkExec>() {
                 let mapped_exprs =
                     all_mappings.swap_remove(0).into_iter().collect::<Vec<_>>();
                 let mut existing_columns =
