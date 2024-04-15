@@ -81,11 +81,9 @@ impl ProjectionExec {
                 field.set_metadata(
                     get_field_metadata(e, &input_schema).unwrap_or_default(),
                 );
-
                 Ok(field)
             })
             .collect();
-
         let schema = Arc::new(Schema::new_with_metadata(
             fields?,
             input_schema.metadata().clone(),
@@ -93,6 +91,14 @@ impl ProjectionExec {
 
         // construct a map from the input expressions to the output expression of the Projection
         let projection_mapping = ProjectionMapping::try_new(&expr, &input_schema)?;
+        projection_mapping
+            .iter()
+            .zip(expr.iter().map(|(expr, _)| expr))
+            .for_each(|((input, _), expr)| {
+                if input.ne(expr) {
+                    println!("input :{:?} -- expr: {:?}", input, expr);
+                }
+            });
         let cache =
             Self::compute_properties(&input, &projection_mapping, schema.clone())?;
         Ok(Self {
