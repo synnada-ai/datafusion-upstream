@@ -58,7 +58,7 @@ use datafusion::physical_plan::empty::EmptyExec;
 use datafusion::physical_plan::explain::ExplainExec;
 use datafusion::physical_plan::expressions::PhysicalSortExpr;
 use datafusion::physical_plan::filter::FilterExec;
-use datafusion::physical_plan::insert::FileSinkExec;
+use datafusion::physical_plan::insert::DataSinkExec;
 use datafusion::physical_plan::joins::utils::{ColumnIndex, JoinFilter};
 use datafusion::physical_plan::joins::{
     CrossJoinExec, NestedLoopJoinExec, StreamJoinPartitionMode, SymmetricHashJoinExec,
@@ -517,7 +517,11 @@ impl AsExecutionPlan for PhysicalPlanNode {
                                         }
                                         AggregateFunction::UserDefinedAggrFunction(udaf_name) => {
                                             let agg_udf = registry.udaf(udaf_name)?;
-                                            udaf::create_aggregate_expr(agg_udf.as_ref(), &input_phy_expr, &physical_schema, name)
+                                            // TODO: `order by` is not supported for UDAF yet
+                                            let sort_exprs = &[];
+                                            let ordering_req = &[];
+                                            let ignore_nulls = false;
+                                            udaf::create_aggregate_expr(agg_udf.as_ref(), &input_phy_expr, sort_exprs, ordering_req, &physical_schema, name, ignore_nulls)
                                         }
                                     }
                                 }).transpose()?.ok_or_else(|| {
@@ -1029,7 +1033,7 @@ impl AsExecutionPlan for PhysicalPlanNode {
                         .map(|item| PhysicalSortRequirement::from_sort_exprs(&item))
                     })
                     .transpose()?;
-                Ok(Arc::new(FileSinkExec::new(
+                Ok(Arc::new(DataSinkExec::new(
                     input,
                     Arc::new(data_sink),
                     Arc::new(sink_schema),
@@ -1059,7 +1063,7 @@ impl AsExecutionPlan for PhysicalPlanNode {
                         .map(|item| PhysicalSortRequirement::from_sort_exprs(&item))
                     })
                     .transpose()?;
-                Ok(Arc::new(FileSinkExec::new(
+                Ok(Arc::new(DataSinkExec::new(
                     input,
                     Arc::new(data_sink),
                     Arc::new(sink_schema),
@@ -1089,7 +1093,7 @@ impl AsExecutionPlan for PhysicalPlanNode {
                         .map(|item| PhysicalSortRequirement::from_sort_exprs(&item))
                     })
                     .transpose()?;
-                Ok(Arc::new(FileSinkExec::new(
+                Ok(Arc::new(DataSinkExec::new(
                     input,
                     Arc::new(data_sink),
                     Arc::new(sink_schema),
@@ -1875,7 +1879,7 @@ impl AsExecutionPlan for PhysicalPlanNode {
             });
         }
 
-        if let Some(exec) = plan.downcast_ref::<FileSinkExec>() {
+        if let Some(exec) = plan.downcast_ref::<DataSinkExec>() {
             let input = protobuf::PhysicalPlanNode::try_from_physical_plan(
                 exec.input().to_owned(),
                 extension_codec,

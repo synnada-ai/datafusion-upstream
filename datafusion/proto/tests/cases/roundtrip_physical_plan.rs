@@ -34,9 +34,7 @@ use datafusion::datasource::physical_plan::{
     FileSinkConfig, ParquetExec,
 };
 use datafusion::execution::FunctionRegistry;
-use datafusion::logical_expr::{
-    create_udf, BuiltinScalarFunction, JoinType, Operator, Volatility,
-};
+use datafusion::logical_expr::{create_udf, JoinType, Operator, Volatility};
 use datafusion::physical_expr::expressions::NthValueAgg;
 use datafusion::physical_expr::window::SlidingAggregateWindowExpr;
 use datafusion::physical_expr::{PhysicalSortRequirement, ScalarFunctionExpr};
@@ -50,7 +48,7 @@ use datafusion::physical_plan::expressions::{
     NotExpr, NthValue, PhysicalSortExpr, StringAgg, Sum,
 };
 use datafusion::physical_plan::filter::FilterExec;
-use datafusion::physical_plan::insert::FileSinkExec;
+use datafusion::physical_plan::insert::DataSinkExec;
 use datafusion::physical_plan::joins::{
     HashJoinExec, NestedLoopJoinExec, PartitionMode, StreamJoinPartitionMode,
 };
@@ -412,14 +410,13 @@ fn roundtrip_aggregate_udaf() -> Result<()> {
 
     let return_type = DataType::Int64;
     let accumulator: AccumulatorFactoryFunction = Arc::new(|_| Ok(Box::new(Example)));
-    let state_type = vec![DataType::Int64];
 
     let udaf = AggregateUDF::from(SimpleAggregateUDF::new_with_signature(
         "example",
         Signature::exact(vec![DataType::Int64], Volatility::Immutable),
         return_type,
         accumulator,
-        state_type,
+        vec![Field::new("value", DataType::Int64, true)],
     ));
 
     let ctx = SessionContext::new();
@@ -431,8 +428,11 @@ fn roundtrip_aggregate_udaf() -> Result<()> {
     let aggregates: Vec<Arc<dyn AggregateExpr>> = vec![udaf::create_aggregate_expr(
         &udaf,
         &[col("b", &schema)?],
+        &[],
+        &[],
         &schema,
         "example_agg",
+        false,
     )?];
 
     roundtrip_test_with_context(
@@ -599,31 +599,6 @@ async fn roundtrip_parquet_exec_with_table_partition_cols() -> Result<()> {
         None,
         Default::default(),
     )))
-}
-
-#[test]
-fn roundtrip_builtin_scalar_function() -> Result<()> {
-    let field_a = Field::new("a", DataType::Int64, false);
-    let field_b = Field::new("b", DataType::Int64, false);
-    let schema = Arc::new(Schema::new(vec![field_a, field_b]));
-
-    let input = Arc::new(EmptyExec::new(schema.clone()));
-
-    let fun_def = ScalarFunctionDefinition::BuiltIn(BuiltinScalarFunction::Sin);
-
-    let expr = ScalarFunctionExpr::new(
-        "sin",
-        fun_def,
-        vec![col("a", &schema)?],
-        DataType::Float64,
-        None,
-        false,
-    );
-
-    let project =
-        ProjectionExec::try_new(vec![(Arc::new(expr), "a".to_string())], input)?;
-
-    roundtrip_test(Arc::new(project))
 }
 
 #[test]
@@ -886,7 +861,7 @@ fn roundtrip_json_sink() -> Result<()> {
         }),
     )];
 
-    roundtrip_test(Arc::new(FileSinkExec::new(
+    roundtrip_test(Arc::new(DataSinkExec::new(
         input,
         data_sink,
         schema.clone(),
@@ -921,7 +896,7 @@ fn roundtrip_csv_sink() -> Result<()> {
         }),
     )];
 
-    let roundtrip_plan = roundtrip_test_and_return(Arc::new(FileSinkExec::new(
+    let roundtrip_plan = roundtrip_test_and_return(Arc::new(DataSinkExec::new(
         input,
         data_sink,
         schema.clone(),
@@ -931,7 +906,7 @@ fn roundtrip_csv_sink() -> Result<()> {
 
     let roundtrip_plan = roundtrip_plan
         .as_any()
-        .downcast_ref::<FileSinkExec>()
+        .downcast_ref::<DataSinkExec>()
         .unwrap();
     let csv_sink = roundtrip_plan
         .sink()
@@ -973,7 +948,7 @@ fn roundtrip_parquet_sink() -> Result<()> {
         }),
     )];
 
-    roundtrip_test(Arc::new(FileSinkExec::new(
+    roundtrip_test(Arc::new(DataSinkExec::new(
         input,
         data_sink,
         schema.clone(),

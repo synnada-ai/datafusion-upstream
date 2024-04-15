@@ -20,13 +20,15 @@ use arrow::array::Decimal128Array;
 use arrow::{
     array::{
         Array, ArrayRef, BinaryArray, Date32Array, Date64Array, FixedSizeBinaryArray,
-        Float64Array, Int32Array, StringArray, TimestampMicrosecondArray,
-        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
+        Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, StringArray,
+        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     },
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
     util::pretty::pretty_format_batches,
 };
+use arrow_array::make_array;
 use chrono::{Datelike, Duration, TimeDelta};
 use datafusion::{
     datasource::{physical_plan::ParquetExec, provider_as_source, TableProvider},
@@ -62,8 +64,10 @@ fn init() {
 enum Scenario {
     Timestamps,
     Dates,
-    Int32,
+    Int,
     Int32Range,
+    UInt,
+    UInt32Range,
     Float64,
     Decimal,
     DecimalBloomFilterInt32,
@@ -72,6 +76,8 @@ enum Scenario {
     DecimalLargePrecisionBloomFilter,
     ByteArray,
     PeriodsInColumnNames,
+    WithNullValues,
+    WithNullValuesPageLevel,
 }
 
 enum Unit {
@@ -386,21 +392,77 @@ fn make_timestamp_batch(offset: Duration) -> RecordBatch {
     .unwrap()
 }
 
-/// Return record batch with i32 sequence
+/// Return record batch with i8, i16, i32, and i64 sequences
 ///
 /// Columns are named
-/// "i" -> Int32Array
-fn make_int32_batch(start: i32, end: i32) -> RecordBatch {
-    let schema = Arc::new(Schema::new(vec![Field::new("i", DataType::Int32, true)]));
-    let v: Vec<i32> = (start..end).collect();
-    let array = Arc::new(Int32Array::from(v)) as ArrayRef;
-    RecordBatch::try_new(schema, vec![array.clone()]).unwrap()
+/// "i8" -> Int8Array
+/// "i16" -> Int16Array
+/// "i32" -> Int32Array
+/// "i64" -> Int64Array
+fn make_int_batches(start: i8, end: i8) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("i8", DataType::Int8, true),
+        Field::new("i16", DataType::Int16, true),
+        Field::new("i32", DataType::Int32, true),
+        Field::new("i64", DataType::Int64, true),
+    ]));
+    let v8: Vec<i8> = (start..end).collect();
+    let v16: Vec<i16> = (start as _..end as _).collect();
+    let v32: Vec<i32> = (start as _..end as _).collect();
+    let v64: Vec<i64> = (start as _..end as _).collect();
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int8Array::from(v8)) as ArrayRef,
+            Arc::new(Int16Array::from(v16)) as ArrayRef,
+            Arc::new(Int32Array::from(v32)) as ArrayRef,
+            Arc::new(Int64Array::from(v64)) as ArrayRef,
+        ],
+    )
+    .unwrap()
+}
+
+/// Return record batch with i8, i16, i32, and i64 sequences
+///
+/// Columns are named
+/// "u8" -> UInt8Array
+/// "u16" -> UInt16Array
+/// "u32" -> UInt32Array
+/// "u64" -> UInt64Array
+fn make_uint_batches(start: u8, end: u8) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("u8", DataType::UInt8, true),
+        Field::new("u16", DataType::UInt16, true),
+        Field::new("u32", DataType::UInt32, true),
+        Field::new("u64", DataType::UInt64, true),
+    ]));
+    let v8: Vec<u8> = (start..end).collect();
+    let v16: Vec<u16> = (start as _..end as _).collect();
+    let v32: Vec<u32> = (start as _..end as _).collect();
+    let v64: Vec<u64> = (start as _..end as _).collect();
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(UInt8Array::from(v8)) as ArrayRef,
+            Arc::new(UInt16Array::from(v16)) as ArrayRef,
+            Arc::new(UInt32Array::from(v32)) as ArrayRef,
+            Arc::new(UInt64Array::from(v64)) as ArrayRef,
+        ],
+    )
+    .unwrap()
 }
 
 fn make_int32_range(start: i32, end: i32) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![Field::new("i", DataType::Int32, true)]));
     let v = vec![start, end];
     let array = Arc::new(Int32Array::from(v)) as ArrayRef;
+    RecordBatch::try_new(schema, vec![array.clone()]).unwrap()
+}
+
+fn make_uint32_range(start: u32, end: u32) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![Field::new("u", DataType::UInt32, true)]));
+    let v = vec![start, end];
+    let array = Arc::new(UInt32Array::from(v)) as ArrayRef;
     RecordBatch::try_new(schema, vec![array.clone()]).unwrap()
 }
 
@@ -571,6 +633,65 @@ fn make_names_batch(name: &str, service_name_values: Vec<&str>) -> RecordBatch {
     RecordBatch::try_new(schema, vec![Arc::new(name), Arc::new(service_name)]).unwrap()
 }
 
+/// Return record batch with i8, i16, i32, and i64 sequences with Null values
+/// here 5 rows in page when using Unit::Page
+fn make_int_batches_with_null(
+    null_values: usize,
+    no_null_values_start: usize,
+    no_null_values_end: usize,
+) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("i8", DataType::Int8, true),
+        Field::new("i16", DataType::Int16, true),
+        Field::new("i32", DataType::Int32, true),
+        Field::new("i64", DataType::Int64, true),
+    ]));
+
+    let v8: Vec<i8> = (no_null_values_start as _..no_null_values_end as _).collect();
+    let v16: Vec<i16> = (no_null_values_start as _..no_null_values_end as _).collect();
+    let v32: Vec<i32> = (no_null_values_start as _..no_null_values_end as _).collect();
+    let v64: Vec<i64> = (no_null_values_start as _..no_null_values_end as _).collect();
+
+    RecordBatch::try_new(
+        schema,
+        vec![
+            make_array(
+                Int8Array::from_iter(
+                    v8.into_iter()
+                        .map(Some)
+                        .chain(std::iter::repeat(None).take(null_values)),
+                )
+                .to_data(),
+            ),
+            make_array(
+                Int16Array::from_iter(
+                    v16.into_iter()
+                        .map(Some)
+                        .chain(std::iter::repeat(None).take(null_values)),
+                )
+                .to_data(),
+            ),
+            make_array(
+                Int32Array::from_iter(
+                    v32.into_iter()
+                        .map(Some)
+                        .chain(std::iter::repeat(None).take(null_values)),
+                )
+                .to_data(),
+            ),
+            make_array(
+                Int64Array::from_iter(
+                    v64.into_iter()
+                        .map(Some)
+                        .chain(std::iter::repeat(None).take(null_values)),
+                )
+                .to_data(),
+            ),
+        ],
+    )
+    .unwrap()
+}
+
 fn create_data_batch(scenario: Scenario) -> Vec<RecordBatch> {
     match scenario {
         Scenario::Timestamps => {
@@ -589,16 +710,27 @@ fn create_data_batch(scenario: Scenario) -> Vec<RecordBatch> {
                 make_date_batch(TimeDelta::try_days(3600).unwrap()),
             ]
         }
-        Scenario::Int32 => {
+        Scenario::Int => {
             vec![
-                make_int32_batch(-5, 0),
-                make_int32_batch(-4, 1),
-                make_int32_batch(0, 5),
-                make_int32_batch(5, 10),
+                make_int_batches(-5, 0),
+                make_int_batches(-4, 1),
+                make_int_batches(0, 5),
+                make_int_batches(5, 10),
             ]
         }
         Scenario::Int32Range => {
             vec![make_int32_range(0, 10), make_int32_range(200000, 300000)]
+        }
+        Scenario::UInt => {
+            vec![
+                make_uint_batches(0, 5),
+                make_uint_batches(1, 6),
+                make_uint_batches(5, 10),
+                make_uint_batches(250, 255),
+            ]
+        }
+        Scenario::UInt32Range => {
+            vec![make_uint32_range(0, 10), make_uint32_range(200000, 300000)]
         }
         Scenario::Float64 => {
             vec![
@@ -727,6 +859,21 @@ fn create_data_batch(scenario: Scenario) -> Vec<RecordBatch> {
                     "HTTP GET / DISPATCH",
                     vec!["backend", "backend", "backend", "backend", "backend"],
                 ),
+            ]
+        }
+        Scenario::WithNullValues => {
+            vec![
+                make_int_batches_with_null(5, 0, 0),
+                make_int_batches(1, 6),
+                make_int_batches_with_null(5, 0, 0),
+            ]
+        }
+        Scenario::WithNullValuesPageLevel => {
+            vec![
+                make_int_batches_with_null(5, 1, 6),
+                make_int_batches(1, 11),
+                make_int_batches_with_null(1, 1, 10),
+                make_int_batches_with_null(5, 1, 6),
             ]
         }
     }

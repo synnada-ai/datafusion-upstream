@@ -29,7 +29,8 @@ use datafusion_expr::expr::InList;
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{
     col, expr, lit, AggregateFunction, Between, BinaryExpr, BuiltinScalarFunction, Cast,
-    Expr, ExprSchemable, GetFieldAccess, GetIndexedField, Like, Operator, TryCast,
+    Expr, ExprSchemable, GetFieldAccess, GetIndexedField, Like, Literal, Operator,
+    TryCast,
 };
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
@@ -135,20 +136,16 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         match expr {
             Expr::Column(col) => match &col.relation {
                 Some(q) => {
-                    match schema
-                        .fields()
-                        .iter()
-                        .find(|field| match field.qualifier() {
-                            Some(field_q) => {
-                                field.name() == &col.name
-                                    && field_q.to_string().ends_with(&format!(".{q}"))
-                            }
-                            _ => false,
-                        }) {
-                        Some(df_field) => Expr::Column(Column {
-                            relation: df_field.qualifier().cloned(),
-                            name: df_field.name().clone(),
-                        }),
+                    match schema.iter().find(|(qualifier, field)| match qualifier {
+                        Some(field_q) => {
+                            field.name() == &col.name
+                                && field_q.to_string().ends_with(&format!(".{q}"))
+                        }
+                        _ => false,
+                    }) {
+                        Some((qualifier, df_field)) => {
+                            Expr::Column(Column::from((qualifier, df_field.as_ref())))
+                        }
                         None => Expr::Column(col),
                     }
                 }
@@ -521,12 +518,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             SQLExpr::Floor {
                 expr,
                 field: _field,
-            } => self.sql_named_function_to_expr(
-                *expr,
-                BuiltinScalarFunction::Floor,
-                schema,
-                planner_context,
-            ),
+            } => self.sql_fn_name_to_expr(*expr, "floor", schema, planner_context),
             SQLExpr::Ceil {
                 expr,
                 field: _field,
@@ -592,6 +584,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         }
     }
 
+    /// Parses a struct(..) expression
     fn parse_struct(
         &self,
         values: Vec<SQLExpr>,
@@ -602,6 +595,78 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         if !fields.is_empty() {
             return not_impl_err!("Struct fields are not supported yet");
         }
+
+        if values
+            .iter()
+            .any(|value| matches!(value, SQLExpr::Named { .. }))
+        {
+            self.create_named_struct(values, input_schema, planner_context)
+        } else {
+            self.create_struct(values, input_schema, planner_context)
+        }
+    }
+
+    // Handles a call to struct(...) where the arguments are named. For example
+    // `struct (v as foo, v2 as bar)` by creating a call to the `named_struct` function
+    fn create_named_struct(
+        &self,
+        values: Vec<SQLExpr>,
+        input_schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
+        let args = values
+            .into_iter()
+            .enumerate()
+            .map(|(i, value)| {
+                let args = if let SQLExpr::Named { expr, name } = value {
+                    [
+                        name.value.lit(),
+                        self.sql_expr_to_logical_expr(
+                            *expr,
+                            input_schema,
+                            planner_context,
+                        )?,
+                    ]
+                } else {
+                    [
+                        format!("c{i}").lit(),
+                        self.sql_expr_to_logical_expr(
+                            value,
+                            input_schema,
+                            planner_context,
+                        )?,
+                    ]
+                };
+
+                Ok(args)
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        let named_struct_func = self
+            .context_provider
+            .get_function_meta("named_struct")
+            .ok_or_else(|| {
+            internal_datafusion_err!("Unable to find expected 'named_struct' function")
+        })?;
+
+        Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+            named_struct_func,
+            args,
+        )))
+    }
+
+    // Handles a call to struct(...) where the arguments are not named. For example
+    // `struct (v, v2)` by creating a call to the `struct` function
+    // which will create a struct with fields named `c0`, `c1`, etc.
+    fn create_struct(
+        &self,
+        values: Vec<SQLExpr>,
+        input_schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
         let args = values
             .into_iter()
             .map(|value| {
@@ -614,6 +679,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             .ok_or_else(|| {
                 internal_datafusion_err!("Unable to find expected 'struct' function")
             })?;
+
         Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
             struct_func,
             args,
@@ -823,12 +889,17 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
-        let fun = BuiltinScalarFunction::Strpos;
+        let fun = self
+            .context_provider
+            .get_function_meta("strpos")
+            .ok_or_else(|| {
+                internal_datafusion_err!("Unable to find expected 'strpos' function")
+            })?;
         let substr =
             self.sql_expr_to_logical_expr(substr_expr, schema, planner_context)?;
         let fullstr = self.sql_expr_to_logical_expr(str_expr, schema, planner_context)?;
         let args = vec![fullstr, substr];
-        Ok(Expr::ScalarFunction(ScalarFunction::new(fun, args)))
+        Ok(Expr::ScalarFunction(ScalarFunction::new_udf(fun, args)))
     }
     fn sql_agg_with_filter_to_expr(
         &self,
