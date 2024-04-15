@@ -65,22 +65,10 @@ pub struct ProjectionExec {
 impl ProjectionExec {
     /// Create a projection on an input
     pub fn try_new(
-        mut expr: Vec<(Arc<dyn PhysicalExpr>, String)>,
+        expr: Vec<(Arc<dyn PhysicalExpr>, String)>,
         input: Arc<dyn ExecutionPlan>,
     ) -> Result<Self> {
         let input_schema = input.schema();
-        let expr_names = expr
-            .iter()
-            .map(|(_, alias)| alias.to_string())
-            .collect::<Vec<_>>();
-        // construct a map from the input expressions to the output expression of the Projection
-        let projection_mapping = ProjectionMapping::try_new(expr, &input_schema)?;
-        expr = projection_mapping
-            .map
-            .iter()
-            .zip(expr_names)
-            .map(|((source, _), name)| (source.clone(), name))
-            .collect();
 
         let fields: Result<Vec<Field>> = expr
             .iter()
@@ -93,16 +81,16 @@ impl ProjectionExec {
                 field.set_metadata(
                     get_field_metadata(e, &input_schema).unwrap_or_default(),
                 );
-
                 Ok(field)
             })
             .collect();
-
         let schema = Arc::new(Schema::new_with_metadata(
             fields?,
             input_schema.metadata().clone(),
         ));
 
+        // construct a map from the input expressions to the output expression of the Projection
+        let projection_mapping = ProjectionMapping::try_new(expr.clone(), &input_schema)?;
         let cache =
             Self::compute_properties(&input, &projection_mapping, schema.clone())?;
         Ok(Self {

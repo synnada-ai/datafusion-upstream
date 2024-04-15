@@ -51,6 +51,7 @@ impl ProjectionMapping {
         expr: Vec<(Arc<dyn PhysicalExpr>, String)>,
         input_schema: &SchemaRef,
     ) -> Result<Self> {
+        // Construct a map from the input expressions to the output expression of the projection:
         expr.into_iter()
             .enumerate()
             .map(|(expr_idx, (expression, name))| {
