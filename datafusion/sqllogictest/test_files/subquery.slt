@@ -187,17 +187,17 @@ logical_plan
 06)--------Aggregate: groupBy=[[t2.t2_id]], aggr=[[SUM(CAST(t2.t2_int AS Int64))]]
 07)----------TableScan: t2 projection=[t2_id, t2_int]
 physical_plan
-ProjectionExec: expr=[t1_id@1 as t1_id, SUM(t2.t2_int)@0 as t2_sum]
---CoalesceBatchesExec: target_batch_size=2
-----HashJoinExec: mode=Partitioned, join_type=Right, on=[(t2_id@0, t1_id@0)], projection=[SUM(t2.t2_int)@1, t1_id@2]
-------AggregateExec: mode=FinalPartitioned, gby=[t2_id@0 as t2_id], aggr=[SUM(t2.t2_int)]
---------CoalesceBatchesExec: target_batch_size=2
-----------RepartitionExec: partitioning=Hash([t2_id@0], 4), input_partitions=4
-------------AggregateExec: mode=Partial, gby=[t2_id@0 as t2_id], aggr=[SUM(t2.t2_int)]
---------------MemoryExec: partitions=4, partition_sizes=[1, 0, 0, 0]
-------CoalesceBatchesExec: target_batch_size=2
---------RepartitionExec: partitioning=Hash([t1_id@0], 4), input_partitions=4
-----------MemoryExec: partitions=4, partition_sizes=[1, 0, 0, 0]
+01)ProjectionExec: expr=[t1_id@1 as t1_id, SUM(t2.t2_int)@0 as t2_sum]
+02)--CoalesceBatchesExec: target_batch_size=2
+03)----HashJoinExec: mode=Partitioned, join_type=Right, on=[(t2_id@0, t1_id@0)], projection=[SUM(t2.t2_int)@1, t1_id@2]
+04)------AggregateExec: mode=FinalPartitioned, gby=[t2_id@0 as t2_id], aggr=[SUM(t2.t2_int)]
+05)--------CoalesceBatchesExec: target_batch_size=2
+06)----------RepartitionExec: partitioning=Hash([t2_id@0], 4), input_partitions=4
+07)------------AggregateExec: mode=Partial, gby=[t2_id@0 as t2_id], aggr=[SUM(t2.t2_int)]
+08)--------------MemoryExec: partitions=4, partition_sizes=[1, 0, 0, 0]
+09)------CoalesceBatchesExec: target_batch_size=2
+10)--------RepartitionExec: partitioning=Hash([t1_id@0], 4), input_partitions=4
+11)----------MemoryExec: partitions=4, partition_sizes=[1, 0, 0, 0]
 
 query II rowsort
 SELECT t1_id, (SELECT sum(t2_int) FROM t2 WHERE t2.t2_id = t1.t1_id) as t2_sum from t1
@@ -291,19 +291,19 @@ logical_plan
 07)----------Aggregate: groupBy=[[t2.t2_id]], aggr=[[SUM(CAST(t2.t2_int AS Int64))]]
 08)------------TableScan: t2 projection=[t2_id, t2_int]
 physical_plan
-ProjectionExec: expr=[t1_id@1 as t1_id, SUM(t2.t2_int)@0 as t2_sum]
---CoalesceBatchesExec: target_batch_size=2
-----HashJoinExec: mode=Partitioned, join_type=Right, on=[(t2_id@0, t1_id@0)], projection=[SUM(t2.t2_int)@1, t1_id@2]
-------CoalesceBatchesExec: target_batch_size=2
---------FilterExec: SUM(t2.t2_int)@1 < 3
-----------AggregateExec: mode=FinalPartitioned, gby=[t2_id@0 as t2_id], aggr=[SUM(t2.t2_int)]
-------------CoalesceBatchesExec: target_batch_size=2
---------------RepartitionExec: partitioning=Hash([t2_id@0], 4), input_partitions=4
-----------------AggregateExec: mode=Partial, gby=[t2_id@0 as t2_id], aggr=[SUM(t2.t2_int)]
-------------------MemoryExec: partitions=4, partition_sizes=[1, 0, 0, 0]
-------CoalesceBatchesExec: target_batch_size=2
---------RepartitionExec: partitioning=Hash([t1_id@0], 4), input_partitions=4
-----------MemoryExec: partitions=4, partition_sizes=[1, 0, 0, 0]
+01)ProjectionExec: expr=[t1_id@1 as t1_id, SUM(t2.t2_int)@0 as t2_sum]
+02)--CoalesceBatchesExec: target_batch_size=2
+03)----HashJoinExec: mode=Partitioned, join_type=Right, on=[(t2_id@0, t1_id@0)], projection=[SUM(t2.t2_int)@1, t1_id@2]
+04)------CoalesceBatchesExec: target_batch_size=2
+05)--------FilterExec: SUM(t2.t2_int)@1 < 3
+06)----------AggregateExec: mode=FinalPartitioned, gby=[t2_id@0 as t2_id], aggr=[SUM(t2.t2_int)]
+07)------------CoalesceBatchesExec: target_batch_size=2
+08)--------------RepartitionExec: partitioning=Hash([t2_id@0], 4), input_partitions=4
+09)----------------AggregateExec: mode=Partial, gby=[t2_id@0 as t2_id], aggr=[SUM(t2.t2_int)]
+10)------------------MemoryExec: partitions=4, partition_sizes=[1, 0, 0, 0]
+11)------CoalesceBatchesExec: target_batch_size=2
+12)--------RepartitionExec: partitioning=Hash([t1_id@0], 4), input_partitions=4
+13)----------MemoryExec: partitions=4, partition_sizes=[1, 0, 0, 0]
 
 query II rowsort
 SELECT t1_id, (SELECT sum(t2_int) FROM t2 WHERE t2.t2_id = t1.t1_id having sum(t2_int) < 3) as t2_sum from t1

@@ -2033,8 +2033,8 @@ physical_plan
 04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
 05)--------MemoryExec: partitions=1, partition_sizes=[1]
 06)--CoalescePartitionsExec
-07)----ProjectionExec: expr=[t2_id@0 as t2_id]
-08)------CoalesceBatchesExec: target_batch_size=2
+07)----CoalesceBatchesExec: target_batch_size=2
+08)------ProjectionExec: expr=[t2_id@0 as t2_id]
 09)--------FilterExec: t2_int@1 > 1
 10)----------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
 11)------------MemoryExec: partitions=1, partition_sizes=[1]
