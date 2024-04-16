@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use super::convert_first_last::OptimizeAggregateOrder;
 use crate::config::ConfigOptions;
 use crate::physical_optimizer::aggregate_statistics::AggregateStatistics;
 use crate::physical_optimizer::coalesce_batches::CoalesceBatches;
@@ -101,6 +102,8 @@ impl PhysicalOptimizer {
             // Note that one should always run this rule after running the EnforceDistribution rule
             // as the latter may break local sorting requirements.
             Arc::new(EnforceSorting::new()),
+            // Run once after the local sorting requirement is changed
+            Arc::new(OptimizeAggregateOrder::new()),
             // The CoalesceBatches rule will not influence the distribution and ordering of the
             // whole plan tree. Therefore, to avoid influencing other rules, it should run last.
             Arc::new(CoalesceBatches::new()),
