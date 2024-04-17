@@ -89,8 +89,8 @@ use datafusion_expr::expr::{
 use datafusion_expr::expr_rewriter::unnormalize_cols;
 use datafusion_expr::logical_plan::builder::wrap_projection_for_join_if_necessary;
 use datafusion_expr::{
-    expr_vec_fmt, DescribeTable, DmlStatement, RecursiveQuery, ScalarFunctionDefinition,
-    StringifiedPlan, WindowFrame, WindowFrameBound, WriteOp,
+    expr_vec_fmt, DescribeTable, DmlStatement, Extension, Filter, RecursiveQuery,
+    ScalarFunctionDefinition, StringifiedPlan, WindowFrame, WindowFrameBound, WriteOp,
 };
 use datafusion_physical_expr::expressions::Literal;
 use datafusion_physical_expr::LexOrdering;
