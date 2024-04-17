@@ -3117,7 +3117,7 @@ impl ProjectionOptimizer {
                         .map(|child| child.plan.clone())
                         .collect(),
                 )?;
-                update_mapping(&mut self, all_mappings)
+                update_mapping_cross(&mut self, all_mappings)
             } else if let Some(projection) = plan_any.downcast_ref::<ProjectionExec>() {
                 self.plan = rewrite_projection(
                     projection,
@@ -4759,6 +4759,63 @@ fn update_mapping(
                 )
             })
             .collect()
+    }
+}
+
+fn update_mapping_cross(
+    node: &mut ProjectionOptimizer,
+    mut child_mappings: Vec<HashMap<Column, Column>>,
+) {
+    if node.schema_mapping.is_empty() {
+        node.schema_mapping = child_mappings.swap_remove(0);
+        node.schema_mapping
+            .extend(child_mappings[0].iter().map(|(initial, new)| {
+                (
+                    Column::new(
+                        initial.name(),
+                        initial.index()
+                            + node.children_nodes[0].plan.schema().fields().len(),
+                    ),
+                    Column::new(
+                        new.name(),
+                        new.index() + node.children_nodes[0].plan.schema().fields().len(),
+                    ),
+                )
+            }));
+    } else {
+        let mut self_node_map = node.schema_mapping.clone();
+        node.schema_mapping = child_mappings.swap_remove(0);
+        node.schema_mapping
+            .extend(child_mappings[0].iter().map(|(initial, new)| {
+                (
+                    Column::new(
+                        initial.name(),
+                        initial.index()
+                            + node.children_nodes[0].plan.schema().fields().len(),
+                    ),
+                    Column::new(
+                        new.name(),
+                        new.index() + node.children_nodes[0].plan.schema().fields().len(),
+                    ),
+                )
+            }));
+
+        node.schema_mapping = node
+            .schema_mapping
+            .clone()
+            .into_iter()
+            .map(|(initial, new)| {
+                if let Some((match_i, _match_f)) =
+                    self_node_map.clone().iter().find(|(_i, f)| initial == **f)
+                {
+                    self_node_map.remove(match_i);
+                    (match_i.clone(), new)
+                } else {
+                    (initial, new)
+                }
+            })
+            .collect();
+        node.schema_mapping.extend(self_node_map);
     }
 }
 
