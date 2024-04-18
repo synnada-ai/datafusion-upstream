@@ -201,28 +201,21 @@ impl ProjectionOptimizer {
             };
         }
 
-        if let Some(limit) = projection_input.as_any().downcast_ref::<GlobalLimitExec>() {
-            let clone = self.plan.clone();
-            let projection = clone.as_any().downcast_ref::<ProjectionExec>().unwrap();
-            // If the projection does not narrow the schema, we should not try to push it down:
-            if projection.expr().len() >= projection.input().schema().fields().len() {
-                self.children_nodes[0].required_columns = self
-                    .required_columns
-                    .iter()
-                    .flat_map(|e| collect_columns(&projection.expr()[e.index()].0))
-                    .collect::<HashSet<_>>();
-                return Ok(self);
-            }
-
-            let new_p = self.plan.with_new_children(limit.children())?;
-            self.plan = Arc::new(GlobalLimitExec::new(
-                new_p.clone(),
-                limit.skip(),
-                limit.fetch(),
-            ));
-            self.children_nodes[0].plan = new_p;
-            self.children_nodes[0].required_columns = self.required_columns.clone();
-            return Ok(self);
+        if projection_input
+            .as_any()
+            .downcast_ref::<GlobalLimitExec>()
+            .is_some()
+            || projection_input
+                .as_any()
+                .downcast_ref::<LocalLimitExec>()
+                .is_some()
+        {
+            self = match self.try_swap_with_limit()? {
+                swapped if swapped.transformed => {
+                    return Ok(swapped.data);
+                }
+                no_change => no_change.data,
+            };
         }
 
         // Source providers:
@@ -455,6 +448,32 @@ impl ProjectionOptimizer {
                 children_nodes: vec![new_join_node],
             }))
         }
+    }
+
+    fn try_swap_with_limit(mut self) -> Result<Transformed<ProjectionOptimizer>> {
+        let Some(projection) = self.plan.as_any().downcast_ref::<ProjectionExec>() else {
+            return Ok(Transformed::no(self));
+        };
+        // If the projection does not narrow the schema, we should not try to push it down:
+        if projection.expr().len() >= projection.input().schema().fields().len() {
+            self.children_nodes[0].required_columns = self
+                .required_columns
+                .iter()
+                .flat_map(|e| collect_columns(&projection.expr()[e.index()].0))
+                .collect::<HashSet<_>>();
+            return Ok(Transformed::no(self.clone()));
+        }
+
+        let new_p = self
+            .plan
+            .with_new_children(self.children_nodes[0].plan.children())?;
+        self.plan = self.children_nodes[0]
+            .plan
+            .clone()
+            .with_new_children(vec![new_p.clone()])?;
+        self.children_nodes[0].plan = new_p;
+        self.children_nodes[0].required_columns = self.required_columns.clone();
+        return Ok(Transformed::yes(self));
     }
 
     /// Tries to embed [`ProjectionExec`] into its input [`CsvExec`].
