@@ -120,7 +120,7 @@ impl PhysicalOptimizer {
             // into an `order by max(x) limit y`. In this case it will copy the limit value down
             // to the aggregation, allowing it to use only y number of accumulators.
             Arc::new(TopKAggregation::new()),
-            // OptimizeProjections rule aims achieving the most effective use of projections
+            // OptimizeProjections rule aims to achieve the most effective use of projections
             // in plans. It ensures that query plans are free from unnecessary projections
             // and that no unused columns are propagated unnecessarily between plans.
             Arc::new(OptimizeProjections::new()),

@@ -70,7 +70,7 @@ impl ProjectionExec {
     ) -> Result<Self> {
         let input_schema = input.schema();
 
-        let fields: Result<Vec<Field>> = expr
+        let fields = expr
             .iter()
             .map(|(e, name)| {
                 let mut field = Field::new(
@@ -83,9 +83,9 @@ impl ProjectionExec {
                 );
                 Ok(field)
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         let schema = Arc::new(Schema::new_with_metadata(
-            fields?,
+            fields,
             input_schema.metadata().clone(),
         ));
 
