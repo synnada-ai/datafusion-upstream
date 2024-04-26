@@ -87,6 +87,7 @@ use datafusion_expr::expr::{
     WindowFunction,
 };
 use datafusion_expr::expr_rewriter::unnormalize_cols;
+use datafusion_expr::expr_vec_fmt;
 use datafusion_expr::logical_plan::builder::wrap_projection_for_join_if_necessary;
 use datafusion_expr::{
     expr_vec_fmt, DescribeTable, DmlStatement, Extension, Filter, RecursiveQuery,
@@ -1260,15 +1261,8 @@ impl DefaultPhysicalPlanner {
 
                     // Remove temporary projected columns
                     if left_projected || right_projected {
-                        let final_join_result = join_schema
-                            .iter()
-                            .map(|(qualifier, field)| {
-                                Expr::Column(datafusion_common::Column::from((
-                                    qualifier,
-                                    field.as_ref(),
-                                )))
-                            })
-                            .collect::<Vec<_>>();
+                        let final_join_result =
+                            join_schema.iter().map(Expr::from).collect::<Vec<_>>();
                         let projection = LogicalPlan::Projection(Projection::try_new(
                             final_join_result,
                             Arc::new(new_join),
@@ -2303,8 +2297,6 @@ fn tuple_err<T, R>(value: (Result<T>, Result<R>)) -> Result<(T, R)> {
 #[cfg(test)]
 mod tests {
     use std::any::Any;
-    use std::collections::HashMap;
-    use std::convert::TryFrom;
     use std::fmt::{self, Debug};
     use std::ops::{BitAnd, Not};
 
@@ -2312,22 +2304,19 @@ mod tests {
     use crate::datasource::file_format::options::CsvReadOptions;
     use crate::datasource::MemTable;
     use crate::physical_plan::{
-        expressions, DisplayAs, DisplayFormatType, ExecutionMode, Partitioning,
-        PlanProperties, SendableRecordBatchStream,
+        expressions, DisplayAs, DisplayFormatType, ExecutionMode, PlanProperties,
+        SendableRecordBatchStream,
     };
-    use crate::physical_planner::PhysicalPlanner;
     use crate::prelude::{SessionConfig, SessionContext};
     use crate::test_util::{scan_empty, scan_empty_with_partitions};
 
     use arrow::array::{ArrayRef, DictionaryArray, Int32Array};
-    use arrow::datatypes::{DataType, Field, Int32Type, SchemaRef};
-    use arrow::record_batch::RecordBatch;
-    use datafusion_common::{assert_contains, DFSchema, DFSchemaRef, TableReference};
+    use arrow::datatypes::{DataType, Field, Int32Type};
+    use datafusion_common::{assert_contains, DFSchemaRef, TableReference};
     use datafusion_execution::runtime_env::RuntimeEnv;
     use datafusion_execution::TaskContext;
     use datafusion_expr::{
-        col, lit, sum, Extension, GroupingSet, LogicalPlanBuilder,
-        UserDefinedLogicalNodeCore,
+        col, lit, sum, LogicalPlanBuilder, UserDefinedLogicalNodeCore,
     };
     use datafusion_physical_expr::EquivalenceProperties;
 
