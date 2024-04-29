@@ -4730,10 +4730,10 @@ fn rewrite_bounded_window_aggregate(
 /// the order with projections without any further adaptation.
 fn is_plan_schema_agnostic(plan: &Arc<dyn ExecutionPlan>) -> bool {
     let plan_any = plan.as_any();
-    // plan_any.downcast_ref::<GlobalLimitExec>().is_some()
-    //     || plan_any.downcast_ref::<LocalLimitExec>().is_some()
-    //     || plan_any.downcast_ref::<CoalesceBatchesExec>().is_some()||
-    plan_any.downcast_ref::<CoalescePartitionsExec>().is_some()
+    plan_any.downcast_ref::<GlobalLimitExec>().is_some()
+        || plan_any.downcast_ref::<LocalLimitExec>().is_some()
+        || plan_any.downcast_ref::<CoalesceBatchesExec>().is_some()
+        || plan_any.downcast_ref::<CoalescePartitionsExec>().is_some()
 }
 
 /// Checks if the given expression is trivial.
