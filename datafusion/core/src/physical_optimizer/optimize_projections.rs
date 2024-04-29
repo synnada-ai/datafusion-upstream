@@ -171,6 +171,16 @@ impl ProjectionOptimizer {
             };
         }
 
+        // These kind of plans can swap the order with projections without any further modification.
+        if is_plan_schema_agnostic(projection_input) {
+            self = match self.try_swap_trivial()? {
+                swapped if swapped.transformed => {
+                    return Ok(swapped.data);
+                }
+                no_change => no_change.data,
+            };
+        }
+
         // The projection can be removed. To avoid making unnecessary operations,
         // try_remove should be called before try_narrow.
         self = match self.try_remove_projection()? {
@@ -204,16 +214,6 @@ impl ProjectionOptimizer {
                         collect_columns_in_plan_schema(&node.children_nodes[0].plan);
                     Ok(node)
                 }
-            };
-        }
-
-        // These kind of plans can swap the order with projections without any further modification.
-        if is_plan_schema_agnostic(projection_input) {
-            self = match self.try_swap_trivial()? {
-                swapped if swapped.transformed => {
-                    return Ok(swapped.data);
-                }
-                no_change => no_change.data,
             };
         }
 
@@ -3370,9 +3370,12 @@ impl PhysicalOptimizerRule for OptimizeProjections {
             .map_data(|node| satisfy_initial_schema(node, initial_requirements))?;
 
         let new_child = optimized.data.plan;
-        let new_plan = change_children_final_schema_determinant(plan, new_child)?;
-
-        Ok(new_plan)
+        if is_plan_schema_determinant(&plan) {
+            Ok(new_child)
+        } else {
+            let x = update_children(plan, new_child)?;
+            Ok(x)
+        }
     }
 
     fn name(&self) -> &str {
@@ -3381,6 +3384,36 @@ impl PhysicalOptimizerRule for OptimizeProjections {
 
     fn schema_check(&self) -> bool {
         true
+    }
+}
+
+fn is_plan_schema_determinant(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    let plan_any = plan.as_any();
+
+    if plan_any.downcast_ref::<ProjectionExec>().is_some() {
+        true
+    } else if plan_any.downcast_ref::<AggregateExec>().is_some() {
+        true
+    } else if plan_any.downcast_ref::<WindowAggExec>().is_some() {
+        true
+    } else if plan_any.downcast_ref::<BoundedWindowAggExec>().is_some() {
+        true
+    } else if plan_any.downcast_ref::<CrossJoinExec>().is_some() {
+        true
+    } else if plan_any.downcast_ref::<HashJoinExec>().is_some() {
+        true
+    } else if plan_any.downcast_ref::<SymmetricHashJoinExec>().is_some() {
+        true
+    } else if plan_any.downcast_ref::<NestedLoopJoinExec>().is_some() {
+        true
+    } else if plan_any.downcast_ref::<SortMergeJoinExec>().is_some() {
+        true
+    } else if plan_any.downcast_ref::<UnionExec>().is_some() {
+        true
+    } else if plan_any.downcast_ref::<InterleaveExec>().is_some() {
+        true
+    } else {
+        false
     }
 }
 
@@ -3407,6 +3440,10 @@ fn find_final_schema_determinant(
         return plan.clone();
     } else if plan_any.downcast_ref::<SortMergeJoinExec>().is_some() {
         return plan.clone();
+    } else if plan_any.downcast_ref::<UnionExec>().is_some() {
+        return plan.clone();
+    } else if plan_any.downcast_ref::<InterleaveExec>().is_some() {
+        return plan.clone();
     } else {
         plan.children()
             .get(0)
@@ -3415,7 +3452,7 @@ fn find_final_schema_determinant(
     }
 }
 
-fn change_children_final_schema_determinant(
+fn update_children(
     plan: Arc<dyn ExecutionPlan>,
     new_child: Arc<dyn ExecutionPlan>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
@@ -3443,12 +3480,18 @@ fn change_children_final_schema_determinant(
         plan.with_new_children(vec![new_child])
     } else if child_any.downcast_ref::<SortMergeJoinExec>().is_some() {
         plan.with_new_children(vec![new_child])
+    } else if child_any.downcast_ref::<UnionExec>().is_some() {
+        plan.with_new_children(vec![new_child])
+    } else if child_any.downcast_ref::<InterleaveExec>().is_some() {
+        plan.with_new_children(vec![new_child])
     } else {
-        plan.children()
+        let new_child = plan
+            .children()
             .get(0)
-            .map(|c| change_children_final_schema_determinant(c.clone(), new_child))
+            .map(|c| update_children(c.clone(), new_child))
             .transpose()
-            .map(|new_plan| new_plan.unwrap_or(plan.clone()))
+            .map(|new_plan| new_plan.unwrap_or(plan.clone()))?;
+        plan.with_new_children(vec![new_child])
     }
 }
 
@@ -3547,7 +3590,9 @@ fn collect_column_indices_in_proj_exprs(
         .iter()
         .flat_map(|(expr, _)| collect_columns(expr))
         .map(|col| col.index())
-        .collect::<Vec<_>>()
+        .collect::<IndexSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Collects the columns that the projection requires from its input.
