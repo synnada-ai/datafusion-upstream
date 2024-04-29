@@ -34,14 +34,11 @@ use crate::datasource::physical_plan::FileSinkConfig;
 use crate::datasource::source_as_provider;
 use crate::error::{DataFusionError, Result};
 use crate::execution::context::{ExecutionProps, SessionState};
-use crate::logical_expr::expr_vec_fmt;
 use crate::logical_expr::utils::generate_sort_key;
 use crate::logical_expr::{
-    Aggregate, EmptyRelation, Join, Projection, Sort, TableScan, Unnest, Window,
-};
-use crate::logical_expr::{
-    Expr, Limit, LogicalPlan, Partitioning as LogicalPartitioning, PlanType, Repartition,
-    UserDefinedLogicalNode, Values,
+    expr_vec_fmt, Aggregate, EmptyRelation, Expr, Join, Limit, LogicalPlan,
+    Partitioning as LogicalPartitioning, PlanType, Projection, Repartition, Sort,
+    TableScan, Unnest, UserDefinedLogicalNode, Values, Window,
 };
 use crate::physical_expr::{create_physical_expr, create_physical_exprs};
 use crate::physical_optimizer::optimizer::PhysicalOptimizerRule;
