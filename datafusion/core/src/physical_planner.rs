@@ -34,15 +34,15 @@ use crate::datasource::physical_plan::FileSinkConfig;
 use crate::datasource::source_as_provider;
 use crate::error::{DataFusionError, Result};
 use crate::execution::context::{ExecutionProps, SessionState};
+use crate::logical_expr::expr_vec_fmt;
 use crate::logical_expr::utils::generate_sort_key;
 use crate::logical_expr::{
     Aggregate, EmptyRelation, Join, Projection, Sort, TableScan, Unnest, Window,
 };
 use crate::logical_expr::{
-    Expr, LogicalPlan, Partitioning as LogicalPartitioning, PlanType, Repartition,
-    UserDefinedLogicalNode,
+    Expr, Limit, LogicalPlan, Partitioning as LogicalPartitioning, PlanType, Repartition,
+    UserDefinedLogicalNode, Values,
 };
-use crate::logical_expr::{Limit, Values};
 use crate::physical_expr::{create_physical_expr, create_physical_exprs};
 use crate::physical_optimizer::optimizer::PhysicalOptimizerRule;
 use crate::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
@@ -87,10 +87,9 @@ use datafusion_expr::expr::{
     WindowFunction,
 };
 use datafusion_expr::expr_rewriter::unnormalize_cols;
-use datafusion_expr::expr_vec_fmt;
 use datafusion_expr::logical_plan::builder::wrap_projection_for_join_if_necessary;
 use datafusion_expr::{
-    expr_vec_fmt, DescribeTable, DmlStatement, Extension, Filter, RecursiveQuery,
+    DescribeTable, DmlStatement, Extension, Filter, RecursiveQuery,
     ScalarFunctionDefinition, StringifiedPlan, WindowFrame, WindowFrameBound, WriteOp,
 };
 use datafusion_physical_expr::expressions::Literal;

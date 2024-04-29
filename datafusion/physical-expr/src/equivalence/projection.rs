@@ -58,7 +58,7 @@ impl ProjectionMapping {
             .map(|(expr_idx, (expression, name))| {
                 let target_expr = Arc::new(Column::new(&name, expr_idx)) as _;
                 expression
-                    .transform_down(&|e| match e.as_any().downcast_ref::<Column>() {
+                    .transform_down(&|e :Arc<dyn PhysicalExpr> | match e.as_any().downcast_ref::<Column>() {
                         Some(col) => {
                             // Sometimes, an expression and its name in the input_schema
                             // doesn't match. This can cause problems, so we make sure
@@ -72,7 +72,7 @@ impl ProjectionMapping {
                             }
                             let matching_input_column =
                                 Column::new(matching_input_field.name(), idx);
-                            Ok(Transformed::yes(Arc::new(matching_input_column)))
+                            Ok(Transformed::yes(Arc::new(matching_input_column) as _))
                         }
                         None => Ok(Transformed::no(e)),
                     })

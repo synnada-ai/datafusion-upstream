@@ -3351,14 +3351,16 @@ impl PhysicalOptimizerRule for OptimizeProjections {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        let final_schema_determinant = find_final_schema_determinant(&plan);
         // Collect initial columns requirements from the plan's schema.
-        let initial_requirements = collect_columns_in_plan_schema(&plan);
+        let initial_requirements =
+            collect_columns_in_plan_schema(&final_schema_determinant);
 
-        let mut optimizer = ProjectionOptimizer::new_default(plan);
+        let mut optimizer = ProjectionOptimizer::new_default(final_schema_determinant);
 
         // Insert the initial requirements to the root node, and run the rule.
         optimizer.required_columns = initial_requirements.clone();
-        let mut optimized = optimizer.transform_down(&|o| {
+        let mut optimized = optimizer.transform_down(|o: ProjectionOptimizer| {
             o.adjust_node_with_requirements().map(Transformed::yes)
         })?;
         // When some projections are removed after the rule, we know that all columns of
@@ -3366,7 +3368,11 @@ impl PhysicalOptimizerRule for OptimizeProjections {
         // optimized plan satisfies the initial schema order.
         optimized = optimized
             .map_data(|node| satisfy_initial_schema(node, initial_requirements))?;
-        Ok(optimized.data.plan)
+
+        let new_child = optimized.data.plan;
+        let new_plan = change_children_final_schema_determinant(plan, new_child)?;
+
+        Ok(new_plan)
     }
 
     fn name(&self) -> &str {
@@ -3375,6 +3381,74 @@ impl PhysicalOptimizerRule for OptimizeProjections {
 
     fn schema_check(&self) -> bool {
         true
+    }
+}
+
+fn find_final_schema_determinant(
+    plan: &Arc<dyn ExecutionPlan>,
+) -> Arc<dyn ExecutionPlan> {
+    let plan_any = plan.as_any();
+
+    if plan_any.downcast_ref::<ProjectionExec>().is_some() {
+        return plan.clone();
+    } else if plan_any.downcast_ref::<AggregateExec>().is_some() {
+        return plan.clone();
+    } else if plan_any.downcast_ref::<WindowAggExec>().is_some() {
+        return plan.clone();
+    } else if plan_any.downcast_ref::<BoundedWindowAggExec>().is_some() {
+        return plan.clone();
+    } else if plan_any.downcast_ref::<CrossJoinExec>().is_some() {
+        return plan.clone();
+    } else if plan_any.downcast_ref::<HashJoinExec>().is_some() {
+        return plan.clone();
+    } else if plan_any.downcast_ref::<SymmetricHashJoinExec>().is_some() {
+        return plan.clone();
+    } else if plan_any.downcast_ref::<NestedLoopJoinExec>().is_some() {
+        return plan.clone();
+    } else if plan_any.downcast_ref::<SortMergeJoinExec>().is_some() {
+        return plan.clone();
+    } else {
+        plan.children()
+            .get(0)
+            .map(find_final_schema_determinant)
+            .unwrap_or(plan.clone())
+    }
+}
+
+fn change_children_final_schema_determinant(
+    plan: Arc<dyn ExecutionPlan>,
+    new_child: Arc<dyn ExecutionPlan>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let children = plan.children();
+    let Some(child) = children.get(0) else {
+        return Ok(plan.clone());
+    };
+    let child_any = child.as_any();
+
+    if child_any.downcast_ref::<ProjectionExec>().is_some() {
+        plan.with_new_children(vec![new_child])
+    } else if child_any.downcast_ref::<AggregateExec>().is_some() {
+        plan.with_new_children(vec![new_child])
+    } else if child_any.downcast_ref::<WindowAggExec>().is_some() {
+        plan.with_new_children(vec![new_child])
+    } else if child_any.downcast_ref::<BoundedWindowAggExec>().is_some() {
+        plan.with_new_children(vec![new_child])
+    } else if child_any.downcast_ref::<CrossJoinExec>().is_some() {
+        plan.with_new_children(vec![new_child])
+    } else if child_any.downcast_ref::<HashJoinExec>().is_some() {
+        plan.with_new_children(vec![new_child])
+    } else if child_any.downcast_ref::<SymmetricHashJoinExec>().is_some() {
+        plan.with_new_children(vec![new_child])
+    } else if child_any.downcast_ref::<NestedLoopJoinExec>().is_some() {
+        plan.with_new_children(vec![new_child])
+    } else if child_any.downcast_ref::<SortMergeJoinExec>().is_some() {
+        plan.with_new_children(vec![new_child])
+    } else {
+        plan.children()
+            .get(0)
+            .map(|c| change_children_final_schema_determinant(c.clone(), new_child))
+            .transpose()
+            .map(|new_plan| new_plan.unwrap_or(plan.clone()))
     }
 }
 
@@ -3708,42 +3782,37 @@ fn update_expr_with_projection(
     sync_with_child: bool,
 ) -> Result<Option<Arc<dyn PhysicalExpr>>> {
     let mut state = RewriteState::Unchanged;
-    let new_expr = expr
-        .clone()
-        .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
-            if state == RewriteState::RewrittenInvalid {
-                return Ok(Transformed::no(expr));
-            }
-            let Some(column) = expr.as_any().downcast_ref::<Column>() else {
-                return Ok(Transformed::no(expr));
-            };
-            if sync_with_child {
-                state = RewriteState::RewrittenValid;
-                // Update the index of `column`:
-                Ok(Transformed::yes(projected_exprs[column.index()].0.clone()))
-            } else {
-                // default to invalid, in case we can't find the relevant column
-                state = RewriteState::RewrittenInvalid;
-                // Determine how to update `column` to accommodate `projected_exprs`
-                projected_exprs
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, (projected_expr, alias))| {
-                        projected_expr.as_any().downcast_ref::<Column>().and_then(
-                            |projected_column| {
-                                column.eq(projected_column).then(|| {
-                                    state = RewriteState::RewrittenValid;
-                                    Arc::new(Column::new(alias, index)) as _
-                                })
-                            },
-                        )
-                    })
-                    .map_or_else(
-                        || Ok(Transformed::no(expr)),
-                        |c| Ok(Transformed::yes(c)),
+    let new_expr = expr.clone().transform_up(|expr: Arc<dyn PhysicalExpr>| {
+        if state == RewriteState::RewrittenInvalid {
+            return Ok(Transformed::no(expr));
+        }
+        let Some(column) = expr.as_any().downcast_ref::<Column>() else {
+            return Ok(Transformed::no(expr));
+        };
+        if sync_with_child {
+            state = RewriteState::RewrittenValid;
+            // Update the index of `column`:
+            Ok(Transformed::yes(projected_exprs[column.index()].0.clone()))
+        } else {
+            // default to invalid, in case we can't find the relevant column
+            state = RewriteState::RewrittenInvalid;
+            // Determine how to update `column` to accommodate `projected_exprs`
+            projected_exprs
+                .iter()
+                .enumerate()
+                .find_map(|(index, (projected_expr, alias))| {
+                    projected_expr.as_any().downcast_ref::<Column>().and_then(
+                        |projected_column| {
+                            column.eq(projected_column).then(|| {
+                                state = RewriteState::RewrittenValid;
+                                Arc::new(Column::new(alias, index)) as _
+                            })
+                        },
                     )
-            }
-        });
+                })
+                .map_or_else(|| Ok(Transformed::no(expr)), |c| Ok(Transformed::yes(c)))
+        }
+    });
     new_expr.map(|e| (state == RewriteState::RewrittenValid).then_some(e.data))
 }
 
@@ -3845,7 +3914,7 @@ fn update_column_index(
     let mut state = RewriteState::Unchanged;
     let new_expr = expr
         .clone()
-        .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
+        .transform_up(|expr: Arc<dyn PhysicalExpr>| {
             if state == RewriteState::RewrittenInvalid {
                 return Ok(Transformed::no(expr));
             }
@@ -3878,7 +3947,7 @@ fn update_equivalence_conditions(
             (
                 left_col
                     .clone()
-                    .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
+                    .transform_up(|expr: Arc<dyn PhysicalExpr>| {
                         if left_state == RewriteState::RewrittenInvalid {
                             return Ok(Transformed::no(expr));
                         }
@@ -3899,7 +3968,7 @@ fn update_equivalence_conditions(
                     .data,
                 right_col
                     .clone()
-                    .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
+                    .transform_up(|expr: Arc<dyn PhysicalExpr>| {
                         if right_state == RewriteState::RewrittenInvalid {
                             return Ok(Transformed::no(expr));
                         }
@@ -4078,7 +4147,7 @@ fn update_proj_exprs(
         .map(|(expr, alias)| {
             let new_expr = expr
                 .clone()
-                .transform_up_mut(&mut |expr: Arc<dyn PhysicalExpr>| {
+                .transform_up(|expr: Arc<dyn PhysicalExpr>| {
                     let Some(column) = expr.as_any().downcast_ref::<Column>() else {
                         return Ok(Transformed::no(expr));
                     };
@@ -4843,7 +4912,7 @@ fn caching_projections(
     let mut column_ref_map: IndexMap<Column, usize> = IndexMap::new();
     // Collect the column references' usage in the parent projection.
     projection.expr().iter().try_for_each(|(expr, _)| {
-        expr.apply(&mut |expr| {
+        expr.apply(|expr| {
             Ok({
                 if let Some(column) = expr.as_any().downcast_ref::<Column>() {
                     *column_ref_map.entry(column.clone()).or_default() += 1;
