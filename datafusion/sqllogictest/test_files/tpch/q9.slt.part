@@ -128,6 +128,8 @@ physical_plan
 50)--------------------------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
 51)----------------------------CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/tpch/data/nation.tbl]]}, projection=[n_nationkey, n_name], has_header=false
 
+
+
 query TRR
 select
     nation,

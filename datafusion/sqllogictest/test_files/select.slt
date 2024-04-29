@@ -1406,6 +1406,7 @@ physical_plan
 04)------RepartitionExec: partitioning=RoundRobinBatch(2), input_partitions=1
 05)--------CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a0, a, b, c, d], output_ordering=[a@1 ASC NULLS LAST, b@2 ASC NULLS LAST, c@3 ASC NULLS LAST], has_header=true
 
+
 statement ok
 drop table annotated_data_finite2;
 

@@ -3368,13 +3368,12 @@ impl PhysicalOptimizerRule for OptimizeProjections {
         // optimized plan satisfies the initial schema order.
         optimized = optimized
             .map_data(|node| satisfy_initial_schema(node, initial_requirements))?;
-
         let new_child = optimized.data.plan;
+
         if is_plan_schema_determinant(&plan) {
             Ok(new_child)
         } else {
-            let x = update_children(plan, new_child)?;
-            Ok(x)
+            update_children(plan, new_child)
         }
     }
 
@@ -3387,6 +3386,8 @@ impl PhysicalOptimizerRule for OptimizeProjections {
     }
 }
 
+/// If the schema of the plan can be different than its input schema,
+/// then the function returns true; otherwise, false.
 fn is_plan_schema_determinant(plan: &Arc<dyn ExecutionPlan>) -> bool {
     let plan_any = plan.as_any();
 
@@ -3403,6 +3404,7 @@ fn is_plan_schema_determinant(plan: &Arc<dyn ExecutionPlan>) -> bool {
         | plan_any.downcast_ref::<InterleaveExec>().is_some()
 }
 
+/// Given a plan, the function returns the closest node to the root which updates the schema.
 fn find_final_schema_determinant(
     plan: &Arc<dyn ExecutionPlan>,
 ) -> Arc<dyn ExecutionPlan> {
@@ -3416,6 +3418,8 @@ fn find_final_schema_determinant(
     }
 }
 
+/// Given a plan and a child plan, the function updates the child of the node
+/// which is the closest node to the root and modifing the schema.
 fn update_children(
     plan: Arc<dyn ExecutionPlan>,
     new_child: Arc<dyn ExecutionPlan>,
@@ -5266,7 +5270,6 @@ mod tests {
                 ],
                 DataType::Int32,
                 None,
-                false,
             )),
             Arc::new(CaseExpr::try_new(
                 Some(Arc::new(Column::new("d", 2))),
@@ -5335,7 +5338,6 @@ mod tests {
                 ],
                 DataType::Int32,
                 None,
-                false,
             )),
             Arc::new(CaseExpr::try_new(
                 Some(Arc::new(Column::new("d", 3))),
@@ -5407,7 +5409,6 @@ mod tests {
                 ],
                 DataType::Int32,
                 None,
-                false,
             )),
             Arc::new(CaseExpr::try_new(
                 Some(Arc::new(Column::new("d", 2))),
@@ -5476,7 +5477,6 @@ mod tests {
                 ],
                 DataType::Int32,
                 None,
-                false,
             )),
             Arc::new(CaseExpr::try_new(
                 Some(Arc::new(Column::new("d_new", 3))),
