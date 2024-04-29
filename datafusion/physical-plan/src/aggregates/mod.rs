@@ -1796,6 +1796,7 @@ mod tests {
             col("a", &input_schema)?,
             "MEDIAN(a)".to_string(),
             DataType::UInt32,
+            false,
         ))];
 
         // use slow-path in `hash.rs`
