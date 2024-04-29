@@ -3390,63 +3390,27 @@ impl PhysicalOptimizerRule for OptimizeProjections {
 fn is_plan_schema_determinant(plan: &Arc<dyn ExecutionPlan>) -> bool {
     let plan_any = plan.as_any();
 
-    if plan_any.downcast_ref::<ProjectionExec>().is_some() {
-        true
-    } else if plan_any.downcast_ref::<AggregateExec>().is_some() {
-        true
-    } else if plan_any.downcast_ref::<WindowAggExec>().is_some() {
-        true
-    } else if plan_any.downcast_ref::<BoundedWindowAggExec>().is_some() {
-        true
-    } else if plan_any.downcast_ref::<CrossJoinExec>().is_some() {
-        true
-    } else if plan_any.downcast_ref::<HashJoinExec>().is_some() {
-        true
-    } else if plan_any.downcast_ref::<SymmetricHashJoinExec>().is_some() {
-        true
-    } else if plan_any.downcast_ref::<NestedLoopJoinExec>().is_some() {
-        true
-    } else if plan_any.downcast_ref::<SortMergeJoinExec>().is_some() {
-        true
-    } else if plan_any.downcast_ref::<UnionExec>().is_some() {
-        true
-    } else if plan_any.downcast_ref::<InterleaveExec>().is_some() {
-        true
-    } else {
-        false
-    }
+    plan_any.downcast_ref::<ProjectionExec>().is_some()
+        | plan_any.downcast_ref::<AggregateExec>().is_some()
+        | plan_any.downcast_ref::<WindowAggExec>().is_some()
+        | plan_any.downcast_ref::<BoundedWindowAggExec>().is_some()
+        | plan_any.downcast_ref::<CrossJoinExec>().is_some()
+        | plan_any.downcast_ref::<HashJoinExec>().is_some()
+        | plan_any.downcast_ref::<SymmetricHashJoinExec>().is_some()
+        | plan_any.downcast_ref::<NestedLoopJoinExec>().is_some()
+        | plan_any.downcast_ref::<SortMergeJoinExec>().is_some()
+        | plan_any.downcast_ref::<UnionExec>().is_some()
+        | plan_any.downcast_ref::<InterleaveExec>().is_some()
 }
 
 fn find_final_schema_determinant(
     plan: &Arc<dyn ExecutionPlan>,
 ) -> Arc<dyn ExecutionPlan> {
-    let plan_any = plan.as_any();
-
-    if plan_any.downcast_ref::<ProjectionExec>().is_some() {
-        return plan.clone();
-    } else if plan_any.downcast_ref::<AggregateExec>().is_some() {
-        return plan.clone();
-    } else if plan_any.downcast_ref::<WindowAggExec>().is_some() {
-        return plan.clone();
-    } else if plan_any.downcast_ref::<BoundedWindowAggExec>().is_some() {
-        return plan.clone();
-    } else if plan_any.downcast_ref::<CrossJoinExec>().is_some() {
-        return plan.clone();
-    } else if plan_any.downcast_ref::<HashJoinExec>().is_some() {
-        return plan.clone();
-    } else if plan_any.downcast_ref::<SymmetricHashJoinExec>().is_some() {
-        return plan.clone();
-    } else if plan_any.downcast_ref::<NestedLoopJoinExec>().is_some() {
-        return plan.clone();
-    } else if plan_any.downcast_ref::<SortMergeJoinExec>().is_some() {
-        return plan.clone();
-    } else if plan_any.downcast_ref::<UnionExec>().is_some() {
-        return plan.clone();
-    } else if plan_any.downcast_ref::<InterleaveExec>().is_some() {
-        return plan.clone();
+    if is_plan_schema_determinant(plan) {
+        plan.clone()
     } else {
         plan.children()
-            .get(0)
+            .first()
             .map(find_final_schema_determinant)
             .unwrap_or(plan.clone())
     }
@@ -3457,37 +3421,16 @@ fn update_children(
     new_child: Arc<dyn ExecutionPlan>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let children = plan.children();
-    let Some(child) = children.get(0) else {
+    let Some(child) = children.first() else {
         return Ok(plan.clone());
     };
-    let child_any = child.as_any();
 
-    if child_any.downcast_ref::<ProjectionExec>().is_some() {
-        plan.with_new_children(vec![new_child])
-    } else if child_any.downcast_ref::<AggregateExec>().is_some() {
-        plan.with_new_children(vec![new_child])
-    } else if child_any.downcast_ref::<WindowAggExec>().is_some() {
-        plan.with_new_children(vec![new_child])
-    } else if child_any.downcast_ref::<BoundedWindowAggExec>().is_some() {
-        plan.with_new_children(vec![new_child])
-    } else if child_any.downcast_ref::<CrossJoinExec>().is_some() {
-        plan.with_new_children(vec![new_child])
-    } else if child_any.downcast_ref::<HashJoinExec>().is_some() {
-        plan.with_new_children(vec![new_child])
-    } else if child_any.downcast_ref::<SymmetricHashJoinExec>().is_some() {
-        plan.with_new_children(vec![new_child])
-    } else if child_any.downcast_ref::<NestedLoopJoinExec>().is_some() {
-        plan.with_new_children(vec![new_child])
-    } else if child_any.downcast_ref::<SortMergeJoinExec>().is_some() {
-        plan.with_new_children(vec![new_child])
-    } else if child_any.downcast_ref::<UnionExec>().is_some() {
-        plan.with_new_children(vec![new_child])
-    } else if child_any.downcast_ref::<InterleaveExec>().is_some() {
+    if is_plan_schema_determinant(child) {
         plan.with_new_children(vec![new_child])
     } else {
         let new_child = plan
             .children()
-            .get(0)
+            .first()
             .map(|c| update_children(c.clone(), new_child))
             .transpose()
             .map(|new_plan| new_plan.unwrap_or(plan.clone()))?;
