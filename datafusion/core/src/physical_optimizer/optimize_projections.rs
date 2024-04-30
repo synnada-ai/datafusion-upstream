@@ -15,40 +15,42 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! OptimizeProjections rule aims achieving the most effective use of projections
+//! OptimizeProjections rule aims to achieve the most effective use of projections
 //! in plans. It ensures that query plans are free from unnecessary projections
 //! and that no unused columns are propagated unnecessarily between plans.
 //!
 //! The rule is designed to enhance query performance by:
-//! 1. Preventing the transfer of unused columns from leaves to root.
+//! 1. Preventing the transfer of unused columns from leaves to the root.
 //! 2. Ensuring projections are used only when they contribute to narrowing the schema,
-//!    or when necessary for evaluation or aliasing.
+//!    or when necessary for evaluation or aliasing purposes.
 //!
-//! The optimization is conducted in two phases:
+//! The optimization works in two phases:
 //!
 //! Top-down Phase:
 //! ---------------
-//! - Traverses the plan from root to leaves. If the node is:
-//!   1. Projection node, it may:
-//!      a. Merge it with its input projection if merge is beneficial.
+//! - Traverses the plan from the root to leaves. If the node is:
+//!   1. A projection node, it may:
+//!      a. Merge it with its input projection if beneficial.
 //!      b. Remove the projection if it is redundant.
-//!      c. Narrow the Projection if possible.
-//!      d. The projection can be nested into the input.
-//!      e. Do nothing, otherwise.
-//!   2. Non-Projection node:
-//!      a. Schema needs pruning: Insert the necessary projection into input.
-//!      b. All fields are required: Do nothing.
+//!      c. Narrow the projection if possible.
+//!      d. Nest the projection into the input.
+//!      e. Do nothing.
+//!   2. A non-projection node, it may
+//!      a. Insert the necessary projection into input if the schema needs pruning.
+//!      b. Do nothing if all fields are necessary.
 //!
-//! Bottom-up Phase (resides in with_new_children() implementation of ConcreteTreeNode):
+//! Bottom-up Phase:
 //! ----------------
-//! This pass is required because modifying a plan node can change the column
-//! indices used by output nodes. When such a change occurs, we store the old
-//! and new indices of the columns in the node's state. We then proceed from
-//! the leaves to the root, updating the indices of columns in the plans by
-//! referencing these mapping records. After the top-down phase, also some
-//! unnecessary projections may emerge. When projections check its input schema
-//! mapping, it can remove itself and assign new schema mapping to the new node,
-//! which was the projection's input formerly.
+//! This phase is necessary because modifying a plan node in the top-down phase
+//! can require a change in column indices used by downstream nodes. When such a
+//! change occurs, we store the old and new indices of the columns in the node's
+//! state. We then proceed from the leaves to the root, updating column indices
+//! in the plans by referencing these mapping records. Furthermore, in certain
+//! cases, we can only deduce that a projection is unnecessary after completing
+//! the top-down traversal. We remove such projections in the bottom-up phase
+//! by checking their input schema mapping.
+//! The code implementing the bottom-up phase resides in the `with_new_children`
+//! implementation of the `ConcreteTreeNode` trait.
 
 use std::mem;
 use std::sync::Arc;
