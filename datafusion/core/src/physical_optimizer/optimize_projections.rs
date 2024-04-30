@@ -460,7 +460,12 @@ impl ProjectionOptimizer {
             return Ok(Transformed::no(self));
         };
         // If the projection does not narrow the schema, we should not try to push it down:
-        if projection.expr().len() >= projection.input().schema().fields().len() {
+        if projection.expr().len() >= projection.input().schema().fields().len()
+            || !projection.expr().iter().all(|(expr, _)| {
+                expr.as_any().downcast_ref::<Column>().is_some()
+                    || expr.as_any().downcast_ref::<Literal>().is_some()
+            })
+        {
             return Ok(Transformed::no(self));
         }
 

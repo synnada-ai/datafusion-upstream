@@ -290,8 +290,8 @@ physical_plan
 12)----------ProjectionExec: expr=[name@1 as name, CAST(id@0 AS Int32) as CAST(t2.id AS Int32)]
 13)------------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
 14)--------------MemoryExec: partitions=1, partition_sizes=[1]
-15)--CoalesceBatchesExec: target_batch_size=2
-16)----ProjectionExec: expr=[CAST(id@0 AS Int32) as id, name@1 as name]
+15)--ProjectionExec: expr=[CAST(id@0 AS Int32) as id, name@1 as name]
+16)----CoalesceBatchesExec: target_batch_size=2
 17)------HashJoinExec: mode=Partitioned, join_type=LeftAnti, on=[(CAST(t2.id AS Int32)@2, id@0), (name@1, name@1)], projection=[id@0, name@1]
 18)--------CoalesceBatchesExec: target_batch_size=2
 19)----------RepartitionExec: partitioning=Hash([CAST(t2.id AS Int32)@2, name@1], 4), input_partitions=4
