@@ -459,7 +459,9 @@ impl ProjectionOptimizer {
         let Some(projection) = self.plan.as_any().downcast_ref::<ProjectionExec>() else {
             return Ok(Transformed::no(self));
         };
-        // If the projection does not narrow the schema, we should not try to push it down:
+        // If the projection does not narrow the schema or it does some calculations,
+        // we should not try to push it down to have less computation during execution.
+        // (Making any computation dominates the existance of column elimination)
         if projection.expr().len() >= projection.input().schema().fields().len()
             || !projection.expr().iter().all(|(expr, _)| {
                 expr.as_any().downcast_ref::<Column>().is_some()
