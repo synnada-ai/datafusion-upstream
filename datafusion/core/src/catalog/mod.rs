@@ -330,14 +330,14 @@ mod tests {
         };
     }
 
-    #[test]
-    fn memory_catalog_dereg_nonempty_schema() {
+    #[tokio::test]
+    async fn memory_catalog_dereg_nonempty_schema() {
         let cat = Arc::new(MemoryCatalogProvider::new()) as Arc<dyn CatalogProvider>;
 
         let schema = Arc::new(MemorySchemaProvider::new()) as Arc<dyn SchemaProvider>;
         let test_table = Arc::new(EmptyTable::new(Arc::new(Schema::empty())))
             as Arc<dyn TableProvider>;
-        schema.register_table("t".into(), test_table).unwrap();
+        schema.register_table("t".into(), test_table).await.unwrap();
 
         cat.register_schema("foo", schema.clone()).unwrap();
 

@@ -60,7 +60,7 @@ pub trait SchemaProvider: Sync + Send {
     /// If a table of the same name was already registered, returns "Table
     /// already exists" error.
     #[allow(unused_variables)]
-    fn register_table(
+    async fn register_table(
         &self,
         name: String,
         table: Arc<dyn TableProvider>,
@@ -73,7 +73,7 @@ pub trait SchemaProvider: Sync + Send {
     ///
     /// If no `name` table exists, returns Ok(None).
     #[allow(unused_variables)]
-    fn deregister_table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>> {
+    async fn deregister_table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>> {
         exec_err!("schema provider does not support deregistering tables")
     }
 
@@ -107,7 +107,7 @@ impl SchemaProvider for MemorySchemaProvider {
         self
     }
 
-    fn table_names(&self) -> Vec<String> {
+    async fn table_names(&self) -> Vec<String> {
         self.tables
             .iter()
             .map(|table| table.key().clone())
@@ -121,7 +121,7 @@ impl SchemaProvider for MemorySchemaProvider {
         Ok(self.tables.get(name).map(|table| table.value().clone()))
     }
 
-    fn register_table(
+    async fn register_table(
         &self,
         name: String,
         table: Arc<dyn TableProvider>,
@@ -132,11 +132,11 @@ impl SchemaProvider for MemorySchemaProvider {
         Ok(self.tables.insert(name, table))
     }
 
-    fn deregister_table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>> {
+    async fn deregister_table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>> {
         Ok(self.tables.remove(name).map(|(_, table)| table))
     }
 
-    fn table_exist(&self, name: &str) -> bool {
+    async fn table_exist(&self, name: &str) -> bool {
         self.tables.contains_key(name)
     }
 }
@@ -163,13 +163,13 @@ mod tests {
         let test_table = EmptyTable::new(Arc::new(Schema::empty()));
         // register table successfully
         assert!(provider
-            .register_table(table_name.to_string(), Arc::new(test_table))
+            .register_table(table_name.to_string(), Arc::new(test_table)).await
             .unwrap()
             .is_none());
         assert!(provider.table_exist(table_name));
         let other_table = EmptyTable::new(Arc::new(Schema::empty()));
         let result =
-            provider.register_table(table_name.to_string(), Arc::new(other_table));
+            provider.register_table(table_name.to_string(), Arc::new(other_table)).await;
         assert!(result.is_err());
     }
 
@@ -201,7 +201,7 @@ mod tests {
         let table = ListingTable::try_new(config).unwrap();
 
         schema
-            .register_table("alltypes_plain".to_string(), Arc::new(table))
+            .register_table("alltypes_plain".to_string(), Arc::new(table)).await
             .unwrap();
 
         catalog.register_schema("active", Arc::new(schema)).unwrap();

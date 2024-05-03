@@ -1121,7 +1121,7 @@ impl SessionContext {
     ///
     /// Returns the [`TableProvider`] previously registered for this
     /// reference, if any
-    pub fn register_table(
+    pub async fn register_table(
         &self,
         table_ref: impl Into<TableReference>,
         provider: Arc<dyn TableProvider>,
@@ -1131,13 +1131,13 @@ impl SessionContext {
         self.state
             .read()
             .schema_for_ref(table_ref)?
-            .register_table(table, provider)
+            .register_table(table, provider).await
     }
 
     /// Deregisters the given table.
     ///
     /// Returns the registered provider, if any
-    pub fn deregister_table(
+    pub async fn deregister_table(
         &self,
         table_ref: impl Into<TableReference>,
     ) -> Result<Option<Arc<dyn TableProvider>>> {
@@ -1146,7 +1146,7 @@ impl SessionContext {
         self.state
             .read()
             .schema_for_ref(table_ref)?
-            .deregister_table(&table)
+            .deregister_table(&table).await
     }
 
     /// Return `true` if the specified table exists in the schema provider.

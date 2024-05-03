@@ -153,7 +153,7 @@ impl ListingSchemaProvider {
                         },
                     )
                     .await?;
-                let _ = self.register_table(table_name.to_string(), provider.clone())?;
+                let _ = self.register_table(table_name.to_string(), provider.clone()).await?;
             }
         }
         Ok(())
