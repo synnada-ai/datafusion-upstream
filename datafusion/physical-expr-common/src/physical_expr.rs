@@ -28,6 +28,7 @@ use datafusion_common::utils::DataPtr;
 use datafusion_common::{internal_err, not_impl_err, Result};
 use datafusion_expr::interval_arithmetic::Interval;
 use datafusion_expr::ColumnarValue;
+use indexmap::IndexMap;
 
 use crate::sort_properties::SortProperties;
 use crate::utils::scatter;
@@ -207,5 +208,54 @@ pub fn down_cast_any_ref(any: &dyn Any) -> &dyn Any {
             .as_any()
     } else {
         any
+    }
+}
+
+#[derive(Debug)]
+pub struct ExprMapping {
+    pub map: IndexMap<ExprWrapper, Option<ExprWrapper>>,
+}
+
+impl ExprMapping {
+    pub fn insert(
+        &mut self,
+        key: Arc<dyn PhysicalExpr>,
+        value: Option<Arc<dyn PhysicalExpr>>,
+    ) -> Option<Option<Arc<dyn PhysicalExpr>>> {
+        self.map
+            .insert(
+                ExprWrapper { expr: key },
+                value.map(|v| ExprWrapper { expr: v }),
+            )
+            .map(|wrapper| wrapper.map(|w| w.expr))
+    }
+
+    pub fn get(
+        &self,
+        key: Arc<dyn PhysicalExpr>,
+    ) -> Option<Option<Arc<dyn PhysicalExpr>>> {
+        let key_wrapper = ExprWrapper { expr: key };
+        self.map
+            .get(&key_wrapper)
+            .map(|value| value.as_ref().map(|v| v.expr.clone()))
+    }
+}
+
+#[derive(Debug)]
+pub struct ExprWrapper {
+    pub expr: Arc<dyn PhysicalExpr>,
+}
+
+impl PartialEq for ExprWrapper {
+    fn eq(&self, other: &ExprWrapper) -> bool {
+        self.expr.eq(&other.expr)
+    }
+}
+
+impl Eq for ExprWrapper {}
+
+impl Hash for ExprWrapper {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.expr.hash(state);
     }
 }

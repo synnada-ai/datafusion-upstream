@@ -48,6 +48,8 @@ use datafusion_execution::memory_pool::MemoryConsumer;
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr::{EquivalenceProperties, PhysicalExpr, PhysicalSortExpr};
 
+use datafusion_physical_expr_common::expressions::column::update_expression;
+use datafusion_physical_expr_common::physical_expr::ExprMapping;
 use futures::stream::Stream;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use hashbrown::HashMap;
@@ -659,6 +661,35 @@ impl ExecutionPlan for RepartitionExec {
 
     fn statistics(&self) -> Result<Statistics> {
         self.input.statistics()
+    }
+
+    fn expressions(&self) -> Option<Vec<Arc<dyn PhysicalExpr>>> {
+        if let Partitioning::Hash(exprs, _size) = self.partitioning() {
+            Some(exprs.clone())
+        } else {
+            Some(vec![])
+        }
+    }
+
+    fn update_expressions(
+        self: Arc<Self>,
+        map: &ExprMapping,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        let new_partitioning = if let Partitioning::Hash(exprs, size) = &self.partitioning
+        {
+            let updated_exprs = exprs
+                .iter()
+                .map(|expr| update_expression(expr.clone(), map))
+                .collect::<Vec<_>>();
+            Partitioning::Hash(updated_exprs.into_iter().flatten().collect(), *size)
+        } else {
+            self.partitioning.clone()
+        };
+
+        Ok(Some(Arc::new(RepartitionExec::try_new(
+            self.input.clone(),
+            new_partitioning,
+        )?)))
     }
 }
 

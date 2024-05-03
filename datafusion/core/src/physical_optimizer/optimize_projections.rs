@@ -67,13 +67,13 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{
     ConcreteTreeNode, Transformed, TreeNode, TreeNodeRecursion,
 };
-use datafusion_common::{internal_err, JoinSide, JoinType};
-use datafusion_physical_expr::expressions::{Column, Literal};
+use datafusion_common::{JoinSide, JoinType};
+use datafusion_physical_expr::expressions::{update_expression, Column, Literal};
 use datafusion_physical_expr::utils::collect_columns;
 use datafusion_physical_expr::window::WindowExpr;
 use datafusion_physical_expr::{
-    AggregateExpr, LexOrdering, Partitioning, PhysicalExpr, PhysicalExprRef,
-    PhysicalSortExpr,
+    AggregateExpr, ExprMapping, ExprWrapper, LexOrdering, Partitioning, PhysicalExpr,
+    PhysicalExprRef, PhysicalSortExpr,
 };
 use datafusion_physical_plan::aggregates::{
     AggregateExec, AggregateMode, PhysicalGroupBy,
@@ -578,24 +578,15 @@ impl ProjectionOptimizer {
         }
         // ------------------------------------------------------------------------
         // These plans also preserve the input schema, but may extend requirements.
-        else if let Some(filter) = plan.as_any().downcast_ref::<FilterExec>() {
-            self = self.try_insert_below_filter(filter)?;
-        } else if let Some(repartition) = plan.as_any().downcast_ref::<RepartitionExec>()
-        {
-            self = self.try_insert_below_repartition(repartition)?;
-        } else if let Some(sort) = plan.as_any().downcast_ref::<SortExec>() {
-            self = self.try_insert_below_sort(sort)?;
-        } else if let Some(sort_merge) =
-            plan.as_any().downcast_ref::<SortPreservingMergeExec>()
-        {
-            self = self.try_insert_below_sort_preserving_merge(sort_merge)?;
+        else if is_plan_requirement_extender(&plan) {
+            self = self.try_insert_below_req_extender()?;
         }
         // ------------------------------------------------------------------------
         // Preserves schema and do not change requirements, but have multi-child.
-        else if plan.as_any().downcast_ref::<UnionExec>().is_some() {
+        else if plan.as_any().downcast_ref::<UnionExec>().is_some()
+            || plan.as_any().downcast_ref::<InterleaveExec>().is_some()
+        {
             self = self.try_insert_below_union()?;
-        } else if plan.as_any().downcast_ref::<InterleaveExec>().is_some() {
-            self = self.try_insert_below_interleave()?;
         }
         // ------------------------------------------------------------------------
         // Concatenates schemas and do not change requirements.
@@ -619,21 +610,23 @@ impl ProjectionOptimizer {
                 return Ok(self);
             }
             self = self.try_insert_below_aggregate(agg)?
-        } else if let Some(w_agg) = plan.as_any().downcast_ref::<WindowAggExec>() {
-            if !is_window_expr_rewritable(w_agg.window_expr()) {
-                self.children_nodes[0].required_columns =
-                    collect_columns_in_plan_schema(&self.children_nodes[0].plan);
-                return Ok(self);
-            }
-            self = self.try_insert_below_window_aggregate(w_agg)?
-        } else if let Some(bw_agg) = plan.as_any().downcast_ref::<BoundedWindowAggExec>()
+        } else if plan.as_any().downcast_ref::<WindowAggExec>().is_some()
+            || plan
+                .as_any()
+                .downcast_ref::<BoundedWindowAggExec>()
+                .is_some()
         {
-            if !is_window_expr_rewritable(bw_agg.window_expr()) {
-                self.children_nodes[0].required_columns =
-                    collect_columns_in_plan_schema(&self.children_nodes[0].plan);
-                return Ok(self);
+            let window_exprs = collect_window_expressions(&self.plan);
+            self = match self.try_insert_below_window_execs(window_exprs)? {
+                optimized if optimized.transformed => optimized.data,
+                mut no_change => {
+                    no_change.data.children_nodes[0].required_columns =
+                        collect_columns_in_plan_schema(
+                            &no_change.data.children_nodes[0].plan,
+                        );
+                    return Ok(no_change.data);
+                }
             }
-            self = self.try_insert_below_bounded_window_aggregate(bw_agg)?
         } else {
             self.children_nodes.iter_mut().for_each(|c| {
                 c.required_columns = collect_columns_in_plan_schema(&c.plan)
@@ -662,141 +655,29 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
-    /// Attempts to insert a projection node below a `FilterExec` node. Extends the required columns
-    /// with those in the filter's predicate and optimizes the plan, potentially inserting a projection node.
-    fn try_insert_below_filter(
-        mut self,
-        filter: &FilterExec,
-    ) -> Result<ProjectionOptimizer> {
-        // FilterExec extends the requirements with the columns in its predicate.
+    fn try_insert_below_req_extender(mut self) -> Result<ProjectionOptimizer> {
+        let Some(columns) = self.plan.expressions() else {
+            return Ok(self);
+        };
         self.required_columns
-            .extend(collect_columns(filter.predicate()));
-
+            .extend(columns.into_iter().flat_map(|e| collect_columns(&e)));
         let requirement_map = analyze_requirements(&self);
         if all_columns_required(&requirement_map) {
             self.children_nodes[0].required_columns =
                 mem::take(&mut self.required_columns);
         } else {
+            let plan = self.plan.clone();
             let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
-            // Rewrite the predicate with possibly updated column indices.
-            let new_predicate = update_column_index(filter.predicate(), &schema_mapping);
-            let plan =
-                Arc::new(FilterExec::try_new(new_predicate, new_child.plan.clone())?);
+
+            let Some(new_plan) =
+                plan.update_expressions(&expr_mapping(schema_mapping.clone()))?
+            else {
+                return Err(datafusion_common::DataFusionError::Internal(
+                    "Plans implementing expressions() must also implement update_expressions()".to_string()));
+            };
 
             self = ProjectionOptimizer {
-                plan,
-                required_columns: IndexSet::new(), // clear the requirements
-                schema_mapping,
-                children_nodes: vec![new_child],
-            }
-        }
-        Ok(self)
-    }
-
-    /// Attempts to insert a projection node below a `RepartitionExec` node. If `RepartitionExec` involves
-    /// a hash repartition, it extends the requirements with the columns in the hashed expressions.
-    /// The method then optimizes the execution plan accordingly.
-    fn try_insert_below_repartition(
-        mut self,
-        repartition: &RepartitionExec,
-    ) -> Result<ProjectionOptimizer> {
-        // If RepartitionExec applies a hash repartition, it extends
-        // the requirements with the columns in the hashed expressions.
-        if let Partitioning::Hash(exprs, _size) = repartition.partitioning() {
-            self.required_columns
-                .extend(exprs.iter().flat_map(collect_columns));
-        }
-
-        let requirement_map = analyze_requirements(&self);
-        if all_columns_required(&requirement_map) {
-            self.children_nodes[0].required_columns =
-                mem::take(&mut self.required_columns);
-        } else {
-            let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
-            // Rewrite the expression if there is any with possibly updated column indices.
-            let new_partitioning = update_partitioning_expressions(
-                repartition.partitioning(),
-                &schema_mapping,
-            );
-            let plan = Arc::new(RepartitionExec::try_new(
-                new_child.plan.clone(),
-                new_partitioning,
-            )?);
-
-            self = ProjectionOptimizer {
-                plan,
-                required_columns: IndexSet::new(), // clear the requirements
-                schema_mapping,
-                children_nodes: vec![new_child],
-            }
-        }
-        Ok(self)
-    }
-
-    /// Attempts to insert a projection node below a `SortExec` node. Extends the requirements with columns
-    /// involved in the sort expressions and optimizes the execution plan, potentially inserting a projection node.
-    fn try_insert_below_sort(mut self, sort: &SortExec) -> Result<ProjectionOptimizer> {
-        // SortExec extends the requirements with the columns in its sort expressions.
-        self.required_columns.extend(
-            sort.expr()
-                .iter()
-                .flat_map(|sort_expr| collect_columns(&sort_expr.expr)),
-        );
-
-        let requirement_map = analyze_requirements(&self);
-        if all_columns_required(&requirement_map) {
-            self.children_nodes[0].required_columns =
-                mem::take(&mut self.required_columns);
-        } else {
-            let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
-            // Rewrite the sort expressions with possibly updated column indices.
-            let new_sort_exprs = update_sort_expressions(sort.expr(), &schema_mapping);
-            let plan = Arc::new(
-                SortExec::new(new_sort_exprs, new_child.plan.clone())
-                    .with_preserve_partitioning(sort.preserve_partitioning())
-                    .with_fetch(sort.fetch()),
-            );
-
-            self = ProjectionOptimizer {
-                plan,
-                required_columns: IndexSet::new(), // clear the requirements
-                schema_mapping,
-                children_nodes: vec![new_child],
-            }
-        }
-        Ok(self)
-    }
-
-    /// Attempts to insert a projection node below a `SortPreservingMergeExec` node. Similar to `try_insert_below_sort`,
-    /// it extends the requirements with columns in the sort expressions and optimizes the plan accordingly.
-    fn try_insert_below_sort_preserving_merge(
-        mut self,
-        sort_merge: &SortPreservingMergeExec,
-    ) -> Result<ProjectionOptimizer> {
-        // SortPreservingMergeExec extends the requirements with the columns in its sort expressions.
-        self.required_columns.extend(
-            sort_merge
-                .expr()
-                .iter()
-                .flat_map(|sort_expr| collect_columns(&sort_expr.expr)),
-        );
-
-        let requirement_map = analyze_requirements(&self);
-        if all_columns_required(&requirement_map) {
-            self.children_nodes[0].required_columns =
-                mem::take(&mut self.required_columns);
-        } else {
-            let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
-            // Rewrite the sort expressions with possibly updated column indices.
-            let new_sort_exprs =
-                update_sort_expressions(sort_merge.expr(), &schema_mapping);
-            let plan = Arc::new(
-                SortPreservingMergeExec::new(new_sort_exprs, new_child.plan.clone())
-                    .with_fetch(sort_merge.fetch()),
-            );
-
-            self = ProjectionOptimizer {
-                plan,
+                plan: new_plan,
                 required_columns: IndexSet::new(), // clear the requirements
                 schema_mapping,
                 children_nodes: vec![new_child],
@@ -821,44 +702,15 @@ impl ProjectionOptimizer {
                 c.required_columns = required_columns.clone();
             }
         } else {
+            let plan = self.plan.clone();
             let (new_children, schema_mapping) =
                 self.insert_multi_projection_below_union(requirement_map)?;
-            let plan = Arc::new(UnionExec::new(
+            let new_plan = plan.clone().with_new_children(
                 new_children.iter().map(|c| c.plan.clone()).collect(),
-            ));
+            )?;
 
             self = ProjectionOptimizer {
-                plan,
-                required_columns: IndexSet::new(), // clear the requirements
-                schema_mapping,
-                children_nodes: new_children,
-            }
-        }
-        Ok(self)
-    }
-
-    /// Attempts to insert a projection node below an `InterleaveExec` node in the query execution plan.
-    ///
-    /// Similar to `try_insert_below_union`, this method analyzes the requirements of the `InterleaveExec` node and
-    /// modifies the execution plan accordingly. If all columns are required, it updates the required columns for
-    /// each child node. Otherwise, it inserts new projection nodes for optimization. This process can lead to a
-    /// more efficient execution by minimizing the data processed in the context of interleaved execution.
-    fn try_insert_below_interleave(mut self) -> Result<ProjectionOptimizer> {
-        let requirement_map = analyze_requirements(&self);
-        if all_columns_required(&requirement_map) {
-            let required_columns = mem::take(&mut self.required_columns);
-            for c in self.children_nodes.iter_mut() {
-                c.required_columns = required_columns.clone();
-            }
-        } else {
-            let (new_children, schema_mapping) =
-                self.insert_multi_projection_below_union(requirement_map)?;
-            let plan = Arc::new(InterleaveExec::try_new(
-                new_children.iter().map(|c| c.plan.clone()).collect(),
-            )?) as _;
-
-            self = ProjectionOptimizer {
-                plan,
+                plan: new_plan,
                 required_columns: IndexSet::new(), // clear the requirements
                 schema_mapping,
                 children_nodes: new_children,
@@ -2244,84 +2096,75 @@ impl ProjectionOptimizer {
         Ok(self)
     }
 
-    fn try_insert_below_window_aggregate(
+    fn try_insert_below_window_execs(
         mut self,
-        w_agg: &WindowAggExec,
-    ) -> Result<ProjectionOptimizer> {
-        // Both tries to insert a projection to narrow input columns, and tries to narrow the window
-        // expressions. If none of them survives, we can even remove the window execution plan.
+        window_exprs: Vec<Arc<dyn WindowExpr>>,
+    ) -> Result<Transformed<ProjectionOptimizer>> {
+        let Some(columns) = self.plan.expressions() else {
+            return Ok(Transformed::no(self));
+        };
         self.required_columns
-            .extend(w_agg.window_expr().iter().flat_map(|window_expr| {
-                window_expr
-                    .expressions()
-                    .iter()
-                    .flat_map(collect_columns)
-                    .collect::<Vec<_>>()
-            }));
-        self.required_columns
-            .extend(w_agg.partition_keys.iter().flat_map(collect_columns));
-        let requirement_map = analyze_requirements(&self);
+            .extend(columns.into_iter().flat_map(|e| collect_columns(&e)));
 
+        let requirement_map = analyze_requirements(&self);
         if !all_columns_required(&requirement_map) {
-            if window_agg_required(
-                w_agg.input().schema().fields().len(),
+            if window_exec_required(
+                self.plan.children()[0].schema().fields().len(),
                 &requirement_map,
             ) {
-                if w_agg
-                    .window_expr()
-                    .iter()
-                    .any(|expr| expr.clone().with_new_expressions(vec![]).is_none())
-                {
+                if window_exprs.iter().any(|expr| {
+                    expr.clone()
+                        .update_expression(&expr_mapping(IndexMap::new()))
+                        .is_none()
+                }) {
                     self.children_nodes[0].required_columns = self
                         .required_columns
                         .iter()
                         .filter(|col| {
                             col.index()
-                                < w_agg.schema().fields().len()
-                                    - w_agg.window_expr().len()
+                                < self.plan.schema().fields().len() - window_exprs.len()
                         })
                         .cloned()
                         .collect();
-                    return Ok(self);
+                    return Ok(Transformed::no(self));
                 }
+                let plan = self.plan.clone();
                 let (new_child, schema_mapping, window_usage) =
-                    self.insert_projection_below_window(w_agg, requirement_map)?;
-                // Rewrite the sort expressions with possibly updated column indices.
-                let Some(new_window_exprs) = w_agg
-                    .window_expr()
-                    .iter()
-                    .zip(window_usage.clone())
-                    .filter(|(_window_expr, (_window_col, usage))| *usage)
-                    .map(|(window_expr, (_window_col, _usage))| {
-                        let new_exprs = update_expressions(
-                            &window_expr.expressions(),
-                            &IndexMap::new(),
-                        );
-                        window_expr.clone().with_new_expressions(new_exprs)
-                    })
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    return internal_err!(
-                        "Window expression {:?} must implement with_new_expressions() API", w_agg.window_expr()
-                    );
-                };
+                    self.insert_projection_below_window(requirement_map)?;
 
-                let new_keys = w_agg
-                    .partition_keys
+                let mut with_removed_exprs = schema_mapping
                     .iter()
-                    .zip(window_usage)
-                    .filter_map(|(key, (_column, usage))| {
-                        usage.then(|| update_column_index(key, &schema_mapping))
+                    .map(|(col1, col2)| {
+                        (
+                            Arc::new(col1.clone()) as Arc<dyn PhysicalExpr>,
+                            Some(Arc::new(col2.clone()) as Arc<dyn PhysicalExpr>),
+                        )
                     })
-                    .collect();
-                let plan = Arc::new(WindowAggExec::try_new(
-                    new_window_exprs,
-                    new_child.plan.clone(),
-                    new_keys,
-                )?) as _;
+                    .collect::<Vec<_>>();
+                window_usage.iter().for_each(|(column, usage)| {
+                    if !*usage {
+                        with_removed_exprs.iter_mut().for_each(|(p1, p2)| {
+                            if p1
+                                .as_any()
+                                .downcast_ref::<Column>()
+                                .map(|c| c == column)
+                                .unwrap_or(false)
+                            {
+                                *p2 = None
+                            }
+                        });
+                    }
+                });
+                let Some(new_plan) = plan
+                    .clone()
+                    .update_expressions(&expr_mapping(schema_mapping.clone()))?
+                else {
+                    return Err(datafusion_common::DataFusionError::Internal(
+                    "Plans implementing expressions() must also implement update_expressions()".to_string()));
+                };
                 let required_columns = collect_columns_in_plan_schema(&plan);
                 self = ProjectionOptimizer {
-                    plan,
+                    plan: new_plan,
                     required_columns,
                     schema_mapping,
                     children_nodes: vec![new_child],
@@ -2340,113 +2183,11 @@ impl ProjectionOptimizer {
                     .into_iter()
                     .filter(|col| {
                         col.index()
-                            < w_agg.schema().fields().len() - w_agg.window_expr().len()
+                            < self.plan.schema().fields().len() - window_exprs.len()
                     })
                     .collect();
         }
-        Ok(self)
-    }
-
-    fn try_insert_below_bounded_window_aggregate(
-        mut self,
-        bw_agg: &BoundedWindowAggExec,
-    ) -> Result<ProjectionOptimizer> {
-        // Both tries to insert a projection to narrow input columns, and tries to narrow the window
-        // expressions. If none of them survives, we can even remove the window execution plan.
-        self.required_columns
-            .extend(bw_agg.window_expr().iter().flat_map(|window_expr| {
-                window_expr
-                    .expressions()
-                    .iter()
-                    .flat_map(collect_columns)
-                    .collect::<Vec<_>>()
-            }));
-        self.required_columns
-            .extend(bw_agg.partition_keys.iter().flat_map(collect_columns));
-        let requirement_map = analyze_requirements(&self);
-        if !all_columns_required(&requirement_map) {
-            if window_agg_required(
-                bw_agg.input().schema().fields().len(),
-                &requirement_map,
-            ) {
-                if bw_agg
-                    .window_expr()
-                    .iter()
-                    .any(|expr| expr.clone().with_new_expressions(vec![]).is_none())
-                {
-                    self.children_nodes[0].required_columns =
-                        mem::take(&mut self.required_columns)
-                            .into_iter()
-                            .filter(|col| {
-                                col.index()
-                                    < bw_agg.schema().fields().len()
-                                        - bw_agg.window_expr().len()
-                            })
-                            .collect();
-                    return Ok(self);
-                }
-                let (new_child, schema_mapping, window_usage) =
-                    self.insert_projection_below_bounded_window(bw_agg, requirement_map)?;
-                // Rewrite the sort expressions with possibly updated column indices.
-                let Some(new_window_exprs) = bw_agg
-                    .window_expr()
-                    .iter()
-                    .zip(window_usage.clone())
-                    .filter(|(_window_expr, (_window_col, usage))| *usage)
-                    .map(|(window_expr, (_window_col, _usage))| {
-                        let new_exprs = update_expressions(
-                            &window_expr.expressions(),
-                            &schema_mapping,
-                        );
-                        window_expr.clone().with_new_expressions(new_exprs)
-                    })
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    return internal_err!(
-                        "Bounded window expression {:?} must implement with_new_expressions() API", bw_agg.window_expr()
-                    );
-                };
-
-                let new_keys = bw_agg
-                    .partition_keys
-                    .iter()
-                    .zip(window_usage)
-                    .filter_map(|(key, (_column, usage))| {
-                        usage.then(|| update_column_index(key, &schema_mapping))
-                    })
-                    .collect();
-                let plan = Arc::new(BoundedWindowAggExec::try_new(
-                    new_window_exprs,
-                    new_child.plan.clone(),
-                    new_keys,
-                    bw_agg.input_order_mode.clone(),
-                )?) as _;
-                let required_columns = collect_columns_in_plan_schema(&plan);
-                self = ProjectionOptimizer {
-                    plan,
-                    required_columns,
-                    schema_mapping,
-                    children_nodes: vec![new_child],
-                }
-            } else {
-                // Remove the WindowAggExec
-                self = self.children_nodes.swap_remove(0);
-                self.required_columns = requirement_map
-                    .into_iter()
-                    .filter_map(|(column, used)| if used { Some(column) } else { None })
-                    .collect();
-            }
-        } else {
-            self.children_nodes[0].required_columns =
-                mem::take(&mut self.required_columns)
-                    .into_iter()
-                    .filter(|col| {
-                        col.index()
-                            < bw_agg.schema().fields().len() - bw_agg.window_expr().len()
-                    })
-                    .collect();
-        }
-        Ok(self)
+        Ok(Transformed::no(self))
     }
 
     /// If a node is known to have redundant columns, we need to insert a projection to its input.
@@ -2664,52 +2405,15 @@ impl ProjectionOptimizer {
     /// `insert_projection` for windows.
     fn insert_projection_below_window(
         self,
-        w_agg: &WindowAggExec,
         requirement_map: ColumnRequirements,
     ) -> Result<(Self, IndexMap<Column, Column>, ColumnRequirements)> {
-        let original_schema_len = w_agg.schema().fields().len();
+        let original_schema_len = self.plan.schema().fields().len();
         let (base, window): (ColumnRequirements, ColumnRequirements) = requirement_map
             .into_iter()
             .partition(|(column, _used)| column.index() < original_schema_len);
         let (used_columns, mut unused_columns) = partition_column_requirements(base);
         let projected_exprs = convert_projection_exprs(used_columns);
 
-        for (col, used) in window.iter() {
-            if !used {
-                unused_columns.insert(col.clone());
-            }
-        }
-        let inserted_projection = Arc::new(ProjectionExec::try_new(
-            projected_exprs,
-            self.plan.children()[0].clone(),
-        )?) as _;
-
-        let new_mapping =
-            calculate_column_mapping(&self.required_columns, &unused_columns);
-
-        let new_requirements = collect_columns_in_plan_schema(&inserted_projection);
-        let inserted_projection = ProjectionOptimizer {
-            plan: inserted_projection,
-            // Required columns must have been extended with self node requirements before this point.
-            required_columns: new_requirements,
-            schema_mapping: IndexMap::new(),
-            children_nodes: self.children_nodes,
-        };
-        Ok((inserted_projection, new_mapping, window))
-    }
-
-    /// `insert_projection` for bounded windows.
-    fn insert_projection_below_bounded_window(
-        self,
-        bw_agg: &BoundedWindowAggExec,
-        requirement_map: ColumnRequirements,
-    ) -> Result<(Self, IndexMap<Column, Column>, ColumnRequirements)> {
-        let original_schema_len = bw_agg.schema().fields().len();
-        let (base, window): (ColumnRequirements, ColumnRequirements) = requirement_map
-            .into_iter()
-            .partition(|(column, _used)| column.index() < original_schema_len);
-        let (required_cols, mut unused_columns) = partition_column_requirements(base);
-        let projected_exprs = convert_projection_exprs(required_cols);
         for (col, used) in window.iter() {
             if !used {
                 unused_columns.insert(col.clone());
@@ -2860,7 +2564,7 @@ impl ProjectionOptimizer {
             } else if let Some(agg) = plan_any.downcast_ref::<AggregateExec>() {
                 if agg.aggr_expr().iter().any(|expr| {
                     expr.clone()
-                        .with_new_expressions(expr.expressions())
+                        .update_expression(&expr_mapping(all_mappings[0].clone()))
                         .is_none()
                         && !self.children_nodes[0].schema_mapping.is_empty()
                 }) {
@@ -2945,9 +2649,9 @@ impl ProjectionOptimizer {
                     .iter()
                     .map(|child| child.plan.clone())
                     .collect(),
-            );
+            )?;
 
-            self.plan = res?;
+            self.plan = res;
         }
 
         Ok(Transformed::yes(self))
@@ -3718,6 +3422,20 @@ fn collect_right_hj_right_requirements(
     hj_right_requirements
 }
 
+fn collect_window_expressions(
+    window_exec: &Arc<dyn ExecutionPlan>,
+) -> Vec<Arc<dyn WindowExpr>> {
+    if let Some(window) = window_exec.as_any().downcast_ref::<WindowAggExec>() {
+        window.window_expr().to_vec()
+    } else if let Some(bounded_window) =
+        window_exec.as_any().downcast_ref::<BoundedWindowAggExec>()
+    {
+        bounded_window.window_expr().to_vec()
+    } else {
+        vec![]
+    }
+}
+
 /// Given the expressions of a projection, checks if the projection causes
 /// any renaming or constructs a non-`Column` physical expression. If all
 /// expressions are `Column`, then they are collected and returned. If not,
@@ -3803,43 +3521,23 @@ fn update_expr_with_projection(
     new_expr.map(|e| (state == RewriteState::RewrittenValid).then_some(e.data))
 }
 
-/// Rewrites the expressions with new index values.
-fn update_expressions(
-    exprs: &[Arc<dyn PhysicalExpr>],
-    mapping: &IndexMap<Column, Column>,
-) -> Vec<Arc<dyn PhysicalExpr>> {
-    exprs
-        .iter()
-        .map(|expr| update_column_index(expr, mapping))
-        .collect::<Vec<_>>()
-}
-
 /// Rewrites the sort expressions with new index values.
 fn update_sort_expressions(
     sort_exprs: &[PhysicalSortExpr],
     mapping: &IndexMap<Column, Column>,
 ) -> LexOrdering {
+    let expr_map = expr_mapping(mapping.clone());
     sort_exprs
         .iter()
-        .map(|sort_expr| PhysicalSortExpr {
-            expr: update_column_index(&sort_expr.expr, mapping),
-            options: sort_expr.options,
+        .filter_map(|sort_expr| {
+            update_expression(sort_expr.expr.clone(), &expr_map).map(|expr| {
+                PhysicalSortExpr {
+                    expr,
+                    options: sort_expr.options,
+                }
+            })
         })
         .collect::<Vec<_>>()
-}
-
-/// Updates the expressions subject to hashing of the `Partitioning` according to
-/// the mapping. If it is not a hash partitioning, they remains as they are.
-fn update_partitioning_expressions(
-    partitioning: &Partitioning,
-    mapping: &IndexMap<Column, Column>,
-) -> Partitioning {
-    if let Partitioning::Hash(exprs, size) = partitioning {
-        let updated_exprs = update_expressions(exprs, mapping);
-        Partitioning::Hash(updated_exprs, *size)
-    } else {
-        partitioning.clone()
-    }
 }
 
 /// Rewrites the window expressions with new index values.
@@ -3850,8 +3548,9 @@ fn update_window_exprs(
     window_exprs
         .iter()
         .map(|window_expr| {
-            let new_exprs = update_expressions(&window_expr.expressions(), mapping);
-            window_expr.clone().with_new_expressions(new_exprs)
+            window_expr
+                .clone()
+                .update_expression(&expr_mapping(mapping.clone()))
         })
         .collect::<Option<Vec<_>>>()
 }
@@ -3864,13 +3563,9 @@ fn update_aggregate_exprs(
     aggregate_exprs
         .iter()
         .map(|aggr_expr| {
-            aggr_expr.clone().with_new_expressions(
-                aggr_expr
-                    .expressions()
-                    .iter()
-                    .map(|expr| update_column_index(expr, mapping))
-                    .collect(),
-            )
+            aggr_expr
+                .clone()
+                .update_expression(&expr_mapping(mapping.clone()))
         })
         .collect::<Option<Vec<_>>>()
 }
@@ -3881,44 +3576,20 @@ fn update_join_on(
     left_mapping: &IndexMap<Column, Column>,
     right_mapping: &IndexMap<Column, Column>,
 ) -> JoinOn {
+    let left_expr_map = expr_mapping(left_mapping.clone());
+    let right_expr_map = expr_mapping(right_mapping.clone());
     join_on
         .iter()
-        .map(|(left, right)| {
-            (
-                update_column_index(left, left_mapping),
-                update_column_index(right, right_mapping),
-            )
+        .filter_map(|(left, right)| {
+            match (
+                update_expression(left.clone(), &left_expr_map),
+                update_expression(right.clone(), &right_expr_map),
+            ) {
+                (Some(left), Some(right)) => Some((left, right)),
+                _ => None,
+            }
         })
         .collect()
-}
-
-/// Given mapping representing the initial and new index values,
-/// it updates the indices of columns in the [`PhysicalExpr`].
-fn update_column_index(
-    expr: &Arc<dyn PhysicalExpr>,
-    mapping: &IndexMap<Column, Column>,
-) -> Arc<dyn PhysicalExpr> {
-    let mut state = RewriteState::Unchanged;
-    let new_expr = expr
-        .clone()
-        .transform_up(|expr: Arc<dyn PhysicalExpr>| {
-            if state == RewriteState::RewrittenInvalid {
-                return Ok(Transformed::no(expr));
-            }
-            let Some(column) = expr.as_any().downcast_ref::<Column>() else {
-                return Ok(Transformed::no(expr));
-            };
-            state = RewriteState::RewrittenValid;
-            // Update the index of `column`:
-            if let Some(updated) = mapping.get(column) {
-                Ok(Transformed::yes(Arc::new(updated.clone()) as _))
-            } else {
-                Ok(Transformed::no(expr.clone()))
-            }
-        })
-        .unwrap()
-        .data;
-    new_expr
 }
 
 /// Updates the equivalence conditions of the joins according to the new indices of columns.
@@ -4353,8 +4024,14 @@ fn rewrite_filter(
     input_plan: Arc<dyn ExecutionPlan>,
     mapping: &IndexMap<Column, Column>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    FilterExec::try_new(update_column_index(predicate, mapping), input_plan)
-        .map(|plan| Arc::new(plan) as _)
+    let Some(new_expr) =
+        update_expression(predicate.clone(), &expr_mapping(mapping.clone()))
+    else {
+        return Err(datafusion_common::DataFusionError::Internal(
+            "Filter predicate cannot be rewritten".to_string(),
+        ));
+    };
+    FilterExec::try_new(new_expr, input_plan).map(|plan| Arc::new(plan) as _)
 }
 
 fn rewrite_hj_filter(
@@ -4405,7 +4082,10 @@ fn rewrite_projection(
         projection
             .expr()
             .iter()
-            .map(|(expr, alias)| (update_column_index(expr, mapping), alias.clone()))
+            .filter_map(|(expr, alias)| {
+                update_expression(expr.clone(), &expr_mapping(mapping.clone()))
+                    .map(|e| (e, alias.clone()))
+            })
             .collect::<Vec<_>>(),
         input_plan,
     )
@@ -4419,7 +4099,10 @@ fn rewrite_repartition(
     mapping: &IndexMap<Column, Column>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let new_partitioning = if let Partitioning::Hash(exprs, size) = partitioning {
-        let new_exprs = update_expressions(exprs, mapping);
+        let new_exprs = exprs
+            .iter()
+            .filter_map(|e| update_expression(e.clone(), &expr_mapping(mapping.clone())))
+            .collect();
         Partitioning::Hash(new_exprs, *size)
     } else {
         partitioning.clone()
@@ -4601,21 +4284,31 @@ fn rewrite_symmetric_hash_join(
         )
     });
 
+    let left_expr_map = expr_mapping(left_mapping.clone());
+    let right_expr_map = expr_mapping(right_mapping.clone());
     let new_left_sort_exprs = shj.left_sort_exprs().map(|exprs| {
         exprs
             .iter()
-            .map(|sort_expr| PhysicalSortExpr {
-                expr: update_column_index(&sort_expr.expr, left_mapping),
-                options: sort_expr.options,
+            .filter_map(|sort_expr| {
+                update_expression(sort_expr.expr.clone(), &left_expr_map).map(|expr| {
+                    PhysicalSortExpr {
+                        expr,
+                        options: sort_expr.options,
+                    }
+                })
             })
             .collect()
     });
     let new_right_sort_exprs = shj.left_sort_exprs().map(|exprs| {
         exprs
             .iter()
-            .map(|sort_expr| PhysicalSortExpr {
-                expr: update_column_index(&sort_expr.expr, right_mapping),
-                options: sort_expr.options,
+            .filter_map(|sort_expr| {
+                update_expression(sort_expr.expr.clone(), &right_expr_map).map(|expr| {
+                    PhysicalSortExpr {
+                        expr,
+                        options: sort_expr.options,
+                    }
+                })
             })
             .collect()
     });
@@ -4640,16 +4333,21 @@ fn rewrite_aggregate(
     input_plan: Arc<dyn ExecutionPlan>,
     mapping: &IndexMap<Column, Column>,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    let expr_map = expr_mapping(mapping.clone());
     let new_group_by = PhysicalGroupBy::new(
         agg.group_expr()
             .expr()
             .iter()
-            .map(|(expr, alias)| (update_column_index(expr, mapping), alias.to_string()))
+            .filter_map(|(expr, alias)| {
+                update_expression(expr.clone(), &expr_map).map(|e| (e, alias.to_string()))
+            })
             .collect(),
         agg.group_expr()
             .null_expr()
             .iter()
-            .map(|(expr, alias)| (update_column_index(expr, mapping), alias.to_string()))
+            .filter_map(|(expr, alias)| {
+                update_expression(expr.clone(), &expr_map).map(|e| (e, alias.to_string()))
+            })
             .collect(),
         agg.group_expr().groups().to_vec(),
     );
@@ -4662,10 +4360,10 @@ fn rewrite_aggregate(
     let new_filter = agg
         .filter_expr()
         .iter()
-        .map(|opt_expr| {
+        .filter_map(|opt_expr| {
             opt_expr
                 .clone()
-                .map(|expr| update_column_index(&expr, mapping))
+                .map(|expr| update_expression(expr, &expr_mapping(mapping.clone())))
         })
         .collect();
     AggregateExec::try_new(
@@ -4692,7 +4390,11 @@ fn rewrite_window_aggregate(
         } else {
             return Ok(None);
         };
-    let new_partition_keys = update_expressions(&w_agg.partition_keys, mapping);
+    let new_partition_keys = w_agg
+        .partition_keys
+        .iter()
+        .filter_map(|k| update_expression(k.clone(), &expr_mapping(mapping.clone())))
+        .collect();
     WindowAggExec::try_new(new_window, input_plan, new_partition_keys)
         .map(|plan| Some(Arc::new(plan) as _))
 }
@@ -4710,7 +4412,11 @@ fn rewrite_bounded_window_aggregate(
         } else {
             return Ok(None);
         };
-    let new_partition_keys = update_expressions(&bw_agg.partition_keys, mapping);
+    let new_partition_keys = bw_agg
+        .partition_keys
+        .iter()
+        .filter_map(|k| update_expression(k.clone(), &expr_mapping(mapping.clone())))
+        .collect();
     BoundedWindowAggExec::try_new(
         new_window,
         input_plan,
@@ -4729,6 +4435,14 @@ fn is_plan_schema_agnostic(plan: &Arc<dyn ExecutionPlan>) -> bool {
         || plan_any.downcast_ref::<LocalLimitExec>().is_some()
         || plan_any.downcast_ref::<CoalesceBatchesExec>().is_some()
         || plan_any.downcast_ref::<CoalescePartitionsExec>().is_some()
+}
+
+fn is_plan_requirement_extender(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    let plan_any = plan.as_any();
+    plan_any.downcast_ref::<FilterExec>().is_some()
+        || plan_any.downcast_ref::<RepartitionExec>().is_some()
+        || plan_any.downcast_ref::<SortExec>().is_some()
+        || plan_any.downcast_ref::<SortPreservingMergeExec>().is_some()
 }
 
 /// Checks if the given expression is trivial.
@@ -4755,11 +4469,6 @@ fn is_projection_removable(projection: &ProjectionExec) -> bool {
 /// Tries to rewrite the [`AggregateExpr`] with the existing expressions to keep on optimization.
 fn is_agg_expr_rewritable(aggr_expr: &[Arc<(dyn AggregateExpr)>]) -> bool {
     aggr_expr.iter().all(|expr| expr.expressions().is_empty())
-}
-
-/// Tries to rewrite the [`WindowExpr`] with the existing expressions to keep on optimization.
-fn is_window_expr_rewritable(window_expr: &[Arc<(dyn WindowExpr)>]) -> bool {
-    window_expr.iter().all(|expr| expr.expressions().is_empty())
 }
 
 /// Compares the required and existing columns in the node, and maps them accordingly. Caller side must
@@ -5000,7 +4709,7 @@ fn preserve_requirements(po: ProjectionOptimizer) -> Result<ProjectionOptimizer>
     }
 }
 
-fn window_agg_required(
+fn window_exec_required(
     original_schema_len: usize,
     requirements: &ColumnRequirements,
 ) -> bool {
@@ -5136,6 +4845,24 @@ fn index_changes_after_projection_removal(
             }
         })
         .collect()
+}
+
+fn expr_mapping(schema_mapping: IndexMap<Column, Column>) -> ExprMapping {
+    ExprMapping {
+        map: schema_mapping
+            .iter()
+            .map(|(e1, e2)| {
+                (
+                    ExprWrapper {
+                        expr: Arc::new(e1.clone()),
+                    },
+                    Some(ExprWrapper {
+                        expr: Arc::new(e2.clone()),
+                    }),
+                )
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -5612,7 +5339,7 @@ mod tests {
 
         let expected = [
                "CoalescePartitionsExec", 
-               "  ProjectionExec: expr=[b@1 as b, a@0 as a_new, d@2 as d]", 
+               "  ProjectionExec: expr=[b@1 as b, a@0 as a_new, d@2 as d]",
                "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, d], has_header=false",
         ];
         assert_eq!(get_plan_string(&after_optimize), expected);

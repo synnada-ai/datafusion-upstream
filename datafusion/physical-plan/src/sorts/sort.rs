@@ -56,8 +56,10 @@ use datafusion_execution::memory_pool::{
 };
 use datafusion_execution::runtime_env::RuntimeEnv;
 use datafusion_execution::TaskContext;
-use datafusion_physical_expr::LexOrdering;
+use datafusion_physical_expr::{LexOrdering, PhysicalExpr};
 
+use datafusion_physical_expr_common::expressions::column::update_expression;
+use datafusion_physical_expr_common::physical_expr::ExprMapping;
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, error, trace};
 use tokio::sync::mpsc::Sender;
@@ -990,6 +992,39 @@ impl ExecutionPlan for SortExec {
 
     fn statistics(&self) -> Result<Statistics> {
         self.input.statistics()
+    }
+
+    fn expressions(&self) -> Option<Vec<Arc<dyn PhysicalExpr>>> {
+        Some(
+            self.expr()
+                .iter()
+                .map(|sort_expr| sort_expr.expr.clone())
+                .collect(),
+        )
+    }
+
+    fn update_expressions(
+        self: Arc<Self>,
+        map: &ExprMapping,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        let new_sort_exprs = self
+            .expr()
+            .iter()
+            .filter_map(|sort_expr| {
+                update_expression(sort_expr.expr.clone(), map).map(|new_sort_expr| {
+                    PhysicalSortExpr {
+                        expr: new_sort_expr,
+                        options: sort_expr.options,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(Some(Arc::new(
+            SortExec::new(new_sort_exprs, self.input.clone())
+                .with_preserve_partitioning(self.preserve_partitioning)
+                .with_fetch(self.fetch),
+        )))
     }
 }
 

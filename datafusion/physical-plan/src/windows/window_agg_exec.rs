@@ -46,6 +46,8 @@ use datafusion_common::{internal_err, Result};
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr::PhysicalSortRequirement;
 
+use datafusion_physical_expr_common::expressions::column::update_expression;
+use datafusion_physical_expr_common::physical_expr::ExprMapping;
 use futures::{ready, Stream, StreamExt};
 
 /// Window execution plan
@@ -263,6 +265,41 @@ impl ExecutionPlan for WindowAggExec {
             column_statistics,
             total_byte_size: Precision::Absent,
         })
+    }
+
+    fn expressions(&self) -> Option<Vec<Arc<dyn PhysicalExpr>>> {
+        let mut all_exprs = self
+            .window_expr()
+            .iter()
+            .flat_map(|window_expr| window_expr.expressions())
+            .collect::<Vec<_>>();
+        all_exprs.extend(self.partition_keys.clone());
+        Some(all_exprs)
+    }
+
+    fn update_expressions(
+        self: Arc<Self>,
+        map: &ExprMapping,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        let Some(new_window_exprs) = self
+            .window_expr()
+            .iter()
+            .map(|window_expr| window_expr.clone().update_expression(map))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Ok(None);
+        };
+        let new_keys = self
+            .partition_keys
+            .iter()
+            .filter_map(|key| update_expression(key.clone(), map))
+            .collect();
+
+        Ok(Some(Arc::new(WindowAggExec::try_new(
+            new_window_exprs,
+            self.input.clone(),
+            new_keys,
+        )?)))
     }
 }
 

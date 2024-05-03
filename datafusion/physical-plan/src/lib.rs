@@ -37,6 +37,7 @@ use datafusion_physical_expr::{
     EquivalenceProperties, LexOrdering, PhysicalSortExpr, PhysicalSortRequirement,
 };
 
+use datafusion_physical_expr_common::physical_expr::ExprMapping;
 use futures::stream::TryStreamExt;
 use tokio::task::JoinSet;
 
@@ -426,6 +427,17 @@ pub trait ExecutionPlan: Debug + DisplayAs + Send + Sync {
     /// an error.
     fn statistics(&self) -> Result<Statistics> {
         Ok(Statistics::new_unknown(&self.schema()))
+    }
+
+    fn expressions(&self) -> Option<Vec<Arc<dyn PhysicalExpr>>> {
+        None
+    }
+
+    fn update_expressions(
+        self: Arc<Self>,
+        _map: &ExprMapping,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        Ok(None)
     }
 }
 

@@ -47,6 +47,8 @@ use datafusion_physical_expr::{
     analyze, split_conjunction, AnalysisContext, ExprBoundaries, PhysicalExpr,
 };
 
+use datafusion_physical_expr_common::expressions::column::update_expression;
+use datafusion_physical_expr_common::physical_expr::ExprMapping;
 use futures::stream::{Stream, StreamExt};
 use log::trace;
 
@@ -286,6 +288,25 @@ impl ExecutionPlan for FilterExec {
     /// predicate's selectivity value can be determined for the incoming data.
     fn statistics(&self) -> Result<Statistics> {
         Self::statistics_helper(&self.input, self.predicate(), self.default_selectivity)
+    }
+
+    fn expressions(&self) -> Option<Vec<Arc<dyn PhysicalExpr>>> {
+        Some(vec![self.predicate().clone()])
+    }
+
+    fn update_expressions(
+        self: Arc<Self>,
+        map: &ExprMapping,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        let Some(new_predicate) = update_expression(self.predicate.clone(), map) else {
+            return Err(DataFusionError::Internal(
+                "Filter predicate cannot be empty".to_string(),
+            ));
+        };
+        Ok(Some(Arc::new(FilterExec::try_new(
+            new_predicate,
+            self.input.clone(),
+        )?)))
     }
 }
 
