@@ -86,8 +86,8 @@ use datafusion_expr::expr::{
 use datafusion_expr::expr_rewriter::unnormalize_cols;
 use datafusion_expr::logical_plan::builder::wrap_projection_for_join_if_necessary;
 use datafusion_expr::{
-    DescribeTable, DmlStatement, Extension, Filter, RecursiveQuery,
-    ScalarFunctionDefinition, StringifiedPlan, WindowFrame, WindowFrameBound, WriteOp,
+    DescribeTable, DmlStatement, Extension, Filter, RecursiveQuery, StringifiedPlan,
+    WindowFrame, WindowFrameBound, WriteOp,
 };
 use datafusion_physical_expr::expressions::Literal;
 use datafusion_physical_expr::LexOrdering;
@@ -236,11 +236,6 @@ fn create_physical_name(e: &Expr, is_first_expr: bool) -> Result<String> {
             };
         }
         Expr::ScalarFunction(fun) => {
-            // function should be resolved during `AnalyzerRule`s
-            if let ScalarFunctionDefinition::Name(_) = fun.func_def {
-                return internal_err!("Function `Expr` with name should be resolved.");
-            }
-
             create_function_physical_name(fun.name(), false, &fun.args, None)
         }
         Expr::WindowFunction(WindowFunction {
@@ -2036,7 +2031,7 @@ impl DefaultPhysicalPlanner {
             let config = &session_state.config_options().explain;
 
             if !config.physical_plan_only {
-                stringified_plans = e.stringified_plans.clone();
+                stringified_plans.clone_from(&e.stringified_plans);
                 if e.logical_optimization_succeeded {
                     stringified_plans.push(e.plan.to_stringified(FinalLogicalPlan));
                 }
