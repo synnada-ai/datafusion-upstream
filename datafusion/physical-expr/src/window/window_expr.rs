@@ -20,7 +20,7 @@ use std::fmt::Debug;
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::{LexOrderingRef, PhysicalExpr, PhysicalSortExpr};
+use crate::{ExprMapping, LexOrderingRef, PhysicalExpr, PhysicalSortExpr};
 
 use arrow::array::{new_empty_array, Array, ArrayRef};
 use arrow::compute::kernels::sort::SortColumn;
@@ -34,7 +34,6 @@ use datafusion_expr::window_state::{
 };
 use datafusion_expr::{Accumulator, PartitionEvaluator, WindowFrame, WindowFrameBound};
 
-use datafusion_physical_expr_common::physical_expr::ExprMapping;
 use indexmap::IndexMap;
 
 /// Common trait for [window function] implementations

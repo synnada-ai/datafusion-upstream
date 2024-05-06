@@ -34,10 +34,10 @@ use datafusion_common::utils::DataPtr;
 use datafusion_common::Result;
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr::{
-    EquivalenceProperties, LexOrdering, PhysicalSortExpr, PhysicalSortRequirement,
+    EquivalenceProperties, ExprMapping, LexOrdering, PhysicalSortExpr,
+    PhysicalSortRequirement,
 };
 
-use datafusion_physical_expr_common::physical_expr::ExprMapping;
 use futures::stream::TryStreamExt;
 use tokio::task::JoinSet;
 

@@ -37,18 +37,17 @@ use arrow::datatypes::{DataType, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::cast::as_boolean_array;
 use datafusion_common::stats::Precision;
-use datafusion_common::{plan_err, DataFusionError, Result};
+use datafusion_common::{internal_err, plan_err, Result};
 use datafusion_execution::TaskContext;
 use datafusion_expr::Operator;
 use datafusion_physical_expr::expressions::BinaryExpr;
 use datafusion_physical_expr::intervals::utils::check_support;
 use datafusion_physical_expr::utils::collect_columns;
 use datafusion_physical_expr::{
-    analyze, split_conjunction, AnalysisContext, ExprBoundaries, PhysicalExpr,
+    analyze, split_conjunction, AnalysisContext, ExprBoundaries, ExprMapping,
+    PhysicalExpr,
 };
 
-use datafusion_physical_expr_common::expressions::column::update_expression;
-use datafusion_physical_expr_common::physical_expr::ExprMapping;
 use futures::stream::{Stream, StreamExt};
 use log::trace;
 
@@ -92,10 +91,7 @@ impl FilterExec {
         }
     }
 
-    pub fn with_default_selectivity(
-        mut self,
-        default_selectivity: u8,
-    ) -> Result<Self, DataFusionError> {
+    pub fn with_default_selectivity(mut self, default_selectivity: u8) -> Result<Self> {
         if default_selectivity > 100 {
             return plan_err!("Default filter selectivity needs to be less than 100");
         }
@@ -298,15 +294,11 @@ impl ExecutionPlan for FilterExec {
         self: Arc<Self>,
         map: &ExprMapping,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        let Some(new_predicate) = update_expression(self.predicate.clone(), map) else {
-            return Err(DataFusionError::Internal(
-                "Filter predicate cannot be empty".to_string(),
-            ));
+        let Some(new_predicate) = map.update_expression(self.predicate.clone()) else {
+            return internal_err!("Filter predicate cannot be empty");
         };
-        Ok(Some(Arc::new(FilterExec::try_new(
-            new_predicate,
-            self.input.clone(),
-        )?)))
+        FilterExec::try_new(new_predicate, self.input.clone())
+            .map(|e| Some(Arc::new(e) as _))
     }
 }
 

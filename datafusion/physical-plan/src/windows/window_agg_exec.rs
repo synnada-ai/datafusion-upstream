@@ -44,10 +44,8 @@ use datafusion_common::stats::Precision;
 use datafusion_common::utils::evaluate_partition_ranges;
 use datafusion_common::{internal_err, Result};
 use datafusion_execution::TaskContext;
-use datafusion_physical_expr::PhysicalSortRequirement;
+use datafusion_physical_expr::{ExprMapping, PhysicalSortRequirement};
 
-use datafusion_physical_expr_common::expressions::column::update_expression;
-use datafusion_physical_expr_common::physical_expr::ExprMapping;
 use futures::{ready, Stream, StreamExt};
 
 /// Window execution plan
@@ -292,14 +290,11 @@ impl ExecutionPlan for WindowAggExec {
         let new_keys = self
             .partition_keys
             .iter()
-            .filter_map(|key| update_expression(key.clone(), map))
+            .filter_map(|key| map.update_expression(key.clone()))
             .collect();
 
-        Ok(Some(Arc::new(WindowAggExec::try_new(
-            new_window_exprs,
-            self.input.clone(),
-            new_keys,
-        )?)))
+        WindowAggExec::try_new(new_window_exprs, self.input.clone(), new_keys)
+            .map(|e| Some(Arc::new(e) as _))
     }
 }
 

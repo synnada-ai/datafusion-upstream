@@ -68,12 +68,12 @@ use datafusion_common::tree_node::{
     ConcreteTreeNode, Transformed, TreeNode, TreeNodeRecursion,
 };
 use datafusion_common::{JoinSide, JoinType};
-use datafusion_physical_expr::expressions::{update_expression, Column, Literal};
+use datafusion_physical_expr::expressions::{Column, Literal};
 use datafusion_physical_expr::utils::collect_columns;
 use datafusion_physical_expr::window::WindowExpr;
 use datafusion_physical_expr::{
-    AggregateExpr, ExprMapping, ExprWrapper, LexOrdering, Partitioning, PhysicalExpr,
-    PhysicalExprRef, PhysicalSortExpr,
+    AggregateExpr, ExprMapping, LexOrdering, Partitioning, PhysicalExpr, PhysicalExprRef,
+    PhysicalSortExpr,
 };
 use datafusion_physical_plan::aggregates::{
     AggregateExec, AggregateMode, PhysicalGroupBy,
@@ -670,7 +670,7 @@ impl ProjectionOptimizer {
             let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
 
             let Some(new_plan) =
-                plan.update_expressions(&expr_mapping(schema_mapping.clone()))?
+                plan.update_expressions(&ExprMapping::new(schema_mapping.clone()))?
             else {
                 return Err(datafusion_common::DataFusionError::Internal(
                     "Plans implementing expressions() must also implement update_expressions()".to_string()));
@@ -2114,7 +2114,7 @@ impl ProjectionOptimizer {
             ) {
                 if window_exprs.iter().any(|expr| {
                     expr.clone()
-                        .update_expression(&expr_mapping(IndexMap::new()))
+                        .update_expression(&ExprMapping::new(IndexMap::new()))
                         .is_none()
                 }) {
                     self.children_nodes[0].required_columns = self
@@ -2157,7 +2157,7 @@ impl ProjectionOptimizer {
                 });
                 let Some(new_plan) = plan
                     .clone()
-                    .update_expressions(&expr_mapping(schema_mapping.clone()))?
+                    .update_expressions(&ExprMapping::new(schema_mapping.clone()))?
                 else {
                     return Err(datafusion_common::DataFusionError::Internal(
                     "Plans implementing expressions() must also implement update_expressions()".to_string()));
@@ -2564,7 +2564,7 @@ impl ProjectionOptimizer {
             } else if let Some(agg) = plan_any.downcast_ref::<AggregateExec>() {
                 if agg.aggr_expr().iter().any(|expr| {
                     expr.clone()
-                        .update_expression(&expr_mapping(all_mappings[0].clone()))
+                        .update_expression(&ExprMapping::new(all_mappings[0].clone()))
                         .is_none()
                         && !self.children_nodes[0].schema_mapping.is_empty()
                 }) {
@@ -3526,16 +3526,16 @@ fn update_sort_expressions(
     sort_exprs: &[PhysicalSortExpr],
     mapping: &IndexMap<Column, Column>,
 ) -> LexOrdering {
-    let expr_map = expr_mapping(mapping.clone());
+    let expr_map = ExprMapping::new(mapping.clone());
     sort_exprs
         .iter()
         .filter_map(|sort_expr| {
-            update_expression(sort_expr.expr.clone(), &expr_map).map(|expr| {
-                PhysicalSortExpr {
+            expr_map
+                .update_expression(sort_expr.expr.clone())
+                .map(|expr| PhysicalSortExpr {
                     expr,
                     options: sort_expr.options,
-                }
-            })
+                })
         })
         .collect::<Vec<_>>()
 }
@@ -3550,7 +3550,7 @@ fn update_window_exprs(
         .map(|window_expr| {
             window_expr
                 .clone()
-                .update_expression(&expr_mapping(mapping.clone()))
+                .update_expression(&ExprMapping::new(mapping.clone()))
         })
         .collect::<Option<Vec<_>>>()
 }
@@ -3565,7 +3565,7 @@ fn update_aggregate_exprs(
         .map(|aggr_expr| {
             aggr_expr
                 .clone()
-                .update_expression(&expr_mapping(mapping.clone()))
+                .update_expression(&ExprMapping::new(mapping.clone()))
         })
         .collect::<Option<Vec<_>>>()
 }
@@ -3576,14 +3576,14 @@ fn update_join_on(
     left_mapping: &IndexMap<Column, Column>,
     right_mapping: &IndexMap<Column, Column>,
 ) -> JoinOn {
-    let left_expr_map = expr_mapping(left_mapping.clone());
-    let right_expr_map = expr_mapping(right_mapping.clone());
+    let left_expr_map = ExprMapping::new(left_mapping.clone());
+    let right_expr_map = ExprMapping::new(right_mapping.clone());
     join_on
         .iter()
         .filter_map(|(left, right)| {
             match (
-                update_expression(left.clone(), &left_expr_map),
-                update_expression(right.clone(), &right_expr_map),
+                left_expr_map.update_expression(left.clone()),
+                right_expr_map.update_expression(right.clone()),
             ) {
                 (Some(left), Some(right)) => Some((left, right)),
                 _ => None,
@@ -4026,9 +4026,8 @@ fn rewrite_filter(
     input_plan: Arc<dyn ExecutionPlan>,
     mapping: &IndexMap<Column, Column>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    let Some(new_expr) =
-        update_expression(predicate.clone(), &expr_mapping(mapping.clone()))
-    else {
+    let map = ExprMapping::new(mapping.clone());
+    let Some(new_expr) = map.update_expression(predicate.clone()) else {
         return Err(datafusion_common::DataFusionError::Internal(
             "Filter predicate cannot be rewritten".to_string(),
         ));
@@ -4080,12 +4079,14 @@ fn rewrite_projection(
     input_plan: Arc<dyn ExecutionPlan>,
     mapping: &IndexMap<Column, Column>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
+    let mapping = ExprMapping::new(mapping.clone());
     ProjectionExec::try_new(
         projection
             .expr()
             .iter()
             .filter_map(|(expr, alias)| {
-                update_expression(expr.clone(), &expr_mapping(mapping.clone()))
+                mapping
+                    .update_expression(expr.clone())
                     .map(|e| (e, alias.clone()))
             })
             .collect::<Vec<_>>(),
@@ -4101,9 +4102,10 @@ fn rewrite_repartition(
     mapping: &IndexMap<Column, Column>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let new_partitioning = if let Partitioning::Hash(exprs, size) = partitioning {
+        let mapping = ExprMapping::new(mapping.clone());
         let new_exprs = exprs
             .iter()
-            .filter_map(|e| update_expression(e.clone(), &expr_mapping(mapping.clone())))
+            .filter_map(|e| mapping.update_expression(e.clone()))
             .collect();
         Partitioning::Hash(new_exprs, *size)
     } else {
@@ -4286,18 +4288,18 @@ fn rewrite_symmetric_hash_join(
         )
     });
 
-    let left_expr_map = expr_mapping(left_mapping.clone());
-    let right_expr_map = expr_mapping(right_mapping.clone());
+    let left_expr_map = ExprMapping::new(left_mapping.clone());
+    let right_expr_map = ExprMapping::new(right_mapping.clone());
     let new_left_sort_exprs = shj.left_sort_exprs().map(|exprs| {
         exprs
             .iter()
             .filter_map(|sort_expr| {
-                update_expression(sort_expr.expr.clone(), &left_expr_map).map(|expr| {
-                    PhysicalSortExpr {
+                left_expr_map
+                    .update_expression(sort_expr.expr.clone())
+                    .map(|expr| PhysicalSortExpr {
                         expr,
                         options: sort_expr.options,
-                    }
-                })
+                    })
             })
             .collect()
     });
@@ -4305,12 +4307,12 @@ fn rewrite_symmetric_hash_join(
         exprs
             .iter()
             .filter_map(|sort_expr| {
-                update_expression(sort_expr.expr.clone(), &right_expr_map).map(|expr| {
-                    PhysicalSortExpr {
+                right_expr_map
+                    .update_expression(sort_expr.expr.clone())
+                    .map(|expr| PhysicalSortExpr {
                         expr,
                         options: sort_expr.options,
-                    }
-                })
+                    })
             })
             .collect()
     });
@@ -4335,20 +4337,24 @@ fn rewrite_aggregate(
     input_plan: Arc<dyn ExecutionPlan>,
     mapping: &IndexMap<Column, Column>,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-    let expr_map = expr_mapping(mapping.clone());
+    let expr_map = ExprMapping::new(mapping.clone());
     let new_group_by = PhysicalGroupBy::new(
         agg.group_expr()
             .expr()
             .iter()
             .filter_map(|(expr, alias)| {
-                update_expression(expr.clone(), &expr_map).map(|e| (e, alias.to_string()))
+                expr_map
+                    .update_expression(expr.clone())
+                    .map(|e| (e, alias.to_string()))
             })
             .collect(),
         agg.group_expr()
             .null_expr()
             .iter()
             .filter_map(|(expr, alias)| {
-                update_expression(expr.clone(), &expr_map).map(|e| (e, alias.to_string()))
+                expr_map
+                    .update_expression(expr.clone())
+                    .map(|e| (e, alias.to_string()))
             })
             .collect(),
         agg.group_expr().groups().to_vec(),
@@ -4359,13 +4365,12 @@ fn rewrite_aggregate(
         } else {
             return Ok(None);
         };
+    let mapping = ExprMapping::new(mapping.clone());
     let new_filter = agg
         .filter_expr()
         .iter()
         .filter_map(|opt_expr| {
-            opt_expr
-                .clone()
-                .map(|expr| update_expression(expr, &expr_mapping(mapping.clone())))
+            opt_expr.clone().map(|expr| mapping.update_expression(expr))
         })
         .collect();
     AggregateExec::try_new(
@@ -4392,10 +4397,11 @@ fn rewrite_window_aggregate(
         } else {
             return Ok(None);
         };
+    let mapping = ExprMapping::new(mapping.clone());
     let new_partition_keys = w_agg
         .partition_keys
         .iter()
-        .filter_map(|k| update_expression(k.clone(), &expr_mapping(mapping.clone())))
+        .filter_map(|k| mapping.update_expression(k.clone()))
         .collect();
     WindowAggExec::try_new(new_window, input_plan, new_partition_keys)
         .map(|plan| Some(Arc::new(plan) as _))
@@ -4414,10 +4420,11 @@ fn rewrite_bounded_window_aggregate(
         } else {
             return Ok(None);
         };
+    let mapping = ExprMapping::new(mapping.clone());
     let new_partition_keys = bw_agg
         .partition_keys
         .iter()
-        .filter_map(|k| update_expression(k.clone(), &expr_mapping(mapping.clone())))
+        .filter_map(|k| mapping.update_expression(k.clone()))
         .collect();
     BoundedWindowAggExec::try_new(
         new_window,
@@ -4847,24 +4854,6 @@ fn index_changes_after_projection_removal(
             }
         })
         .collect()
-}
-
-fn expr_mapping(schema_mapping: IndexMap<Column, Column>) -> ExprMapping {
-    ExprMapping {
-        map: schema_mapping
-            .iter()
-            .map(|(e1, e2)| {
-                (
-                    ExprWrapper {
-                        expr: Arc::new(e1.clone()),
-                    },
-                    Some(ExprWrapper {
-                        expr: Arc::new(e2.clone()),
-                    }),
-                )
-            })
-            .collect(),
-    }
 }
 
 #[cfg(test)]
@@ -5343,7 +5332,7 @@ mod tests {
             OptimizeProjections::new().optimize(top_projection, &ConfigOptions::new())?;
 
         let expected = [
-            "ProjectionExec: expr=[b@0 as new_b, c@1 + e@2 as binary, b@0 as newest_b]", 
+            "ProjectionExec: expr=[b@0 as new_b, c@1 + e@2 as binary, b@0 as newest_b]",
             "  CsvExec: file_groups={1 group: [[x]]}, projection=[b, c, e], has_header=false"
             ];
         assert_eq!(get_plan_string(&after_optimize), expected);
@@ -5376,7 +5365,7 @@ mod tests {
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
 
         let expected = [
-               "CoalescePartitionsExec", 
+               "CoalescePartitionsExec",
                "  ProjectionExec: expr=[b@1 as b, a@0 as a_new, d@2 as d]",
                "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, d], has_header=false",
         ];
@@ -5424,8 +5413,8 @@ mod tests {
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
 
         let expected = [
-                "ProjectionExec: expr=[a@0 as a_new, b@1 as b, d@2 as d]", 
-                "  FilterExec: b@1 - a@0 > d@2 - a@0", 
+                "ProjectionExec: expr=[a@0 as a_new, b@1 as b, d@2 as d]",
+                "  FilterExec: b@1 - a@0 > d@2 - a@0",
                 "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, d], has_header=false"];
 
         assert_eq!(get_plan_string(&after_optimize), expected);
@@ -5499,9 +5488,9 @@ mod tests {
         )?);
         let initial = get_plan_string(&projection);
         let expected_initial = [
-            "ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, a@5 as a_from_right, c@7 as c_from_right]", 
-            "  SymmetricHashJoinExec: mode=SinglePartition, join_type=Inner, on=[(b@1, c@2)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2", 
-            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
+            "ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, a@5 as a_from_right, c@7 as c_from_right]",
+            "  SymmetricHashJoinExec: mode=SinglePartition, join_type=Inner, on=[(b@1, c@2)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2",
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false",
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
             ];
         assert_eq!(initial, expected_initial);
@@ -5510,9 +5499,9 @@ mod tests {
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
 
         let expected = [
-           "ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, a@3 as a_from_right, c@4 as c_from_right]", 
-            "  SymmetricHashJoinExec: mode=SinglePartition, join_type=Inner, on=[(b@1, c@1)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2", 
-            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false", 
+           "ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, a@3 as a_from_right, c@4 as c_from_right]",
+            "  SymmetricHashJoinExec: mode=SinglePartition, join_type=Inner, on=[(b@1, c@1)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2",
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false",
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, c], has_header=false"
             ];
         assert_eq!(get_plan_string(&after_optimize), expected);
@@ -5617,9 +5606,9 @@ mod tests {
         )?);
         let initial = get_plan_string(&projection);
         let expected_initial = [
-            "ProjectionExec: expr=[a@5 as a, b@6 as b, c@7 as c, d@8 as d, e@9 as e, a@0 as a, b@1 as b, c@2 as c, d@3 as d, e@4 as e]", 
-            "  SymmetricHashJoinExec: mode=SinglePartition, join_type=Inner, on=[(b@1, c@2)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2", 
-            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
+            "ProjectionExec: expr=[a@5 as a, b@6 as b, c@7 as c, d@8 as d, e@9 as e, a@0 as a, b@1 as b, c@2 as c, d@3 as d, e@4 as e]",
+            "  SymmetricHashJoinExec: mode=SinglePartition, join_type=Inner, on=[(b@1, c@2)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2",
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false",
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
             ];
         assert_eq!(initial, expected_initial);
@@ -5628,9 +5617,9 @@ mod tests {
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
 
         let expected = [
-            "ProjectionExec: expr=[a@5 as a, b@6 as b, c@7 as c, d@8 as d, e@9 as e, a@0 as a, b@1 as b, c@2 as c, d@3 as d, e@4 as e]", 
-            "  SymmetricHashJoinExec: mode=SinglePartition, join_type=Inner, on=[(b@1, c@2)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2", 
-            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
+            "ProjectionExec: expr=[a@5 as a, b@6 as b, c@7 as c, d@8 as d, e@9 as e, a@0 as a, b@1 as b, c@2 as c, d@3 as d, e@4 as e]",
+            "  SymmetricHashJoinExec: mode=SinglePartition, join_type=Inner, on=[(b@1, c@2)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2",
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false",
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
             ];
         assert_eq!(get_plan_string(&after_optimize), expected);
@@ -5703,9 +5692,9 @@ mod tests {
         )?);
         let initial = get_plan_string(&projection);
         let expected_initial = [
-			"ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, c@7 as c_from_right]", 
-            "  HashJoinExec: mode=Auto, join_type=Inner, on=[(b@1, c@2)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2", 
-            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
+			"ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, c@7 as c_from_right]",
+            "  HashJoinExec: mode=Auto, join_type=Inner, on=[(b@1, c@2)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2",
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false",
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
             ];
         assert_eq!(initial, expected_initial);
@@ -5715,9 +5704,9 @@ mod tests {
 
         // HashJoinExec only returns result after projection. Because there are some alias columns in the projection, the ProjectionExec is not removed.
         let expected = [
-           "ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, c@3 as c_from_right]", 
-           "  HashJoinExec: mode=Auto, join_type=Inner, on=[(b@1, c@1)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2, projection=[a@0, b@1, c@2, c@4]", 
-           "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false", 
+           "ProjectionExec: expr=[c@2 as c_from_left, b@1 as b_from_left, a@0 as a_from_left, c@3 as c_from_right]",
+           "  HashJoinExec: mode=Auto, join_type=Inner, on=[(b@1, c@1)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2, projection=[a@0, b@1, c@2, c@4]",
+           "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false",
            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, c], has_header=false"];
         assert_eq!(get_plan_string(&after_optimize), expected);
 
@@ -5736,8 +5725,8 @@ mod tests {
 
         // Comparing to the previous result, this projection don't have alias columns either change the order of output fields. So the ProjectionExec is removed.
         let expected = [
-            "HashJoinExec: mode=Auto, join_type=Inner, on=[(b@1, c@1)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2, projection=[a@0, b@1, c@2, c@4]", 
-            "  CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false", 
+            "HashJoinExec: mode=Auto, join_type=Inner, on=[(b@1, c@1)], filter=b_left_inter@0 - 1 + a_right_inter@1 <= a_right_inter@1 + c_left_inter@2, projection=[a@0, b@1, c@2, c@4]",
+            "  CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false",
             "  CsvExec: file_groups={1 group: [[x]]}, projection=[a, c], has_header=false"
             ];
         assert_eq!(get_plan_string(&after_optimize), expected);
@@ -5778,8 +5767,8 @@ mod tests {
         let after_optimize =
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
         let expected = [
-                "ProjectionExec: expr=[b@1 as b_new, a@0 as a, d@2 as d_new]", 
-                "  RepartitionExec: partitioning=Hash([a@0, b@1, d@2], 6), input_partitions=1", 
+                "ProjectionExec: expr=[b@1 as b_new, a@0 as a, d@2 as d_new]",
+                "  RepartitionExec: partitioning=Hash([a@0, b@1, d@2], 6), input_partitions=1",
                 "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, d], has_header=false"
         ];
 
@@ -5829,8 +5818,8 @@ mod tests {
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
 
         let expected = [
-            "ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]", 
-            "  SortExec: expr=[b@1 ASC,c@2 + a@0 ASC], preserve_partitioning=[false]", 
+            "ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]",
+            "  SortExec: expr=[b@1 ASC,c@2 + a@0 ASC], preserve_partitioning=[false]",
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false"
         ];
         assert_eq!(get_plan_string(&after_optimize), expected);
@@ -5879,8 +5868,8 @@ mod tests {
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
 
         let expected = [
-            "ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]", 
-            "  SortPreservingMergeExec: [b@1 ASC,c@2 + a@0 ASC]", 
+            "ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]",
+            "  SortPreservingMergeExec: [b@1 ASC,c@2 + a@0 ASC]",
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false"
         ];
         assert_eq!(get_plan_string(&after_optimize), expected);
@@ -5904,10 +5893,10 @@ mod tests {
 
         let initial = get_plan_string(&projection);
         let expected_initial = [
-            "ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]", 
-            "  UnionExec", 
-            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
-            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
+            "ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]",
+            "  UnionExec",
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false",
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false",
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"
             ];
         assert_eq!(initial, expected_initial);
@@ -5915,10 +5904,10 @@ mod tests {
         let after_optimize =
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
         let expected = [
-            "ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]", 
-            "  UnionExec", 
-            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false", 
-            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false", 
+            "ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]",
+            "  UnionExec",
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false",
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false",
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false"
         ];
 
@@ -5997,12 +5986,12 @@ mod tests {
         let initial = get_plan_string(&filter);
 
         let expected_initial = [
-            "FilterExec: sum@0 > 0", 
-            "  ProjectionExec: expr=[c@2 + x@0 as sum]", 
-            "    ProjectionExec: expr=[x@2 as x, x@0 as x, c@1 as c]", 
-            "      SortExec: expr=[c@1 ASC,x@2 ASC], preserve_partitioning=[false]", 
-            "        ProjectionExec: expr=[x@1 as x, c@0 as c, a@2 as x]", 
-            "          ProjectionExec: expr=[c@2 as c, e@4 as x, a@0 as a]", 
+            "FilterExec: sum@0 > 0",
+            "  ProjectionExec: expr=[c@2 + x@0 as sum]",
+            "    ProjectionExec: expr=[x@2 as x, x@0 as x, c@1 as c]",
+            "      SortExec: expr=[c@1 ASC,x@2 ASC], preserve_partitioning=[false]",
+            "        ProjectionExec: expr=[x@1 as x, c@0 as c, a@2 as x]",
+            "          ProjectionExec: expr=[c@2 as c, e@4 as x, a@0 as a]",
             "            CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"];
 
         assert_eq!(initial, expected_initial);
@@ -6011,10 +6000,10 @@ mod tests {
             OptimizeProjections::new().optimize(filter, &ConfigOptions::new())?;
 
         let expected = [
-            "FilterExec: sum@0 > 0", 
-            "  ProjectionExec: expr=[c@0 + x@1 as sum]", 
-            "    SortExec: expr=[c@0 ASC,x@1 ASC], preserve_partitioning=[false]", 
-            "      ProjectionExec: expr=[c@1 as c, a@0 as x]", 
+            "FilterExec: sum@0 > 0",
+            "  ProjectionExec: expr=[c@0 + x@1 as sum]",
+            "    SortExec: expr=[c@0 ASC,x@1 ASC], preserve_partitioning=[false]",
+            "      ProjectionExec: expr=[c@1 as c, a@0 as x]",
             "        CsvExec: file_groups={1 group: [[x]]}, projection=[a, c], has_header=false"];
 
         assert_eq!(get_plan_string(&after_optimize), expected);
@@ -6127,13 +6116,13 @@ mod tests {
         let initial = get_plan_string(&aggregate);
 
         let expected_initial = [
-            "AggregateExec: mode=Single, gby=[a@2 as a], aggr=[SUM(ROW_NUMBER())]", 
-            "  HashJoinExec: mode=Auto, join_type=LeftAnti, on=[(a@1, b@1)], filter=ROW_NUMBER()@0 < RANK@1, projection=[a@1, ROW_NUMBER()@0, a@1]", 
-            "    SortExec: expr=[ROW_NUMBER()@4 ASC,d@2 ASC], preserve_partitioning=[false]", 
-            "      ProjectionExec: expr=[ROW_NUMBER()@5 as ROW_NUMBER(), a@0 as a, d@3 as d, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]", 
-            "        WindowAggExec: wdw=[ROW_NUMBER(): Ok(Field { name: \"ROW_NUMBER()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }]", 
-            "          CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
-            "    BoundedWindowAggExec: wdw=[RANK(): Ok(Field { name: \"RANK()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }], mode=[Linear]", 
+            "AggregateExec: mode=Single, gby=[a@2 as a], aggr=[SUM(ROW_NUMBER())]",
+            "  HashJoinExec: mode=Auto, join_type=LeftAnti, on=[(a@1, b@1)], filter=ROW_NUMBER()@0 < RANK@1, projection=[a@1, ROW_NUMBER()@0, a@1]",
+            "    SortExec: expr=[ROW_NUMBER()@4 ASC,d@2 ASC], preserve_partitioning=[false]",
+            "      ProjectionExec: expr=[ROW_NUMBER()@5 as ROW_NUMBER(), a@0 as a, d@3 as d, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]",
+            "        WindowAggExec: wdw=[ROW_NUMBER(): Ok(Field { name: \"ROW_NUMBER()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }]",
+            "          CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false",
+            "    BoundedWindowAggExec: wdw=[RANK(): Ok(Field { name: \"RANK()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }], mode=[Linear]",
             "      CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"];
 
         assert_eq!(initial, expected_initial);
@@ -6142,15 +6131,15 @@ mod tests {
             OptimizeProjections::new().optimize(aggregate, &ConfigOptions::new())?;
 
         let expected = [
-            "AggregateExec: mode=Single, gby=[a@2 as a], aggr=[SUM(ROW_NUMBER())]", 
-            "  HashJoinExec: mode=Auto, join_type=LeftAnti, on=[(a@1, b@0)], filter=ROW_NUMBER()@0 < RANK@1, projection=[a@1, ROW_NUMBER()@0, a@1]", 
-            "    ProjectionExec: expr=[ROW_NUMBER()@0 as ROW_NUMBER(), a@1 as a, ROW_NUMBER()@3 as ROW_NUMBER()]", 
-            "      SortExec: expr=[ROW_NUMBER()@3 ASC,d@2 ASC], preserve_partitioning=[false]", 
-            "        ProjectionExec: expr=[ROW_NUMBER()@5 as ROW_NUMBER(), a@0 as a, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]", 
-            "          WindowAggExec: wdw=[ROW_NUMBER(): Ok(Field { name: \"ROW_NUMBER()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }]", 
-            "            CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
-            "    ProjectionExec: expr=[b@1 as b, RANK()@5 as RANK()]", 
-            "      BoundedWindowAggExec: wdw=[RANK(): Ok(Field { name: \"RANK()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }], mode=[Linear]", 
+            "AggregateExec: mode=Single, gby=[a@2 as a], aggr=[SUM(ROW_NUMBER())]",
+            "  HashJoinExec: mode=Auto, join_type=LeftAnti, on=[(a@1, b@0)], filter=ROW_NUMBER()@0 < RANK@1, projection=[a@1, ROW_NUMBER()@0, a@1]",
+            "    ProjectionExec: expr=[ROW_NUMBER()@0 as ROW_NUMBER(), a@1 as a, ROW_NUMBER()@3 as ROW_NUMBER()]",
+            "      SortExec: expr=[ROW_NUMBER()@3 ASC,d@2 ASC], preserve_partitioning=[false]",
+            "        ProjectionExec: expr=[ROW_NUMBER()@5 as ROW_NUMBER(), a@0 as a, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]",
+            "          WindowAggExec: wdw=[ROW_NUMBER(): Ok(Field { name: \"ROW_NUMBER()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }]",
+            "            CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false",
+            "    ProjectionExec: expr=[b@1 as b, RANK()@5 as RANK()]",
+            "      BoundedWindowAggExec: wdw=[RANK(): Ok(Field { name: \"RANK()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }], mode=[Linear]",
             "        CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"];
 
         assert_eq!(get_plan_string(&after_optimize), expected);
@@ -6264,13 +6253,13 @@ mod tests {
         let initial = get_plan_string(&aggregate);
 
         let expected_initial = [
-            "AggregateExec: mode=Single, gby=[b@2 as b], aggr=[SUM(a)]", 
-            "  HashJoinExec: mode=Auto, join_type=RightSemi, on=[(a@1, b@1)], filter=ROW_NUMBER()@0 < RANK@1, projection=[b@1, a@0, b@1]", 
-            "    SortExec: expr=[ROW_NUMBER()@4 ASC,d@2 ASC], preserve_partitioning=[false]", 
-            "      ProjectionExec: expr=[ROW_NUMBER()@5 as ROW_NUMBER(), a@0 as a, d@3 as d, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]", 
-            "        WindowAggExec: wdw=[ROW_NUMBER(): Ok(Field { name: \"ROW_NUMBER()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }]", 
-            "          CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
-            "    BoundedWindowAggExec: wdw=[RANK(): Ok(Field { name: \"RANK()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }], mode=[Linear]", 
+            "AggregateExec: mode=Single, gby=[b@2 as b], aggr=[SUM(a)]",
+            "  HashJoinExec: mode=Auto, join_type=RightSemi, on=[(a@1, b@1)], filter=ROW_NUMBER()@0 < RANK@1, projection=[b@1, a@0, b@1]",
+            "    SortExec: expr=[ROW_NUMBER()@4 ASC,d@2 ASC], preserve_partitioning=[false]",
+            "      ProjectionExec: expr=[ROW_NUMBER()@5 as ROW_NUMBER(), a@0 as a, d@3 as d, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]",
+            "        WindowAggExec: wdw=[ROW_NUMBER(): Ok(Field { name: \"ROW_NUMBER()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }]",
+            "          CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false",
+            "    BoundedWindowAggExec: wdw=[RANK(): Ok(Field { name: \"RANK()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }], mode=[Linear]",
             "      CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"];
 
         assert_eq!(initial, expected_initial);
@@ -6279,15 +6268,15 @@ mod tests {
             OptimizeProjections::new().optimize(aggregate, &ConfigOptions::new())?;
 
         let expected = [
-            "AggregateExec: mode=Single, gby=[b@2 as b], aggr=[SUM(a)]", 
-            "  HashJoinExec: mode=Auto, join_type=RightSemi, on=[(a@0, b@1)], filter=ROW_NUMBER()@0 < RANK@1, projection=[b@1, a@0, b@1]", 
-            "    ProjectionExec: expr=[a@0 as a, ROW_NUMBER()@2 as ROW_NUMBER()]", 
-            "      SortExec: expr=[ROW_NUMBER()@2 ASC,d@1 ASC], preserve_partitioning=[false]", 
-            "        ProjectionExec: expr=[a@0 as a, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]", 
-            "          WindowAggExec: wdw=[ROW_NUMBER(): Ok(Field { name: \"ROW_NUMBER()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }]", 
-            "            CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false", 
-            "    ProjectionExec: expr=[a@0 as a, b@1 as b, RANK()@5 as RANK()]", 
-            "      BoundedWindowAggExec: wdw=[RANK(): Ok(Field { name: \"RANK()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }], mode=[Linear]", 
+            "AggregateExec: mode=Single, gby=[b@2 as b], aggr=[SUM(a)]",
+            "  HashJoinExec: mode=Auto, join_type=RightSemi, on=[(a@0, b@1)], filter=ROW_NUMBER()@0 < RANK@1, projection=[b@1, a@0, b@1]",
+            "    ProjectionExec: expr=[a@0 as a, ROW_NUMBER()@2 as ROW_NUMBER()]",
+            "      SortExec: expr=[ROW_NUMBER()@2 ASC,d@1 ASC], preserve_partitioning=[false]",
+            "        ProjectionExec: expr=[a@0 as a, d@3 as d, ROW_NUMBER()@5 as ROW_NUMBER()]",
+            "          WindowAggExec: wdw=[ROW_NUMBER(): Ok(Field { name: \"ROW_NUMBER()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }]",
+            "            CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false",
+            "    ProjectionExec: expr=[a@0 as a, b@1 as b, RANK()@5 as RANK()]",
+            "      BoundedWindowAggExec: wdw=[RANK(): Ok(Field { name: \"RANK()\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }], mode=[Linear]",
             "        CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], has_header=false"];
 
         assert_eq!(get_plan_string(&after_optimize), expected);

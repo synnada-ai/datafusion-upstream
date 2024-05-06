@@ -21,15 +21,14 @@ use std::any::Any;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use crate::physical_expr::{down_cast_any_ref, PhysicalExpr};
+
 use arrow::{
     datatypes::{DataType, Schema},
     record_batch::RecordBatch,
 };
-use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{internal_err, Result};
 use datafusion_expr::ColumnarValue;
-
-use crate::physical_expr::{down_cast_any_ref, ExprMapping, PhysicalExpr};
 
 /// Represents the column at a given index in a RecordBatch
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -135,37 +134,4 @@ impl Column {
 /// Create a column expression
 pub fn col(name: &str, schema: &Schema) -> Result<Arc<dyn PhysicalExpr>> {
     Ok(Arc::new(Column::new_with_schema(name, schema)?))
-}
-
-pub fn update_expression(
-    expr: Arc<dyn PhysicalExpr>,
-    map: &ExprMapping,
-) -> Option<Arc<dyn PhysicalExpr>> {
-    if let Some(new_expr) = map.get(expr.clone()) {
-        new_expr
-    } else {
-        update_columns(expr, map)
-    }
-}
-
-fn update_columns(
-    expr: Arc<dyn PhysicalExpr>,
-    map: &ExprMapping,
-) -> Option<Arc<dyn PhysicalExpr>> {
-    if expr.as_any().downcast_ref::<Column>().is_some() {
-        map.get(expr.clone()).unwrap_or(Some(expr))
-    } else {
-        Some(
-            expr.transform_up(|e: Arc<dyn PhysicalExpr>| {
-                if e.as_any().downcast_ref::<Column>().is_some() {
-                    if let Some(Some(updated)) = map.get(e.clone()) {
-                        return Ok(Transformed::yes(updated));
-                    }
-                }
-                Ok(Transformed::no(e))
-            })
-            .unwrap()
-            .data,
-        )
-    }
 }

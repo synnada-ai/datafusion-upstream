@@ -47,9 +47,7 @@ pub use physical_expr::{
     PhysicalExprRef,
 };
 
-pub use datafusion_physical_expr_common::physical_expr::{
-    ExprMapping, ExprWrapper, PhysicalExpr,
-};
+pub use datafusion_physical_expr_common::physical_expr::{ExprMapping, PhysicalExpr};
 pub use datafusion_physical_expr_common::sort_expr::{
     LexOrdering, LexOrderingRef, LexRequirement, LexRequirementRef, PhysicalSortExpr,
     PhysicalSortRequirement,

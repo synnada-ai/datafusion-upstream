@@ -51,18 +51,18 @@ use datafusion_common::utils::{
     evaluate_partition_ranges, get_arrayref_at_indices, get_at_indices,
     get_record_batch_at_indices, get_row_at_idx,
 };
-use datafusion_common::{arrow_datafusion_err, exec_err, DataFusionError, Result};
+use datafusion_common::{
+    arrow_datafusion_err, exec_datafusion_err, exec_err, DataFusionError, Result,
+};
 use datafusion_execution::TaskContext;
 use datafusion_expr::window_state::{PartitionBatchState, WindowAggState};
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::window::{
     PartitionBatches, PartitionKey, PartitionWindowAggStates, WindowState,
 };
-use datafusion_physical_expr::{PhysicalExpr, PhysicalSortRequirement};
+use datafusion_physical_expr::{ExprMapping, PhysicalExpr, PhysicalSortRequirement};
 
 use ahash::RandomState;
-use datafusion_physical_expr_common::expressions::column::update_expression;
-use datafusion_physical_expr_common::physical_expr::ExprMapping;
 use futures::stream::Stream;
 use futures::{ready, StreamExt};
 use hashbrown::raw::RawTable;
@@ -361,15 +361,16 @@ impl ExecutionPlan for BoundedWindowAggExec {
         let new_keys = self
             .partition_keys
             .iter()
-            .filter_map(|key| update_expression(key.clone(), map))
+            .filter_map(|key| map.update_expression(key.clone()))
             .collect();
 
-        Ok(Some(Arc::new(BoundedWindowAggExec::try_new(
+        BoundedWindowAggExec::try_new(
             new_window_exprs,
             self.input.clone(),
             new_keys,
             self.input_order_mode.clone(),
-        )?)))
+        )
+        .map(|e| Some(Arc::new(e) as _))
     }
 }
 
@@ -1195,8 +1196,7 @@ fn get_aggregate_result_out_column(
             "Generated row number should be {len_to_show}, it is {running_length}"
         );
     }
-    result
-        .ok_or_else(|| DataFusionError::Execution("Should contain something".to_string()))
+    result.ok_or_else(|| exec_datafusion_err!("Should contain something"))
 }
 
 /// Constructs a batch from the last row of batch in the argument.

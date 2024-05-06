@@ -32,10 +32,8 @@ use crate::{
 use datafusion_common::{internal_err, Result};
 use datafusion_execution::memory_pool::MemoryConsumer;
 use datafusion_execution::TaskContext;
-use datafusion_physical_expr::{PhysicalExpr, PhysicalSortRequirement};
+use datafusion_physical_expr::{ExprMapping, PhysicalExpr, PhysicalSortRequirement};
 
-use datafusion_physical_expr_common::expressions::column::update_expression;
-use datafusion_physical_expr_common::physical_expr::ExprMapping;
 use log::{debug, trace};
 
 /// Sort preserving merge execution plan
@@ -277,12 +275,11 @@ impl ExecutionPlan for SortPreservingMergeExec {
             .expr
             .iter()
             .filter_map(|sort_expr| {
-                update_expression(sort_expr.expr.clone(), map).map(|new_sort_expr| {
-                    PhysicalSortExpr {
+                map.update_expression(sort_expr.expr.clone())
+                    .map(|new_sort_expr| PhysicalSortExpr {
                         expr: new_sort_expr,
                         options: sort_expr.options,
-                    }
-                })
+                    })
             })
             .collect::<Vec<_>>();
 
