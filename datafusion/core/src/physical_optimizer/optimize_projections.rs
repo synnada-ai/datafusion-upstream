@@ -67,7 +67,7 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{
     ConcreteTreeNode, Transformed, TreeNode, TreeNodeRecursion,
 };
-use datafusion_common::{JoinSide, JoinType};
+use datafusion_common::{internal_err, JoinSide, JoinType};
 use datafusion_physical_expr::expressions::{Column, Literal};
 use datafusion_physical_expr::utils::collect_columns;
 use datafusion_physical_expr::window::WindowExpr;
@@ -672,8 +672,9 @@ impl ProjectionOptimizer {
             let Some(new_plan) =
                 plan.update_expressions(&ExprMapping::new(schema_mapping.clone()))?
             else {
-                return Err(datafusion_common::DataFusionError::Internal(
-                    "Plans implementing expressions() must also implement update_expressions()".to_string()));
+                return internal_err!(
+                    "Plans implementing expressions() must also implement update_expressions()"
+                );
             };
 
             self = ProjectionOptimizer {
@@ -2159,8 +2160,9 @@ impl ProjectionOptimizer {
                     .clone()
                     .update_expressions(&ExprMapping::new(schema_mapping.clone()))?
                 else {
-                    return Err(datafusion_common::DataFusionError::Internal(
-                    "Plans implementing expressions() must also implement update_expressions()".to_string()));
+                    return internal_err!(
+                        "Plans implementing expressions() must also implement update_expressions()"
+                    );
                 };
                 let required_columns = collect_columns_in_plan_schema(&plan);
                 self = ProjectionOptimizer {
@@ -4028,9 +4030,7 @@ fn rewrite_filter(
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let map = ExprMapping::new(mapping.clone());
     let Some(new_expr) = map.update_expression(predicate.clone()) else {
-        return Err(datafusion_common::DataFusionError::Internal(
-            "Filter predicate cannot be rewritten".to_string(),
-        ));
+        return internal_err!("Filter predicate cannot be rewritten");
     };
     FilterExec::try_new(new_expr, input_plan).map(|plan| Arc::new(plan) as _)
 }
