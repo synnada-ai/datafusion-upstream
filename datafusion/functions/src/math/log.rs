@@ -17,6 +17,8 @@
 
 //! Math function: `log()`.
 
+use super::power::PowerFunc;
+use arrow::array::{ArrayRef, Float32Array, Float64Array};
 use arrow::datatypes::DataType;
 use datafusion_common::{
     exec_err, internal_err, plan_datafusion_err, plan_err, DataFusionError, Result,
@@ -25,14 +27,11 @@ use datafusion_common::{
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::simplify::{ExprSimplifyResult, SimplifyInfo};
 use datafusion_expr::sort_properties::{ExprProperties, SortProperties};
-
-use arrow::array::{ArrayRef, Float32Array, Float64Array};
-use datafusion_expr::TypeSignature::*;
+use datafusion_expr::{lit, ColumnarValue, Expr, ScalarUDF, TypeSignature::*};
 use datafusion_expr::{ScalarUDFImpl, Signature, Volatility};
+
 use std::any::Any;
 use std::sync::Arc;
-
-use super::power::PowerFunc;
 
 #[derive(Debug)]
 pub struct LogFunc {
