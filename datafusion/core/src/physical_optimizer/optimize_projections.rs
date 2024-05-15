@@ -466,26 +466,39 @@ impl ProjectionOptimizer {
         // (Making any computation dominates the existance of column elimination)
         if projection.expr().len() >= projection.input().schema().fields().len()
             || !projection.expr().iter().all(|(expr, _)| {
-                expr.as_any().downcast_ref::<Column>().is_some()
-                    || expr.as_any().downcast_ref::<Literal>().is_some()
+                expr.as_any().is::<Column>() || expr.as_any().is::<Literal>()
             })
         {
             return Ok(Transformed::no(self));
         }
 
-        // New child of the projection is its input child.
-        let updated_projection = self
-            .plan
-            .with_new_children(self.children_nodes[0].plan.children())?;
-        // The child of the projection is now parent of the projection.
-        self.plan = self.children_nodes[0]
-            .plan
-            .clone()
-            .with_new_children(vec![updated_projection.clone()])?;
+        let trivial_node = self.children_nodes.swap_remove(0);
+        let new_projection_nodes = trivial_node
+            .children_nodes
+            .into_iter()
+            .map(|gc| {
+                Ok(ProjectionOptimizer {
+                    plan: self.plan.clone().with_new_children(vec![gc.plan.clone()])?,
+                    required_columns: IndexSet::new(),
+                    schema_mapping: IndexMap::new(),
+                    children_nodes: vec![gc],
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-        self.children_nodes[0].plan = updated_projection;
+        self.plan = trivial_node.plan.with_new_children(
+            new_projection_nodes
+                .iter()
+                .map(|p| p.plan.clone())
+                .collect(),
+        )?;
+        self.children_nodes = new_projection_nodes;
+
         // Move the requirements without change.
-        self.children_nodes[0].required_columns = mem::take(&mut self.required_columns);
+        let child_reqs = mem::take(&mut self.required_columns);
+        self.children_nodes
+            .iter_mut()
+            .for_each(|c| c.required_columns.clone_from(&child_reqs));
 
         Ok(Transformed::yes(self))
     }
@@ -569,28 +582,22 @@ impl ProjectionOptimizer {
     /// When this function returns and recursion on the node finishes, the upper node plans
     /// are rewritten according to this mapping. This function also updates the parent
     /// requirements and extends them with self requirements before inserting them to its child(ren).
-    fn try_projection_insertion(mut self) -> Result<Self> {
+    fn try_projection_insertion(self) -> Result<Self> {
         let plan = self.plan.clone();
 
-        // These plans preserve the input schema, and do not add new requirements.
         if is_plan_schema_agnostic(&plan) {
             self.try_insert_below_schema_agnostic()
-        }
-        // ------------------------------------------------------------------------
-        // These plans also preserve the input schema, but may extend requirements.
-        else if is_plan_requirement_extender(&plan) {
+        } else if is_plan_requirement_extender(&plan) {
             self.try_insert_below_req_extender()
+        } else {
+            self.try_insert_below_custom_plans()
         }
-        // ------------------------------------------------------------------------
-        // Preserves schema and do not change requirements, but have multi-child.
-        else if plan.as_any().downcast_ref::<UnionExec>().is_some()
-            || plan.as_any().downcast_ref::<InterleaveExec>().is_some()
-        {
-            self.try_insert_below_union()
-        }
-        // ------------------------------------------------------------------------
+    }
+
+    fn try_insert_below_custom_plans(mut self) -> Result<ProjectionOptimizer> {
+        let plan = self.plan.clone();
         // Concatenates schemas and do not change requirements.
-        else if let Some(cj) = plan.as_any().downcast_ref::<CrossJoinExec>() {
+        if let Some(cj) = plan.as_any().downcast_ref::<CrossJoinExec>() {
             self.try_insert_below_cross_join(cj)
         }
         // ------------------------------------------------------------------------
@@ -610,11 +617,8 @@ impl ProjectionOptimizer {
                 return Ok(self);
             }
             self.try_insert_below_aggregate(agg)
-        } else if plan.as_any().downcast_ref::<WindowAggExec>().is_some()
-            || plan
-                .as_any()
-                .downcast_ref::<BoundedWindowAggExec>()
-                .is_some()
+        } else if plan.as_any().is::<WindowAggExec>()
+            || plan.as_any().is::<BoundedWindowAggExec>()
         {
             let window_exprs = collect_window_expressions(&self.plan);
             match self.try_insert_below_window_execs(window_exprs)? {
@@ -639,16 +643,22 @@ impl ProjectionOptimizer {
         let plan = self.plan.clone();
         let requirement_map = analyze_requirements(&self);
         if all_columns_required(&requirement_map) {
-            self.children_nodes[0].required_columns =
-                mem::take(&mut self.required_columns);
+            let required_columns = mem::take(&mut self.required_columns);
+            for c in self.children_nodes.iter_mut() {
+                c.required_columns.clone_from(&required_columns);
+            }
         } else {
-            let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
+            let (new_children, schema_mapping) =
+                self.insert_multi_projection_below_union(requirement_map)?;
+            let new_plan = plan.clone().with_new_children(
+                new_children.iter().map(|c| c.plan.clone()).collect(),
+            )?;
 
             self = ProjectionOptimizer {
-                plan: plan.with_new_children(vec![new_child.plan.clone()])?,
+                plan: new_plan,
                 required_columns: IndexSet::new(), // clear the requirements
                 schema_mapping,
-                children_nodes: vec![new_child],
+                children_nodes: new_children,
             }
         }
         Ok(self)
@@ -666,7 +676,8 @@ impl ProjectionOptimizer {
                 mem::take(&mut self.required_columns);
         } else {
             let plan = self.plan.clone();
-            let (new_child, schema_mapping) = self.insert_projection(requirement_map)?;
+            let (mut new_child, schema_mapping) =
+                self.insert_projection(requirement_map)?;
 
             let Some(new_plan) =
                 plan.update_expressions(&ExprMapping::new(schema_mapping.clone()))?
@@ -680,40 +691,7 @@ impl ProjectionOptimizer {
                 plan: new_plan,
                 required_columns: IndexSet::new(), // clear the requirements
                 schema_mapping,
-                children_nodes: vec![new_child],
-            }
-        }
-        Ok(self)
-    }
-
-    /// Attempts to insert a projection node below a `UnionExec` node in the query execution plan.
-    ///
-    /// This method checks the requirements of the current execution plan to determine if there is any redundancy
-    /// when it comes to column usage in the context of a `UnionExec`. If all columns are required as per the
-    /// requirement map, the method updates the required columns for all child nodes accordingly. If not all
-    /// columns are required, it inserts new projection nodes to optimize the plan, leading to a more efficient
-    /// execution by reducing unnecessary data processing.
-    fn try_insert_below_union(mut self) -> Result<ProjectionOptimizer> {
-        // UnionExec does not change requirements. We can directly check whether there is a redundancy.
-        let requirement_map = analyze_requirements(&self);
-        if all_columns_required(&requirement_map) {
-            let required_columns = mem::take(&mut self.required_columns);
-            for c in self.children_nodes.iter_mut() {
-                c.required_columns.clone_from(&required_columns);
-            }
-        } else {
-            let plan = self.plan.clone();
-            let (new_children, schema_mapping) =
-                self.insert_multi_projection_below_union(requirement_map)?;
-            let new_plan = plan.clone().with_new_children(
-                new_children.iter().map(|c| c.plan.clone()).collect(),
-            )?;
-
-            self = ProjectionOptimizer {
-                plan: new_plan,
-                required_columns: IndexSet::new(), // clear the requirements
-                schema_mapping,
-                children_nodes: new_children,
+                children_nodes: vec![new_child.swap_remove(0)],
             }
         }
         Ok(self)
@@ -2114,7 +2092,7 @@ impl ProjectionOptimizer {
             ) {
                 if window_exprs.iter().any(|expr| {
                     expr.clone()
-                        .update_expression(&ExprMapping::new(IndexMap::new()))
+                        .update_expression(&ExprMapping::new(self.schema_mapping.clone()))
                         .is_none()
                 }) {
                     self.children_nodes[0].required_columns = self
@@ -2198,29 +2176,48 @@ impl ProjectionOptimizer {
     fn insert_projection(
         self,
         requirement_map: ColumnRequirements,
-    ) -> Result<(Self, IndexMap<Column, Column>)> {
+    ) -> Result<(Vec<Self>, IndexMap<Column, Column>)> {
         // During the iteration, we construct the ProjectionExec with required columns as the new child,
         // and also collect the unused columns to store the index changes after removal of some columns.
         let (used_columns, unused_columns) =
             partition_column_requirements(requirement_map);
 
         let projected_exprs = convert_projection_exprs(used_columns);
-        let inserted_projection = Arc::new(ProjectionExec::try_new(
-            projected_exprs,
-            self.plan.children()[0].clone(),
-        )?) as _;
+        let inserted_projections = self
+            .plan
+            .children()
+            .into_iter()
+            .map(|child_plan| {
+                Ok(Arc::new(ProjectionExec::try_new(
+                    projected_exprs.clone(),
+                    child_plan,
+                )?) as _)
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-        let new_requirements = collect_columns_in_plan_schema(&inserted_projection);
+        let new_requirements = inserted_projections
+            .iter()
+            .map(|inserted_projection| {
+                collect_columns_in_plan_schema(inserted_projection)
+            })
+            .collect::<Vec<_>>();
+
         let new_mapping =
             calculate_column_mapping(&self.required_columns, &unused_columns);
 
-        let result = ProjectionOptimizer {
-            plan: inserted_projection,
-            required_columns: new_requirements,
-            schema_mapping: IndexMap::new(),
-            children_nodes: self.children_nodes,
-        };
-        Ok((result, new_mapping))
+        let inserted_projection_nodes = inserted_projections
+            .into_iter()
+            .zip(self.children_nodes)
+            .enumerate()
+            .map(|(idx, (p, child))| ProjectionOptimizer {
+                plan: p,
+                required_columns: new_requirements[idx].clone(),
+                schema_mapping: IndexMap::new(),
+                children_nodes: vec![child],
+            })
+            .collect();
+
+        Ok((inserted_projection_nodes, new_mapping))
     }
 
     /// Multi-child version of `insert_projection` for `UnionExec`'s.
@@ -3091,17 +3088,17 @@ impl PhysicalOptimizerRule for OptimizeProjections {
 fn is_plan_schema_determinant(plan: &Arc<dyn ExecutionPlan>) -> bool {
     let plan_any = plan.as_any();
 
-    plan_any.downcast_ref::<ProjectionExec>().is_some()
-        | plan_any.downcast_ref::<AggregateExec>().is_some()
-        | plan_any.downcast_ref::<WindowAggExec>().is_some()
-        | plan_any.downcast_ref::<BoundedWindowAggExec>().is_some()
-        | plan_any.downcast_ref::<CrossJoinExec>().is_some()
-        | plan_any.downcast_ref::<HashJoinExec>().is_some()
-        | plan_any.downcast_ref::<SymmetricHashJoinExec>().is_some()
-        | plan_any.downcast_ref::<NestedLoopJoinExec>().is_some()
-        | plan_any.downcast_ref::<SortMergeJoinExec>().is_some()
-        | plan_any.downcast_ref::<UnionExec>().is_some()
-        | plan_any.downcast_ref::<InterleaveExec>().is_some()
+    plan_any.is::<ProjectionExec>()
+        | plan_any.is::<AggregateExec>()
+        | plan_any.is::<WindowAggExec>()
+        | plan_any.is::<BoundedWindowAggExec>()
+        | plan_any.is::<CrossJoinExec>()
+        | plan_any.is::<HashJoinExec>()
+        | plan_any.is::<SymmetricHashJoinExec>()
+        | plan_any.is::<NestedLoopJoinExec>()
+        | plan_any.is::<SortMergeJoinExec>()
+        | plan_any.is::<UnionExec>()
+        | plan_any.is::<InterleaveExec>()
 }
 
 /// Given a plan, the function returns the closest node to the root which updates the schema.
@@ -4439,25 +4436,26 @@ fn rewrite_bounded_window_aggregate(
 /// the order with projections without any further adaptation.
 fn is_plan_schema_agnostic(plan: &Arc<dyn ExecutionPlan>) -> bool {
     let plan_any = plan.as_any();
-    plan_any.downcast_ref::<GlobalLimitExec>().is_some()
-        || plan_any.downcast_ref::<LocalLimitExec>().is_some()
-        || plan_any.downcast_ref::<CoalesceBatchesExec>().is_some()
-        || plan_any.downcast_ref::<CoalescePartitionsExec>().is_some()
+    plan_any.is::<GlobalLimitExec>()
+        || plan_any.is::<LocalLimitExec>()
+        || plan_any.is::<CoalesceBatchesExec>()
+        || plan_any.is::<CoalescePartitionsExec>()
+        || plan_any.is::<UnionExec>()
+        || plan_any.is::<InterleaveExec>()
 }
 
 fn is_plan_requirement_extender(plan: &Arc<dyn ExecutionPlan>) -> bool {
     let plan_any = plan.as_any();
-    plan_any.downcast_ref::<FilterExec>().is_some()
-        || plan_any.downcast_ref::<RepartitionExec>().is_some()
-        || plan_any.downcast_ref::<SortExec>().is_some()
-        || plan_any.downcast_ref::<SortPreservingMergeExec>().is_some()
+    plan_any.is::<FilterExec>()
+        || plan_any.is::<RepartitionExec>()
+        || plan_any.is::<SortExec>()
+        || plan_any.is::<SortPreservingMergeExec>()
 }
 
 /// Checks if the given expression is trivial.
 /// An expression is considered trivial if it is either a `Column` or a `Literal`.
 fn is_expr_trivial(expr: &Arc<dyn PhysicalExpr>) -> bool {
-    expr.as_any().downcast_ref::<Column>().is_some()
-        || expr.as_any().downcast_ref::<Literal>().is_some()
+    expr.as_any().is::<Column>() || expr.as_any().is::<Literal>()
 }
 
 /// Compare the inputs and outputs of the projection. All expressions must be
@@ -5903,10 +5901,12 @@ mod tests {
         let after_optimize =
             OptimizeProjections::new().optimize(projection, &ConfigOptions::new())?;
         let expected = [
-            "ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]",
-            "  UnionExec",
-            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false",
-            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false",
+            "UnionExec", 
+            "  ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]", 
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false", 
+            "  ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]", 
+            "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false", 
+            "  ProjectionExec: expr=[c@2 as c, a@0 as new_a, b@1 as b]", 
             "    CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c], has_header=false"
         ];
 
