@@ -110,11 +110,6 @@ impl PhysicalOptimizer {
             // Remove the ancillary output requirement operator since we are done with the planning
             // phase.
             Arc::new(OutputRequirements::new_remove_mode()),
-            // The PipelineChecker rule will reject non-runnable query plans that use
-            // pipeline-breaking operators on infinite input(s). The rule generates a
-            // diagnostic error message when this happens. It makes no changes to the
-            // given query plan; i.e. it only acts as a final gatekeeping rule.
-            Arc::new(PipelineChecker::new()),
             // The aggregation limiter will try to find situations where the accumulator count
             // is not tied to the cardinality, i.e. when the output of the aggregation is passed
             // into an `order by max(x) limit y`. In this case it will copy the limit value down
@@ -124,6 +119,11 @@ impl PhysicalOptimizer {
             // in plans. It ensures that query plans are free from unnecessary projections
             // and that no unused columns are propagated unnecessarily between plans.
             Arc::new(OptimizeProjections::new()),
+            // The PipelineChecker rule will reject non-runnable query plans that use
+            // pipeline-breaking operators on infinite input(s). The rule generates a
+            // diagnostic error message when this happens. It makes no changes to the
+            // given query plan; i.e. it only acts as a final gatekeeping rule.
+            Arc::new(PipelineChecker::new()),
         ];
 
         Self::with_rules(rules)
