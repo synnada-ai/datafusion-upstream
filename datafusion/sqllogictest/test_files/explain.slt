@@ -253,7 +253,7 @@ physical_plan after coalesce_batches SAME TEXT AS ABOVE
 physical_plan after OutputRequirements CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/example.csv]]}, projection=[a, b, c], has_header=true
 physical_plan after LimitAggregation SAME TEXT AS ABOVE
 physical_plan after OptimizeProjections SAME TEXT AS ABOVE
-physical_plan after ProjectionPushdown SAME TEXT AS ABOVE
+physical_plan after PipelineChecker SAME TEXT AS ABOVE
 physical_plan CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/example.csv]]}, projection=[a, b, c], has_header=true
 physical_plan_with_stats CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/example.csv]]}, projection=[a, b, c], has_header=true, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]
 

@@ -89,6 +89,7 @@ use datafusion_physical_plan::joins::{
     SymmetricHashJoinExec,
 };
 use datafusion_physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
+use datafusion_physical_plan::recursive_query::RecursiveQueryExec;
 use datafusion_physical_plan::repartition::RepartitionExec;
 use datafusion_physical_plan::sorts::sort::SortExec;
 use datafusion_physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
@@ -3089,16 +3090,18 @@ fn is_plan_schema_determinant(plan: &Arc<dyn ExecutionPlan>) -> bool {
     let plan_any = plan.as_any();
 
     plan_any.is::<ProjectionExec>()
-        | plan_any.is::<AggregateExec>()
-        | plan_any.is::<WindowAggExec>()
-        | plan_any.is::<BoundedWindowAggExec>()
-        | plan_any.is::<CrossJoinExec>()
-        | plan_any.is::<HashJoinExec>()
-        | plan_any.is::<SymmetricHashJoinExec>()
-        | plan_any.is::<NestedLoopJoinExec>()
-        | plan_any.is::<SortMergeJoinExec>()
-        | plan_any.is::<UnionExec>()
-        | plan_any.is::<InterleaveExec>()
+        || plan_any.is::<AggregateExec>()
+        || plan_any.is::<WindowAggExec>()
+        || plan_any.is::<BoundedWindowAggExec>()
+        || plan_any.is::<CrossJoinExec>()
+        || plan_any.is::<HashJoinExec>()
+        || plan_any.is::<SymmetricHashJoinExec>()
+        || plan_any.is::<NestedLoopJoinExec>()
+        || plan_any.is::<SortMergeJoinExec>()
+        || plan_any.is::<UnionExec>()
+        || plan_any.is::<InterleaveExec>()
+        || plan_any.is::<RecursiveQueryExec>()
+        || plan.children().len() != 1
 }
 
 /// Given a plan, the function returns the closest node to the root which updates the schema.
@@ -3245,8 +3248,9 @@ fn collect_projection_input_requirements(
     projection_exprs: &[(Arc<dyn PhysicalExpr>, String)],
 ) -> IndexSet<Column> {
     required_columns
-        .iter()
-        .flat_map(|e| collect_columns(&projection_exprs[e.index()].0))
+        .into_iter()
+        .filter_map(|c| projection_exprs.get(c.index()).map(|e| e.0.clone()))
+        .flat_map(|e| collect_columns(&e))
         .collect::<IndexSet<_>>()
 }
 
@@ -4880,8 +4884,8 @@ mod tests {
     };
     use datafusion_execution::object_store::ObjectStoreUrl;
     use datafusion_expr::{
-        ColumnarValue, Operator, ScalarFunctionDefinition, ScalarUDF, ScalarUDFImpl,
-        Signature, Volatility, WindowFrame,
+        ColumnarValue, Operator, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+        WindowFrame,
     };
     use datafusion_physical_expr::expressions::{
         rank, BinaryExpr, CaseExpr, CastExpr, Column, Literal, NegativeExpr, RowNumber,
@@ -5007,7 +5011,7 @@ mod tests {
             Arc::new(NegativeExpr::new(Arc::new(Column::new("f", 4)))),
             Arc::new(ScalarFunctionExpr::new(
                 "scalar_expr",
-                ScalarFunctionDefinition::UDF(Arc::new(ScalarUDF::from(AddOne::new()))),
+                Arc::new(ScalarUDF::new_from_impl(AddOne::new())),
                 vec![
                     Arc::new(BinaryExpr::new(
                         Arc::new(Column::new("b", 1)),
@@ -5073,7 +5077,7 @@ mod tests {
             Arc::new(NegativeExpr::new(Arc::new(Column::new("f", 5)))),
             Arc::new(ScalarFunctionExpr::new(
                 "scalar_expr",
-                ScalarFunctionDefinition::UDF(Arc::new(ScalarUDF::from(AddOne::new()))),
+                Arc::new(ScalarUDF::new_from_impl(AddOne::new())),
                 vec![
                     Arc::new(BinaryExpr::new(
                         Arc::new(Column::new("b", 1)),
@@ -5142,7 +5146,7 @@ mod tests {
             Arc::new(NegativeExpr::new(Arc::new(Column::new("f", 4)))),
             Arc::new(ScalarFunctionExpr::new(
                 "scalar_expr",
-                ScalarFunctionDefinition::UDF(Arc::new(ScalarUDF::from(AddOne::new()))),
+                Arc::new(ScalarUDF::new_from_impl(AddOne::new())),
                 vec![
                     Arc::new(BinaryExpr::new(
                         Arc::new(Column::new("b", 1)),
@@ -5208,7 +5212,7 @@ mod tests {
             Arc::new(NegativeExpr::new(Arc::new(Column::new("f_new", 5)))),
             Arc::new(ScalarFunctionExpr::new(
                 "scalar_expr",
-                ScalarFunctionDefinition::UDF(Arc::new(ScalarUDF::from(AddOne::new()))),
+                Arc::new(ScalarUDF::new_from_impl(AddOne::new())),
                 vec![
                     Arc::new(BinaryExpr::new(
                         Arc::new(Column::new("b_new", 1)),
