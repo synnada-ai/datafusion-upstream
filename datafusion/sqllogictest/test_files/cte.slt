@@ -736,11 +736,11 @@ physical_plan
 05)----CrossJoinExec
 06)------CoalescePartitionsExec
 07)--------CoalesceBatchesExec: target_batch_size=8182
-08)----------FilterExec: val@0 < 2
-09)------------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
-10)--------------WorkTableExec: name=recursive_cte
-11)------ProjectionExec: expr=[2 as val]
-12)--------PlaceholderRowExec
+08)----------ProjectionExec: expr=[]
+09)------------FilterExec: val@0 < 2
+10)--------------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+11)----------------WorkTableExec: name=recursive_cte
+12)------PlaceholderRowExec
 
 # Test issue: https://github.com/apache/datafusion/issues/9794
 # Non-recursive term and recursive term have different types
