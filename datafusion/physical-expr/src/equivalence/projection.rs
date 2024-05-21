@@ -49,16 +49,15 @@ impl ProjectionMapping {
     ///
     /// where `col("c + d")` means the column named `"c + d"`.
     pub fn try_new(
-        expr: &[(Arc<dyn PhysicalExpr>, String)],
+        expr: Vec<(Arc<dyn PhysicalExpr>, String)>,
         input_schema: &SchemaRef,
     ) -> Result<Self> {
         // Construct a map from the input expressions to the output expression of the projection:
-        expr.iter()
+        expr.into_iter()
             .enumerate()
             .map(|(expr_idx, (expression, name))| {
-                let target_expr = Arc::new(Column::new(name, expr_idx)) as _;
+                let target_expr = Arc::new(Column::new(&name, expr_idx)) as _;
                 expression
-                    .clone()
                     .transform_down(|e| match e.as_any().downcast_ref::<Column>() {
                         Some(col) => {
                             // Sometimes, an expression and its name in the input_schema
@@ -70,7 +69,7 @@ impl ProjectionMapping {
                             if col.name() != matching_input_field.name() {
                                 return internal_err!("Input field name {} does not match with the projection expression {}",
                                     matching_input_field.name(),col.name())
-                                }
+                            }
                             let matching_input_column =
                                 Column::new(matching_input_field.name(), idx);
                             Ok(Transformed::yes(Arc::new(matching_input_column)))
@@ -599,7 +598,7 @@ mod tests {
                 .into_iter()
                 .map(|(expr, name)| (expr.clone(), name))
                 .collect::<Vec<_>>();
-            let projection_mapping = ProjectionMapping::try_new(&proj_exprs, &schema)?;
+            let projection_mapping = ProjectionMapping::try_new(proj_exprs, &schema)?;
             let output_schema = output_schema(&projection_mapping, &schema)?;
 
             let expected = expected
@@ -675,7 +674,7 @@ mod tests {
             .into_iter()
             .map(|(expr, name)| (expr.clone(), name))
             .collect::<Vec<_>>();
-        let projection_mapping = ProjectionMapping::try_new(&proj_exprs, &schema)?;
+        let projection_mapping = ProjectionMapping::try_new(proj_exprs, &schema)?;
         let output_schema = output_schema(&projection_mapping, &schema)?;
 
         let col_a_new = &col("a_new", &output_schema)?;
@@ -856,7 +855,7 @@ mod tests {
             .into_iter()
             .map(|(expr, name)| (expr.clone(), name))
             .collect::<Vec<_>>();
-        let projection_mapping = ProjectionMapping::try_new(&proj_exprs, &schema)?;
+        let projection_mapping = ProjectionMapping::try_new(proj_exprs, &schema)?;
         let output_schema = output_schema(&projection_mapping, &schema)?;
 
         let col_a_plus_b_new = &col("a+b", &output_schema)?;
@@ -1096,7 +1095,7 @@ mod tests {
                     )?;
 
                     let projection_mapping =
-                        ProjectionMapping::try_new(&proj_exprs, &test_schema)?;
+                        ProjectionMapping::try_new(proj_exprs, &test_schema)?;
 
                     let projected_exprs = projection_mapping
                         .iter()

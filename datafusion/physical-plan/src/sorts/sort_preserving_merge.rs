@@ -32,7 +32,7 @@ use crate::{
 use datafusion_common::{internal_err, Result};
 use datafusion_execution::memory_pool::MemoryConsumer;
 use datafusion_execution::TaskContext;
-use datafusion_physical_expr::PhysicalSortRequirement;
+use datafusion_physical_expr::{ExprMapping, PhysicalExpr, PhysicalSortRequirement};
 
 use log::{debug, trace};
 
@@ -256,6 +256,37 @@ impl ExecutionPlan for SortPreservingMergeExec {
 
     fn statistics(&self) -> Result<Statistics> {
         self.input.statistics()
+    }
+
+    fn expressions(&self) -> Option<Vec<Arc<dyn PhysicalExpr>>> {
+        Some(
+            self.expr()
+                .iter()
+                .map(|sort_expr| sort_expr.expr.clone())
+                .collect(),
+        )
+    }
+
+    fn update_expressions(
+        self: Arc<Self>,
+        map: &ExprMapping,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        let new_sort_exprs = self
+            .expr
+            .iter()
+            .filter_map(|sort_expr| {
+                map.update_expression(sort_expr.expr.clone())
+                    .map(|new_sort_expr| PhysicalSortExpr {
+                        expr: new_sort_expr,
+                        options: sort_expr.options,
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(Some(Arc::new(
+            SortPreservingMergeExec::new(new_sort_exprs, self.input.clone())
+                .with_fetch(self.fetch),
+        )))
     }
 }
 

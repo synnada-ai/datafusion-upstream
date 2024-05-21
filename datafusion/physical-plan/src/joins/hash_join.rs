@@ -543,7 +543,7 @@ impl HashJoinExec {
             let projection_exprs = project_index_to_exprs(projection, &schema);
             // construct a map from the input expressions to the output expression of the Projection
             let projection_mapping =
-                ProjectionMapping::try_new(&projection_exprs, &schema)?;
+                ProjectionMapping::try_new(projection_exprs, &schema)?;
             let out_schema = project_schema(&schema, Some(projection))?;
             if let Partitioning::Hash(exprs, part) = output_partitioning {
                 let normalized_exprs = exprs

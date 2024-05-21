@@ -48,7 +48,7 @@ use arrow::record_batch::RecordBatch;
 use arrow::row::{RowConverter, SortField};
 use arrow_array::{Array, RecordBatchOptions, UInt32Array};
 use arrow_schema::DataType;
-use datafusion_common::{exec_err, DataFusionError, Result};
+use datafusion_common::{exec_datafusion_err, exec_err, internal_err, Result};
 use datafusion_common_runtime::SpawnedTask;
 use datafusion_execution::disk_manager::RefCountedTempFile;
 use datafusion_execution::memory_pool::{
@@ -56,7 +56,7 @@ use datafusion_execution::memory_pool::{
 };
 use datafusion_execution::runtime_env::RuntimeEnv;
 use datafusion_execution::TaskContext;
-use datafusion_physical_expr::LexOrdering;
+use datafusion_physical_expr::{ExprMapping, LexOrdering, PhysicalExpr};
 
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, error, trace};
@@ -340,10 +340,7 @@ impl ExternalSorter {
 
             for spill in self.spills.drain(..) {
                 if !spill.path().exists() {
-                    return Err(DataFusionError::Internal(format!(
-                        "Spill file {:?} does not exist",
-                        spill.path()
-                    )));
+                    return internal_err!("Spill file {:?} does not exist", spill.path());
                 }
                 let stream = read_spill_as_stream(spill, self.schema.clone())?;
                 streams.push(stream);
@@ -726,7 +723,7 @@ fn read_spill(sender: Sender<Result<RecordBatch>>, path: &Path) -> Result<()> {
     for batch in reader {
         sender
             .blocking_send(batch.map_err(Into::into))
-            .map_err(|e| DataFusionError::Execution(format!("{e}")))?;
+            .map_err(|e| exec_datafusion_err!("{e}"))?;
     }
     Ok(())
 }
@@ -991,6 +988,38 @@ impl ExecutionPlan for SortExec {
 
     fn statistics(&self) -> Result<Statistics> {
         self.input.statistics()
+    }
+
+    fn expressions(&self) -> Option<Vec<Arc<dyn PhysicalExpr>>> {
+        Some(
+            self.expr()
+                .iter()
+                .map(|sort_expr| sort_expr.expr.clone())
+                .collect(),
+        )
+    }
+
+    fn update_expressions(
+        self: Arc<Self>,
+        map: &ExprMapping,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        let new_sort_exprs = self
+            .expr()
+            .iter()
+            .filter_map(|sort_expr| {
+                map.update_expression(sort_expr.expr.clone())
+                    .map(|new_sort_expr| PhysicalSortExpr {
+                        expr: new_sort_expr,
+                        options: sort_expr.options,
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(Some(Arc::new(
+            SortExec::new(new_sort_exprs, self.input.clone())
+                .with_preserve_partitioning(self.preserve_partitioning)
+                .with_fetch(self.fetch),
+        )))
     }
 }
 

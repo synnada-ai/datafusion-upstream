@@ -33,7 +33,8 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::Result;
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr::{
-    EquivalenceProperties, LexOrdering, PhysicalSortExpr, PhysicalSortRequirement,
+    EquivalenceProperties, ExprMapping, LexOrdering, PhysicalSortExpr,
+    PhysicalSortRequirement,
 };
 
 use futures::stream::TryStreamExt;
@@ -425,6 +426,17 @@ pub trait ExecutionPlan: Debug + DisplayAs + Send + Sync {
     /// an error.
     fn statistics(&self) -> Result<Statistics> {
         Ok(Statistics::new_unknown(&self.schema()))
+    }
+
+    fn expressions(&self) -> Option<Vec<Arc<dyn PhysicalExpr>>> {
+        None
+    }
+
+    fn update_expressions(
+        self: Arc<Self>,
+        _map: &ExprMapping,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        Ok(None)
     }
 }
 

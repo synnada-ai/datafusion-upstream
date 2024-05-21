@@ -113,7 +113,7 @@ fn get_common_requirement_of_aggregate_input(
                 InputOrderMode::Linear
             };
         let projection_mapping =
-            ProjectionMapping::try_new(group_by.expr(), &input.schema())?;
+            ProjectionMapping::try_new(group_by.expr().to_vec(), &input.schema())?;
 
         let cache = AggregateExec::compute_properties(
             input,

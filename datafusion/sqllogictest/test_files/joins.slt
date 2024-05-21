@@ -2031,8 +2031,8 @@ physical_plan
 01)ProjectionExec: expr=[t1_id@1 as t1_id, t2_id@0 as t2_id]
 02)--NestedLoopJoinExec: join_type=Inner, filter=t1_id@0 > t2_id@1
 03)----CoalescePartitionsExec
-04)------ProjectionExec: expr=[t2_id@0 as t2_id]
-05)--------CoalesceBatchesExec: target_batch_size=2
+04)------CoalesceBatchesExec: target_batch_size=2
+05)--------ProjectionExec: expr=[t2_id@0 as t2_id]
 06)----------FilterExec: t2_int@1 > 1
 07)------------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
 08)--------------MemoryExec: partitions=1, partition_sizes=[1]

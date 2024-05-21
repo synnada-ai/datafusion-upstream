@@ -20,7 +20,6 @@
 use std::sync::Arc;
 
 use super::convert_first_last::OptimizeAggregateOrder;
-use super::projection_pushdown::ProjectionPushdown;
 use crate::config::ConfigOptions;
 use crate::physical_optimizer::aggregate_statistics::AggregateStatistics;
 use crate::physical_optimizer::coalesce_batches::CoalesceBatches;
@@ -29,6 +28,7 @@ use crate::physical_optimizer::enforce_distribution::EnforceDistribution;
 use crate::physical_optimizer::enforce_sorting::EnforceSorting;
 use crate::physical_optimizer::join_selection::JoinSelection;
 use crate::physical_optimizer::limited_distinct_aggregation::LimitedDistinctAggregation;
+use crate::physical_optimizer::optimize_projections::OptimizeProjections;
 use crate::physical_optimizer::output_requirements::OutputRequirements;
 use crate::physical_optimizer::pipeline_checker::PipelineChecker;
 use crate::physical_optimizer::topk_aggregation::TopKAggregation;
@@ -104,8 +104,6 @@ impl PhysicalOptimizer {
             Arc::new(EnforceSorting::new()),
             // Run once after the local sorting requirement is changed
             Arc::new(OptimizeAggregateOrder::new()),
-            // TODO: `try_embed_to_hash_join` in the ProjectionPushdown rule would be block by the CoalesceBatches, so add it before CoalesceBatches. Maybe optimize it in the future.
-            Arc::new(ProjectionPushdown::new()),
             // The CoalesceBatches rule will not influence the distribution and ordering of the
             // whole plan tree. Therefore, to avoid influencing other rules, it should run last.
             Arc::new(CoalesceBatches::new()),
@@ -117,13 +115,10 @@ impl PhysicalOptimizer {
             // into an `order by max(x) limit y`. In this case it will copy the limit value down
             // to the aggregation, allowing it to use only y number of accumulators.
             Arc::new(TopKAggregation::new()),
-            // The ProjectionPushdown rule tries to push projections towards
-            // the sources in the execution plan. As a result of this process,
-            // a projection can disappear if it reaches the source providers, and
-            // sequential projections can merge into one. Even if these two cases
-            // are not present, the load of executors such as join or union will be
-            // reduced by narrowing their input tables.
-            Arc::new(ProjectionPushdown::new()),
+            // OptimizeProjections rule aims to achieve the most effective use of projections
+            // in plans. It ensures that query plans are free from unnecessary projections
+            // and that no unused columns are propagated unnecessarily between plans.
+            Arc::new(OptimizeProjections::new()),
             // The PipelineChecker rule will reject non-runnable query plans that use
             // pipeline-breaking operators on infinite input(s). The rule generates a
             // diagnostic error message when this happens. It makes no changes to the

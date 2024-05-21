@@ -46,7 +46,9 @@ use datafusion_common::{arrow_datafusion_err, not_impl_err, DataFusionError, Res
 use datafusion_common_runtime::SpawnedTask;
 use datafusion_execution::memory_pool::MemoryConsumer;
 use datafusion_execution::TaskContext;
-use datafusion_physical_expr::{EquivalenceProperties, PhysicalExpr, PhysicalSortExpr};
+use datafusion_physical_expr::{
+    EquivalenceProperties, ExprMapping, PhysicalExpr, PhysicalSortExpr,
+};
 
 use futures::stream::Stream;
 use futures::{FutureExt, StreamExt, TryStreamExt};
@@ -659,6 +661,33 @@ impl ExecutionPlan for RepartitionExec {
 
     fn statistics(&self) -> Result<Statistics> {
         self.input.statistics()
+    }
+
+    fn expressions(&self) -> Option<Vec<Arc<dyn PhysicalExpr>>> {
+        if let Partitioning::Hash(exprs, _size) = self.partitioning() {
+            Some(exprs.clone())
+        } else {
+            Some(vec![])
+        }
+    }
+
+    fn update_expressions(
+        self: Arc<Self>,
+        map: &ExprMapping,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        let new_partitioning = if let Partitioning::Hash(exprs, size) = &self.partitioning
+        {
+            let updated_exprs = exprs
+                .iter()
+                .map(|expr| map.update_expression(expr.clone()))
+                .collect::<Vec<_>>();
+            Partitioning::Hash(updated_exprs.into_iter().flatten().collect(), *size)
+        } else {
+            self.partitioning.clone()
+        };
+
+        RepartitionExec::try_new(self.input.clone(), new_partitioning)
+            .map(|e| Some(Arc::new(e) as _))
     }
 }
 

@@ -15,7 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arrow_schema::{SchemaRef, SortOptions};
@@ -24,6 +23,7 @@ use itertools::Itertools;
 
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{JoinSide, JoinType, Result};
+use datafusion_physical_expr_common::physical_expr::ExprWrapper;
 
 use crate::equivalence::{
     collapse_lex_req, EquivalenceGroup, OrderingEquivalenceClass, ProjectionMapping,
@@ -1329,24 +1329,6 @@ fn updated_right_ordering_equivalence_class(
     }
 }
 
-/// Wrapper struct for `Arc<dyn PhysicalExpr>` to use them as keys in a hash map.
-#[derive(Debug, Clone)]
-struct ExprWrapper(Arc<dyn PhysicalExpr>);
-
-impl PartialEq<Self> for ExprWrapper {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.eq(&other.0)
-    }
-}
-
-impl Eq for ExprWrapper {}
-
-impl Hash for ExprWrapper {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::ops::Not;
@@ -1386,7 +1368,7 @@ mod tests {
             (col_a.clone(), "a3".to_string()),
             (col_a.clone(), "a4".to_string()),
         ];
-        let projection_mapping = ProjectionMapping::try_new(&proj_exprs, &input_schema)?;
+        let projection_mapping = ProjectionMapping::try_new(proj_exprs, &input_schema)?;
 
         let out_schema = output_schema(&projection_mapping, &input_schema)?;
         // a as a1, a as a2, a as a3, a as a3
@@ -1396,7 +1378,7 @@ mod tests {
             (col_a.clone(), "a3".to_string()),
             (col_a.clone(), "a4".to_string()),
         ];
-        let projection_mapping = ProjectionMapping::try_new(&proj_exprs, &input_schema)?;
+        let projection_mapping = ProjectionMapping::try_new(proj_exprs, &input_schema)?;
 
         // a as a1, a as a2, a as a3, a as a3
         let col_a1 = &col("a1", &out_schema)?;

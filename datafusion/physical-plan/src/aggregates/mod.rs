@@ -389,7 +389,7 @@ impl AggregateExec {
 
         // construct a map from the input expression to the output expression of the Aggregation group by
         let projection_mapping =
-            ProjectionMapping::try_new(&group_by.expr, &input.schema())?;
+            ProjectionMapping::try_new(group_by.expr.clone(), &input.schema())?;
 
         let required_input_ordering =
             (!new_requirement.is_empty()).then_some(new_requirement);

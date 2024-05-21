@@ -20,16 +20,20 @@ use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use crate::expressions::column::Column;
+use crate::sort_properties::SortProperties;
+use crate::utils::scatter;
+
 use arrow::array::BooleanArray;
 use arrow::compute::filter_record_batch;
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
+use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{internal_err, not_impl_err, Result};
 use datafusion_expr::interval_arithmetic::Interval;
 use datafusion_expr::ColumnarValue;
 
-use crate::sort_properties::SortProperties;
-use crate::utils::scatter;
+use indexmap::IndexMap;
 
 /// See [create_physical_expr](https://docs.rs/datafusion/latest/datafusion/physical_expr/fn.create_physical_expr.html)
 /// for examples of creating `PhysicalExpr` from `Expr`
@@ -206,5 +210,97 @@ pub fn down_cast_any_ref(any: &dyn Any) -> &dyn Any {
             .as_any()
     } else {
         any
+    }
+}
+
+/// Wrapper struct for `Arc<dyn PhysicalExpr>` to use them as keys in a hash map.
+#[derive(Debug, Clone)]
+pub struct ExprWrapper(pub Arc<dyn PhysicalExpr>);
+
+impl PartialEq<Self> for ExprWrapper {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq(&other.0)
+    }
+}
+
+impl Eq for ExprWrapper {}
+
+impl Hash for ExprWrapper {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+#[derive(Debug)]
+pub struct ExprMapping {
+    map: IndexMap<ExprWrapper, Option<Arc<dyn PhysicalExpr>>>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ExprMappingValue {
+    Present(Arc<dyn PhysicalExpr>),
+    Deleted,
+    Absent,
+}
+
+impl ExprMapping {
+    pub fn new<I: IntoIterator<Item = (Column, Column)>>(
+        schema_mapping: I,
+    ) -> ExprMapping {
+        let map = schema_mapping
+            .into_iter()
+            .map(|(source, target)| {
+                (ExprWrapper(Arc::new(source)), Some(Arc::new(target) as _))
+            })
+            .collect();
+        Self { map }
+    }
+
+    pub fn get(
+        &self,
+        key: Arc<dyn PhysicalExpr>,
+    ) -> (Arc<dyn PhysicalExpr>, ExprMappingValue) {
+        let key_wrapper = ExprWrapper(key);
+        if let Some(result) = self.map.get(&key_wrapper) {
+            if let Some(expr) = result {
+                (key_wrapper.0, ExprMappingValue::Present(expr.clone()))
+            } else {
+                (key_wrapper.0, ExprMappingValue::Deleted)
+            }
+        } else {
+            (key_wrapper.0, ExprMappingValue::Absent)
+        }
+    }
+
+    pub fn update_expression(
+        &self,
+        expr: Arc<dyn PhysicalExpr>,
+    ) -> Option<Arc<dyn PhysicalExpr>> {
+        let (expr, value) = self.get(expr);
+        match value {
+            ExprMappingValue::Present(result) => Some(result),
+            ExprMappingValue::Deleted => None,
+            ExprMappingValue::Absent => {
+                let result = if expr.as_any().downcast_ref::<Column>().is_some() {
+                    expr
+                } else {
+                    expr.transform_up(|e| {
+                        if e.as_any().downcast_ref::<Column>().is_some() {
+                            let (e, value) = self.get(e);
+                            return match value {
+                                ExprMappingValue::Present(updated) => {
+                                    Ok(Transformed::yes(updated))
+                                }
+                                _ => Ok(Transformed::no(e)),
+                            };
+                        }
+                        Ok(Transformed::no(e))
+                    })
+                    .unwrap()
+                    .data
+                };
+                Some(result)
+            }
+        }
     }
 }

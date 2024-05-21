@@ -37,14 +37,15 @@ use arrow::datatypes::{DataType, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::cast::as_boolean_array;
 use datafusion_common::stats::Precision;
-use datafusion_common::{plan_err, DataFusionError, Result};
+use datafusion_common::{internal_err, plan_err, Result};
 use datafusion_execution::TaskContext;
 use datafusion_expr::Operator;
 use datafusion_physical_expr::expressions::BinaryExpr;
 use datafusion_physical_expr::intervals::utils::check_support;
 use datafusion_physical_expr::utils::collect_columns;
 use datafusion_physical_expr::{
-    analyze, split_conjunction, AnalysisContext, ExprBoundaries, PhysicalExpr,
+    analyze, split_conjunction, AnalysisContext, ExprBoundaries, ExprMapping,
+    PhysicalExpr,
 };
 
 use futures::stream::{Stream, StreamExt};
@@ -90,10 +91,7 @@ impl FilterExec {
         }
     }
 
-    pub fn with_default_selectivity(
-        mut self,
-        default_selectivity: u8,
-    ) -> Result<Self, DataFusionError> {
+    pub fn with_default_selectivity(mut self, default_selectivity: u8) -> Result<Self> {
         if default_selectivity > 100 {
             return plan_err!("Default filter selectivity needs to be less than 100");
         }
@@ -286,6 +284,21 @@ impl ExecutionPlan for FilterExec {
     /// predicate's selectivity value can be determined for the incoming data.
     fn statistics(&self) -> Result<Statistics> {
         Self::statistics_helper(&self.input, self.predicate(), self.default_selectivity)
+    }
+
+    fn expressions(&self) -> Option<Vec<Arc<dyn PhysicalExpr>>> {
+        Some(vec![self.predicate().clone()])
+    }
+
+    fn update_expressions(
+        self: Arc<Self>,
+        map: &ExprMapping,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        let Some(new_predicate) = map.update_expression(self.predicate.clone()) else {
+            return internal_err!("Filter predicate cannot be empty");
+        };
+        FilterExec::try_new(new_predicate, self.input.clone())
+            .map(|e| Some(Arc::new(e) as _))
     }
 }
 

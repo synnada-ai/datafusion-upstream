@@ -20,7 +20,7 @@ use std::fmt::Debug;
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::{LexOrderingRef, PhysicalExpr, PhysicalSortExpr};
+use crate::{ExprMapping, LexOrderingRef, PhysicalExpr, PhysicalSortExpr};
 
 use arrow::array::{new_empty_array, Array, ArrayRef};
 use arrow::compute::kernels::sort::SortColumn;
@@ -128,6 +128,15 @@ pub trait WindowExpr: Send + Sync + Debug {
 
     /// Get the reverse expression of this [WindowExpr].
     fn get_reverse_expr(&self) -> Option<Arc<dyn WindowExpr>>;
+
+    /// Rewrites the window expression with the given mapping. The [`IndexMap`] maps
+    /// existing expressions to modified expressions. Removed expressions have [`None`] value.
+    fn update_expression(
+        self: Arc<Self>,
+        _map: &ExprMapping,
+    ) -> Option<Arc<dyn WindowExpr>> {
+        None
+    }
 }
 
 /// Extension trait that adds common functionality to [`AggregateWindowExpr`]s

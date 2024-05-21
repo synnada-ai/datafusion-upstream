@@ -43,7 +43,7 @@ use datafusion_common::stats::Precision;
 use datafusion_common::utils::{evaluate_partition_ranges, transpose};
 use datafusion_common::{internal_err, Result};
 use datafusion_execution::TaskContext;
-use datafusion_physical_expr::PhysicalSortRequirement;
+use datafusion_physical_expr::{ExprMapping, PhysicalSortRequirement};
 
 use futures::{ready, Stream, StreamExt};
 
@@ -262,6 +262,38 @@ impl ExecutionPlan for WindowAggExec {
             column_statistics,
             total_byte_size: Precision::Absent,
         })
+    }
+
+    fn expressions(&self) -> Option<Vec<Arc<dyn PhysicalExpr>>> {
+        let mut all_exprs = self
+            .window_expr()
+            .iter()
+            .flat_map(|window_expr| window_expr.expressions())
+            .collect::<Vec<_>>();
+        all_exprs.extend(self.partition_keys.clone());
+        Some(all_exprs)
+    }
+
+    fn update_expressions(
+        self: Arc<Self>,
+        map: &ExprMapping,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        let Some(new_window_exprs) = self
+            .window_expr()
+            .iter()
+            .map(|window_expr| window_expr.clone().update_expression(map))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Ok(None);
+        };
+        let new_keys = self
+            .partition_keys
+            .iter()
+            .filter_map(|key| map.update_expression(key.clone()))
+            .collect();
+
+        WindowAggExec::try_new(new_window_exprs, self.input.clone(), new_keys)
+            .map(|e| Some(Arc::new(e) as _))
     }
 }
 

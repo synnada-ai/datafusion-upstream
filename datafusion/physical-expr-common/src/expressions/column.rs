@@ -21,14 +21,14 @@ use std::any::Any;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use crate::physical_expr::{down_cast_any_ref, PhysicalExpr};
+
 use arrow::{
     datatypes::{DataType, Schema},
     record_batch::RecordBatch,
 };
 use datafusion_common::{internal_err, Result};
 use datafusion_expr::ColumnarValue;
-
-use crate::physical_expr::{down_cast_any_ref, PhysicalExpr};
 
 /// Represents the column at a given index in a RecordBatch
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]

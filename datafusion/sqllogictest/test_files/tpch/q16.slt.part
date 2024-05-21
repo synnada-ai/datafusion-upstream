@@ -95,8 +95,8 @@ physical_plan
 27)----------------------------------------------CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/tpch/data/part.tbl]]}, projection=[p_partkey, p_brand, p_type, p_size], has_header=false
 28)----------------------------CoalesceBatchesExec: target_batch_size=8192
 29)------------------------------RepartitionExec: partitioning=Hash([s_suppkey@0], 4), input_partitions=4
-30)--------------------------------ProjectionExec: expr=[s_suppkey@0 as s_suppkey]
-31)----------------------------------CoalesceBatchesExec: target_batch_size=8192
+30)--------------------------------CoalesceBatchesExec: target_batch_size=8192
+31)----------------------------------ProjectionExec: expr=[s_suppkey@0 as s_suppkey]
 32)------------------------------------FilterExec: s_comment@1 LIKE %Customer%Complaints%
 33)--------------------------------------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
 34)----------------------------------------CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/tpch/data/supplier.tbl]]}, projection=[s_suppkey, s_comment], has_header=false

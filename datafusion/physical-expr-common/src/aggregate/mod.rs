@@ -28,7 +28,7 @@ use datafusion_expr::{
 use std::fmt::Debug;
 use std::{any::Any, sync::Arc};
 
-use crate::physical_expr::PhysicalExpr;
+use crate::physical_expr::{ExprMapping, PhysicalExpr};
 use crate::sort_expr::{LexOrdering, PhysicalSortExpr};
 
 use self::utils::{down_cast_any_ref, ordering_fields};
@@ -149,6 +149,15 @@ pub trait AggregateExpr: Send + Sync + Debug + PartialEq<dyn Any> {
     /// Creates accumulator implementation that supports retract
     fn create_sliding_accumulator(&self) -> Result<Box<dyn Accumulator>> {
         not_impl_err!("Retractable Accumulator hasn't been implemented for {self:?} yet")
+    }
+
+    /// Rewrites the window expression with the given mapping. The `IndexMap` maps
+    /// existing expressions to modified expressions. Removed expressions have [`None`] value.
+    fn update_expression(
+        self: Arc<Self>,
+        _map: &ExprMapping,
+    ) -> Option<Arc<dyn AggregateExpr>> {
+        None
     }
 }
 
