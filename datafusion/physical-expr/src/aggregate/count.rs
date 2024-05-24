@@ -35,6 +35,7 @@ use arrow_buffer::BooleanBuffer;
 use datafusion_common::{downcast_value, ScalarValue};
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::{Accumulator, EmitTo, GroupsAccumulator};
+use datafusion_physical_expr_common::aggregate::ReversedAggregateExpr;
 
 use crate::expressions::format_state_name;
 
@@ -248,8 +249,8 @@ impl AggregateExpr for Count {
         self.exprs.len() == 1
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(self.clone()))
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(ReversedAggregateExpr::Identical)
     }
 
     fn create_sliding_accumulator(&self) -> Result<Box<dyn Accumulator>> {

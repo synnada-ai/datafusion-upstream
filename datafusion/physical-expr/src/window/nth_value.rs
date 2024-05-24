@@ -33,6 +33,7 @@ use datafusion_common::Result;
 use datafusion_common::{exec_err, ScalarValue};
 use datafusion_expr::window_state::WindowAggState;
 use datafusion_expr::PartitionEvaluator;
+use crate::window::built_in_window_function_expr::ReversedBuiltinWindowFnExpr;
 
 /// nth_value expression
 #[derive(Debug)]
@@ -135,19 +136,19 @@ impl BuiltInWindowFunctionExpr for NthValue {
         }))
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn BuiltInWindowFunctionExpr>> {
+    fn reverse_expr(&self) -> Result<ReversedBuiltinWindowFnExpr> {
         let reversed_kind = match self.kind {
             NthValueKind::First => NthValueKind::Last,
             NthValueKind::Last => NthValueKind::First,
             NthValueKind::Nth(idx) => NthValueKind::Nth(-idx),
         };
-        Some(Arc::new(Self {
+        Ok(ReversedBuiltinWindowFnExpr::Reversed(Arc::new(Self {
             name: self.name.clone(),
             expr: self.expr.clone(),
             data_type: self.data_type.clone(),
             kind: reversed_kind,
             ignore_nulls: self.ignore_nulls,
-        }))
+        })))
     }
 }
 

@@ -32,9 +32,7 @@ use datafusion_common::{exec_err, not_impl_err, Result};
 use datafusion_expr::function::StateFieldsArgs;
 use datafusion_expr::type_coercion::aggregates::check_arg_count;
 use datafusion_expr::utils::AggregateOrderSensitivity;
-use datafusion_expr::{
-    function::AccumulatorArgs, Accumulator, AggregateUDF, Expr, GroupsAccumulator,
-};
+use datafusion_expr::{function::AccumulatorArgs, Accumulator, AggregateUDF, Expr, GroupsAccumulator};
 
 /// Creates a physical expression of the UDAF, that includes all necessary type coercion.
 /// This function errors when `args`' can't be coerced to a valid argument type of the UDAF.
@@ -176,15 +174,26 @@ pub trait AggregateExpr: Send + Sync + Debug + PartialEq<dyn Any> {
     /// Construct an expression that calculates the aggregate in reverse.
     /// Typically the "reverse" expression is itself (e.g. SUM, COUNT).
     /// For aggregates that do not support calculation in reverse,
-    /// returns None (which is the default value).
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        None
+    /// returns `ReversedAggregateExpr::NotSupported` to indicate
+    /// cannot calculate reverse expression (which is the default value).
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(ReversedAggregateExpr::NotSupported)
     }
 
     /// Creates accumulator implementation that supports retract
     fn create_sliding_accumulator(&self) -> Result<Box<dyn Accumulator>> {
         not_impl_err!("Retractable Accumulator hasn't been implemented for {self:?} yet")
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum ReversedAggregateExpr{
+    /// The expression is the same as the original expression, like SUM, COUNT
+    Identical,
+    /// The expression does not support reverse calculation, like ArrayAgg
+    NotSupported,
+    /// The expression is different from the original expression (such reverse of FIRST_VALUE is LAST_VALUE)
+    Reversed(Arc<dyn AggregateExpr>),
 }
 
 /// Physical aggregate expression of a UDAF.
@@ -372,7 +381,7 @@ impl AggregateExpr for AggregateFunctionExpr {
         .map(Some)
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
         if let Some(reverse_udf) = self.fun.reverse_udf() {
             let reverse_ordering_req = reverse_order_bys(&self.ordering_req);
             let reverse_sort_exprs = self
@@ -399,11 +408,10 @@ impl AggregateExpr for AggregateFunctionExpr {
                 name,
                 self.ignore_nulls,
                 self.is_distinct,
-            )
-            .unwrap();
-            return Some(reverse_aggr);
+            )?;
+            return Ok(ReversedAggregateExpr::Reversed(reverse_aggr));
         }
-        None
+        Ok(ReversedAggregateExpr::NotSupported)
     }
 }
 

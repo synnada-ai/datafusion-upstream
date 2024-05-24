@@ -127,7 +127,17 @@ pub trait WindowExpr: Send + Sync + Debug {
     fn uses_bounded_memory(&self) -> bool;
 
     /// Get the reverse expression of this [WindowExpr].
-    fn get_reverse_expr(&self) -> Option<Arc<dyn WindowExpr>>;
+    fn get_reverse_expr(&self) -> Result<ReversedWindowExpr>;
+}
+
+#[derive(Debug, Clone)]
+pub enum ReversedWindowExpr{
+    /// The expression is the same as the original expression, like SUM, COUNT
+    Identical,
+    /// The expression does not support reverse calculation, like ArrayAgg
+    NotSupported,
+    /// The expression is different from the original expression (such reverse of FIRST_VALUE is LAST_VALUE)
+    Reversed(Arc<dyn WindowExpr>),
 }
 
 /// Extension trait that adds common functionality to [`AggregateWindowExpr`]s

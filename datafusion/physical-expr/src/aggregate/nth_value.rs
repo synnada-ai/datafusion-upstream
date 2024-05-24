@@ -36,6 +36,7 @@ use datafusion_common::utils::{array_into_list_array, get_row_at_idx};
 use datafusion_common::{exec_err, internal_err, Result, ScalarValue};
 use datafusion_expr::utils::AggregateOrderSensitivity;
 use datafusion_expr::Accumulator;
+use datafusion_physical_expr_common::aggregate::ReversedAggregateExpr;
 
 /// Expression for a `NTH_VALUE(... ORDER BY ..., ...)` aggregation. In a multi
 /// partition setting, partial aggregations are computed for every partition,
@@ -134,8 +135,8 @@ impl AggregateExpr for NthValueAgg {
         &self.name
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(Self {
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+         Ok(ReversedAggregateExpr::Reversed(Arc::new(Self {
             name: self.name.to_string(),
             input_data_type: self.input_data_type.clone(),
             expr: self.expr.clone(),
@@ -145,7 +146,7 @@ impl AggregateExpr for NthValueAgg {
             order_by_data_types: self.order_by_data_types.clone(),
             // reverse requirement
             ordering_req: reverse_order_bys(&self.ordering_req),
-        }) as _)
+        }) as _))
     }
 }
 

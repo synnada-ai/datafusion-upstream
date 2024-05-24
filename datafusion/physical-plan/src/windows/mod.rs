@@ -51,6 +51,7 @@ pub use bounded_window_agg_exec::BoundedWindowAggExec;
 pub use datafusion_physical_expr::window::{
     BuiltInWindowExpr, PlainAggregateWindowExpr, WindowExpr,
 };
+use datafusion_physical_expr::window::ReversedBuiltinWindowFnExpr;
 pub use window_agg_exec::WindowAggExec;
 
 /// Build field from window function and add it into schema
@@ -366,8 +367,8 @@ impl BuiltInWindowFunctionExpr for WindowUDFExpr {
         &self.name
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn BuiltInWindowFunctionExpr>> {
-        None
+    fn reverse_expr(&self) -> Result<ReversedBuiltinWindowFnExpr> {
+        Ok(ReversedBuiltinWindowFnExpr::NotSupported)
     }
 }
 

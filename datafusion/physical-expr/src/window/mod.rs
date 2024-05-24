@@ -29,7 +29,7 @@ mod window_expr;
 
 pub use aggregate::PlainAggregateWindowExpr;
 pub use built_in::BuiltInWindowExpr;
-pub use built_in_window_function_expr::BuiltInWindowFunctionExpr;
+pub use built_in_window_function_expr::{BuiltInWindowFunctionExpr, ReversedBuiltinWindowFnExpr};
 pub use sliding_aggregate::SlidingAggregateWindowExpr;
 pub use window_expr::NthValueKind;
 pub use window_expr::PartitionBatches;

@@ -35,6 +35,7 @@ use crate::aggregate::utils::down_cast_any_ref;
 use crate::expressions::format_state_name;
 use arrow::array::Array;
 use arrow::compute::{bool_and, bool_or};
+use datafusion_physical_expr_common::aggregate::ReversedAggregateExpr;
 
 // returns the new value after bool_and/bool_or with the new values, taking nullability into account
 macro_rules! typed_bool_and_or_batch {
@@ -147,8 +148,8 @@ impl AggregateExpr for BoolAnd {
         }
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(self.clone()))
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(ReversedAggregateExpr::Identical)
     }
 
     fn create_sliding_accumulator(&self) -> Result<Box<dyn Accumulator>> {
@@ -280,8 +281,8 @@ impl AggregateExpr for BoolOr {
         }
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(self.clone()))
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(ReversedAggregateExpr::Identical)
     }
 
     fn create_sliding_accumulator(&self) -> Result<Box<dyn Accumulator>> {
