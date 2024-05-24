@@ -216,11 +216,13 @@ impl AggregateUDF {
     /// Reserves the `AggregateUDF` (e.g. returns the `AggregateUDF` that will
     /// generate same result with this `AggregateUDF` when iterated in reverse
     /// order, and `None` if there is no such `AggregateUDF`).
-    pub fn reverse_udf(&self) -> Option<AggregateUDF> {
+    pub fn reverse_udf(&self) -> ReversedUDF {
         match self.inner.reverse_expr() {
-            ReversedUDAF::NotSupported => None,
-            ReversedUDAF::Identical => Some(self.clone()),
-            ReversedUDAF::Reversed(reverse) => Some(Self { inner: reverse }),
+            ReversedUDAF::NotSupported => ReversedUDF::NotSupported,
+            ReversedUDAF::Identical => ReversedUDF::Identical,
+            ReversedUDAF::Reversed(reverse) => {
+                ReversedUDF::Reversed(AggregateUDF { inner: reverse })
+            }
         }
     }
 
@@ -242,6 +244,15 @@ where
     fn from(fun: F) -> Self {
         Self::new_from_impl(fun)
     }
+}
+
+pub enum ReversedUDF {
+    /// The expression is the same as the original expression, like SUM, COUNT
+    Identical,
+    /// The expression does not support reverse calculation, like ArrayAgg
+    NotSupported,
+    /// The expression is different from the original expression
+    Reversed(AggregateUDF),
 }
 
 /// Trait for implementing [`AggregateUDF`].
