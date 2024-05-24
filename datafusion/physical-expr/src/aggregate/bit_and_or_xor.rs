@@ -37,6 +37,7 @@ use arrow::compute::{bit_and, bit_or, bit_xor};
 use arrow_array::cast::AsArray;
 use arrow_array::{downcast_integer, ArrowNumericType};
 use arrow_buffer::ArrowNativeType;
+use datafusion_physical_expr_common::aggregate::ReversedAggregateExpr;
 
 /// BIT_AND aggregate expression
 #[derive(Debug, Clone)]
@@ -139,8 +140,8 @@ impl AggregateExpr for BitAnd {
         }
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(self.clone()))
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(ReversedAggregateExpr::Identical)
     }
 }
 
@@ -300,8 +301,8 @@ impl AggregateExpr for BitOr {
         }
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(self.clone()))
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(ReversedAggregateExpr::Identical)
     }
 }
 
@@ -461,8 +462,8 @@ impl AggregateExpr for BitXor {
         }
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(self.clone()))
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(ReversedAggregateExpr::Identical)
     }
 }
 

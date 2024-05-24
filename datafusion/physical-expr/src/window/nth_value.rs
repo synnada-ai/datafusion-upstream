@@ -27,6 +27,7 @@ use crate::window::window_expr::{NthValueKind, NthValueState};
 use crate::window::BuiltInWindowFunctionExpr;
 use crate::PhysicalExpr;
 
+use crate::window::built_in_window_function_expr::ReversedBuiltinWindowFnExpr;
 use arrow::array::{Array, ArrayRef};
 use arrow::datatypes::{DataType, Field};
 use datafusion_common::Result;
@@ -135,19 +136,19 @@ impl BuiltInWindowFunctionExpr for NthValue {
         }))
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn BuiltInWindowFunctionExpr>> {
+    fn reverse_expr(&self) -> Result<ReversedBuiltinWindowFnExpr> {
         let reversed_kind = match self.kind {
             NthValueKind::First => NthValueKind::Last,
             NthValueKind::Last => NthValueKind::First,
             NthValueKind::Nth(idx) => NthValueKind::Nth(-idx),
         };
-        Some(Arc::new(Self {
+        Ok(ReversedBuiltinWindowFnExpr::Reversed(Arc::new(Self {
             name: self.name.clone(),
             expr: self.expr.clone(),
             data_type: self.data_type.clone(),
             kind: reversed_kind,
             ignore_nulls: self.ignore_nulls,
-        }))
+        })))
     }
 }
 

@@ -36,6 +36,7 @@ use arrow_buffer::ArrowNativeType;
 use datafusion_common::{not_impl_err, Result, ScalarValue};
 use datafusion_expr::type_coercion::aggregates::sum_return_type;
 use datafusion_expr::{Accumulator, GroupsAccumulator};
+use datafusion_physical_expr_common::aggregate::ReversedAggregateExpr;
 
 /// SUM aggregate expression
 #[derive(Debug, Clone)]
@@ -141,8 +142,8 @@ impl AggregateExpr for Sum {
         downcast_sum!(self, helper)
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(self.clone()))
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(ReversedAggregateExpr::Identical)
     }
 
     fn create_sliding_accumulator(&self) -> Result<Box<dyn Accumulator>> {

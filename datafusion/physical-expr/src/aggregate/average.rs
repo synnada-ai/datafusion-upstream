@@ -42,6 +42,7 @@ use arrow_buffer::{i256, ArrowNativeType};
 use datafusion_common::{not_impl_err, Result, ScalarValue};
 use datafusion_expr::type_coercion::aggregates::avg_return_type;
 use datafusion_expr::{Accumulator, EmitTo, GroupsAccumulator};
+use datafusion_physical_expr_common::aggregate::ReversedAggregateExpr;
 
 use super::utils::DecimalAverager;
 
@@ -141,8 +142,8 @@ impl AggregateExpr for Avg {
         &self.name
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(self.clone()))
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(ReversedAggregateExpr::Identical)
     }
 
     fn create_sliding_accumulator(&self) -> Result<Box<dyn Accumulator>> {

@@ -34,6 +34,7 @@ use datafusion_expr::type_coercion::aggregates::check_arg_count;
 use datafusion_expr::utils::AggregateOrderSensitivity;
 use datafusion_expr::{
     function::AccumulatorArgs, Accumulator, AggregateUDF, Expr, GroupsAccumulator,
+    ReversedUDF,
 };
 
 /// Creates a physical expression of the UDAF, that includes all necessary type coercion.
@@ -176,15 +177,26 @@ pub trait AggregateExpr: Send + Sync + Debug + PartialEq<dyn Any> {
     /// Construct an expression that calculates the aggregate in reverse.
     /// Typically the "reverse" expression is itself (e.g. SUM, COUNT).
     /// For aggregates that do not support calculation in reverse,
-    /// returns None (which is the default value).
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        None
+    /// returns `ReversedAggregateExpr::NotSupported` to indicate
+    /// cannot calculate reverse expression (which is the default value).
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(ReversedAggregateExpr::NotSupported)
     }
 
     /// Creates accumulator implementation that supports retract
     fn create_sliding_accumulator(&self) -> Result<Box<dyn Accumulator>> {
         not_impl_err!("Retractable Accumulator hasn't been implemented for {self:?} yet")
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum ReversedAggregateExpr {
+    /// The expression is the same as the original expression, like SUM, COUNT
+    Identical,
+    /// The expression does not support reverse calculation, like ArrayAgg
+    NotSupported,
+    /// The expression is different from the original expression (such reverse of FIRST_VALUE is LAST_VALUE)
+    Reversed(Arc<dyn AggregateExpr>),
 }
 
 /// Physical aggregate expression of a UDAF.
@@ -372,38 +384,40 @@ impl AggregateExpr for AggregateFunctionExpr {
         .map(Some)
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        if let Some(reverse_udf) = self.fun.reverse_udf() {
-            let reverse_ordering_req = reverse_order_bys(&self.ordering_req);
-            let reverse_sort_exprs = self
-                .sort_exprs
-                .iter()
-                .map(|e| {
-                    if let Expr::Sort(s) = e {
-                        Expr::Sort(s.reverse())
-                    } else {
-                        // Expects to receive `Expr::Sort`.
-                        unreachable!()
-                    }
-                })
-                .collect::<Vec<_>>();
-            let mut name = self.name().to_string();
-            replace_order_by_clause(&mut name);
-            replace_fn_name_clause(&mut name, self.fun.name(), reverse_udf.name());
-            let reverse_aggr = create_aggregate_expr(
-                &reverse_udf,
-                &self.args,
-                &reverse_sort_exprs,
-                &reverse_ordering_req,
-                &self.schema,
-                name,
-                self.ignore_nulls,
-                self.is_distinct,
-            )
-            .unwrap();
-            return Some(reverse_aggr);
-        }
-        None
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(match self.fun.reverse_udf() {
+            ReversedUDF::Identical => ReversedAggregateExpr::Identical,
+            ReversedUDF::NotSupported => ReversedAggregateExpr::NotSupported,
+            ReversedUDF::Reversed(reverse_udf) => {
+                let reverse_ordering_req = reverse_order_bys(&self.ordering_req);
+                let reverse_sort_exprs = self
+                    .sort_exprs
+                    .iter()
+                    .map(|e| {
+                        if let Expr::Sort(s) = e {
+                            Expr::Sort(s.reverse())
+                        } else {
+                            // Expects to receive `Expr::Sort`.
+                            unreachable!()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let mut name = self.name().to_string();
+                replace_order_by_clause(&mut name);
+                replace_fn_name_clause(&mut name, self.fun.name(), reverse_udf.name());
+                let reverse_aggr = create_aggregate_expr(
+                    &reverse_udf,
+                    &self.args,
+                    &reverse_sort_exprs,
+                    &reverse_ordering_req,
+                    &self.schema,
+                    name,
+                    self.ignore_nulls,
+                    self.is_distinct,
+                )?;
+                ReversedAggregateExpr::Reversed(reverse_aggr)
+            }
+        })
     }
 }
 

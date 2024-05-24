@@ -55,6 +55,7 @@ use arrow::array::Decimal128Array;
 use arrow::array::Decimal256Array;
 use arrow::datatypes::i256;
 use arrow::datatypes::Decimal256Type;
+use datafusion_physical_expr_common::aggregate::ReversedAggregateExpr;
 
 use super::moving_min_max;
 
@@ -257,8 +258,8 @@ impl AggregateExpr for Max {
         }
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(self.clone()))
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(ReversedAggregateExpr::Identical)
     }
 
     fn create_sliding_accumulator(&self) -> Result<Box<dyn Accumulator>> {
@@ -976,8 +977,8 @@ impl AggregateExpr for Min {
         }
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(self.clone()))
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(ReversedAggregateExpr::Identical)
     }
 
     fn create_sliding_accumulator(&self) -> Result<Box<dyn Accumulator>> {

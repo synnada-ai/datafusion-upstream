@@ -23,10 +23,11 @@ use std::sync::Arc;
 
 use super::{BuiltInWindowFunctionExpr, WindowExpr};
 use crate::expressions::PhysicalSortExpr;
-use crate::window::window_expr::{get_orderby_values, WindowFn};
+use crate::window::window_expr::{get_orderby_values, ReversedWindowExpr, WindowFn};
 use crate::window::{PartitionBatches, PartitionWindowAggStates, WindowState};
 use crate::{reverse_order_bys, EquivalenceProperties, PhysicalExpr};
 
+use crate::window::built_in_window_function_expr::ReversedBuiltinWindowFnExpr;
 use arrow::array::{new_empty_array, ArrayRef};
 use arrow::compute::SortOptions;
 use arrow::datatypes::Field;
@@ -262,14 +263,18 @@ impl WindowExpr for BuiltInWindowExpr {
         &self.window_frame
     }
 
-    fn get_reverse_expr(&self) -> Option<Arc<dyn WindowExpr>> {
-        self.expr.reverse_expr().map(|reverse_expr| {
-            Arc::new(BuiltInWindowExpr::new(
-                reverse_expr,
-                &self.partition_by.clone(),
-                &reverse_order_bys(&self.order_by),
-                Arc::new(self.window_frame.reverse()),
-            )) as _
+    fn get_reverse_expr(&self) -> Result<ReversedWindowExpr> {
+        Ok(match self.expr.reverse_expr()? {
+            ReversedBuiltinWindowFnExpr::Identical => ReversedWindowExpr::Identical,
+            ReversedBuiltinWindowFnExpr::NotSupported => ReversedWindowExpr::NotSupported,
+            ReversedBuiltinWindowFnExpr::Reversed(reverse_expr) => {
+                ReversedWindowExpr::Reversed(Arc::new(BuiltInWindowExpr::new(
+                    reverse_expr,
+                    &self.partition_by.clone(),
+                    &reverse_order_bys(&self.order_by),
+                    Arc::new(self.window_frame.reverse()),
+                )) as _)
+            }
         })
     }
 

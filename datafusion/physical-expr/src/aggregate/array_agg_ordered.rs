@@ -38,6 +38,7 @@ use datafusion_common::utils::{array_into_list_array, compare_rows, get_row_at_i
 use datafusion_common::{exec_err, Result, ScalarValue};
 use datafusion_expr::utils::AggregateOrderSensitivity;
 use datafusion_expr::Accumulator;
+use datafusion_physical_expr_common::aggregate::ReversedAggregateExpr;
 
 /// Expression for a `ARRAY_AGG(... ORDER BY ..., ...)` aggregation. In a multi
 /// partition setting, partial aggregations are computed for every partition,
@@ -137,8 +138,8 @@ impl AggregateExpr for OrderSensitiveArrayAgg {
         &self.name
     }
 
-    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
-        Some(Arc::new(Self {
+    fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
+        Ok(ReversedAggregateExpr::Reversed(Arc::new(Self {
             name: self.name.to_string(),
             input_data_type: self.input_data_type.clone(),
             expr: self.expr.clone(),
@@ -147,7 +148,7 @@ impl AggregateExpr for OrderSensitiveArrayAgg {
             // Reverse requirement:
             ordering_req: reverse_order_bys(&self.ordering_req),
             reverse: !self.reverse,
-        }))
+        })))
     }
 }
 

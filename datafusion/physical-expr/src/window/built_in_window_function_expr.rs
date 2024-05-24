@@ -80,8 +80,8 @@ pub trait BuiltInWindowFunctionExpr: Send + Sync + std::fmt::Debug {
     /// Returns `None` (the default) if no reverse is known (or possible).
     ///
     /// For example, the reverse of `lead(10)` is `lag(10)`.
-    fn reverse_expr(&self) -> Option<Arc<dyn BuiltInWindowFunctionExpr>> {
-        None
+    fn reverse_expr(&self) -> Result<ReversedBuiltinWindowFnExpr> {
+        Ok(ReversedBuiltinWindowFnExpr::NotSupported)
     }
 
     /// Returns the ordering introduced by the window function, if applicable.
@@ -91,4 +91,14 @@ pub trait BuiltInWindowFunctionExpr: Send + Sync + std::fmt::Debug {
     fn get_result_ordering(&self, _schema: &SchemaRef) -> Option<PhysicalSortExpr> {
         None
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum ReversedBuiltinWindowFnExpr {
+    /// The expression is the same as the original expression, like SUM, COUNT
+    Identical,
+    /// The expression does not support reverse calculation, like ArrayAgg
+    NotSupported,
+    /// The expression is different from the original expression (such reverse of FIRST_VALUE is LAST_VALUE)
+    Reversed(Arc<dyn BuiltInWindowFunctionExpr>),
 }

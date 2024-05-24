@@ -1199,7 +1199,7 @@ mod tests {
     };
     use datafusion_physical_expr::expressions::{col, Column, NthValue};
     use datafusion_physical_expr::window::{
-        BuiltInWindowExpr, BuiltInWindowFunctionExpr,
+        BuiltInWindowExpr, BuiltInWindowFunctionExpr, ReversedBuiltinWindowFnExpr,
     };
     use datafusion_physical_expr::{LexOrdering, PhysicalExpr, PhysicalSortExpr};
 
@@ -1541,14 +1541,36 @@ mod tests {
         )
         .map(|e| Arc::new(e) as Arc<dyn ExecutionPlan>)?;
         let col_a = col("a", &schema)?;
-        let nth_value_func1 =
-            NthValue::nth("nth_value(-1)", col_a.clone(), DataType::Int32, 1, false)?
-                .reverse_expr()
-                .unwrap();
-        let nth_value_func2 =
-            NthValue::nth("nth_value(-2)", col_a.clone(), DataType::Int32, 2, false)?
-                .reverse_expr()
-                .unwrap();
+        let nth_value_func1 = match NthValue::nth(
+            "nth_value(-1)",
+            col_a.clone(),
+            DataType::Int32,
+            1,
+            false,
+        )?
+        .reverse_expr()?
+        {
+            ReversedBuiltinWindowFnExpr::Identical
+            | ReversedBuiltinWindowFnExpr::NotSupported => {
+                unreachable!()
+            }
+            ReversedBuiltinWindowFnExpr::Reversed(reversed) => reversed,
+        };
+        let nth_value_func2 = match NthValue::nth(
+            "nth_value(-2)",
+            col_a.clone(),
+            DataType::Int32,
+            2,
+            false,
+        )?
+        .reverse_expr()?
+        {
+            ReversedBuiltinWindowFnExpr::Identical
+            | ReversedBuiltinWindowFnExpr::NotSupported => {
+                unreachable!()
+            }
+            ReversedBuiltinWindowFnExpr::Reversed(reversed) => reversed,
+        };
         let last_value_func = Arc::new(NthValue::last(
             "last",
             col_a.clone(),

@@ -57,6 +57,7 @@ mod topk_stream;
 
 pub use datafusion_expr::AggregateFunction;
 pub use datafusion_physical_expr::expressions::create_aggregate_expr;
+use datafusion_physical_expr_common::aggregate::ReversedAggregateExpr;
 
 /// Hash aggregate modes
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -927,20 +928,24 @@ fn get_finer_aggregate_exprs_requirement(
                 continue;
             }
         }
-        if let Some(reverse_aggr_expr) = aggr_expr.reverse_expr() {
-            if let Some(finer_ordering) = finer_ordering(
-                &requirement,
-                &reverse_aggr_expr,
-                group_by,
-                eq_properties,
-                agg_mode,
-            ) {
-                if eq_properties.ordering_satisfy(&finer_ordering) {
-                    // Reverse requirement is satisfied by exiting ordering.
-                    // Hence reverse the aggregator
-                    requirement = finer_ordering;
-                    *aggr_expr = reverse_aggr_expr;
-                    continue;
+        match aggr_expr.reverse_expr()? {
+            ReversedAggregateExpr::Identical => {}
+            ReversedAggregateExpr::NotSupported => {}
+            ReversedAggregateExpr::Reversed(reverse_aggr_expr) => {
+                if let Some(finer_ordering) = finer_ordering(
+                    &requirement,
+                    &reverse_aggr_expr,
+                    group_by,
+                    eq_properties,
+                    agg_mode,
+                ) {
+                    if eq_properties.ordering_satisfy(&finer_ordering) {
+                        // Reverse requirement is satisfied by exiting ordering.
+                        // Hence reverse the aggregator
+                        requirement = finer_ordering;
+                        *aggr_expr = reverse_aggr_expr;
+                        continue;
+                    }
                 }
             }
         }
@@ -952,19 +957,23 @@ fn get_finer_aggregate_exprs_requirement(
             requirement = finer_ordering;
             continue;
         }
-        if let Some(reverse_aggr_expr) = aggr_expr.reverse_expr() {
-            if let Some(finer_ordering) = finer_ordering(
-                &requirement,
-                &reverse_aggr_expr,
-                group_by,
-                eq_properties,
-                agg_mode,
-            ) {
-                // There is a requirement that both satisfies existing requirement and reverse
-                // aggregate requirement. Use updated requirement
-                requirement = finer_ordering;
-                *aggr_expr = reverse_aggr_expr;
-                continue;
+        match aggr_expr.reverse_expr()? {
+            ReversedAggregateExpr::Identical => {}
+            ReversedAggregateExpr::NotSupported => {}
+            ReversedAggregateExpr::Reversed(reverse_aggr_expr) => {
+                if let Some(finer_ordering) = finer_ordering(
+                    &requirement,
+                    &reverse_aggr_expr,
+                    group_by,
+                    eq_properties,
+                    agg_mode,
+                ) {
+                    // There is a requirement that both satisfies existing requirement and reverse
+                    // aggregate requirement. Use updated requirement
+                    requirement = finer_ordering;
+                    *aggr_expr = reverse_aggr_expr;
+                    continue;
+                }
             }
         }
 

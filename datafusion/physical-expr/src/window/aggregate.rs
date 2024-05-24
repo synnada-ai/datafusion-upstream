@@ -28,8 +28,9 @@ use arrow::{array::ArrayRef, datatypes::Field};
 use datafusion_common::ScalarValue;
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::{Accumulator, WindowFrame};
+use datafusion_physical_expr_common::aggregate::ReversedAggregateExpr;
 
-use crate::window::window_expr::AggregateWindowExpr;
+use crate::window::window_expr::{AggregateWindowExpr, ReversedWindowExpr};
 use crate::window::{
     PartitionBatches, PartitionWindowAggStates, SlidingAggregateWindowExpr, WindowExpr,
 };
@@ -133,23 +134,29 @@ impl WindowExpr for PlainAggregateWindowExpr {
         &self.window_frame
     }
 
-    fn get_reverse_expr(&self) -> Option<Arc<dyn WindowExpr>> {
-        self.aggregate.reverse_expr().map(|reverse_expr| {
-            let reverse_window_frame = self.window_frame.reverse();
-            if reverse_window_frame.start_bound.is_unbounded() {
-                Arc::new(PlainAggregateWindowExpr::new(
-                    reverse_expr,
-                    &self.partition_by.clone(),
-                    &reverse_order_bys(&self.order_by),
-                    Arc::new(self.window_frame.reverse()),
-                )) as _
-            } else {
-                Arc::new(SlidingAggregateWindowExpr::new(
-                    reverse_expr,
-                    &self.partition_by.clone(),
-                    &reverse_order_bys(&self.order_by),
-                    Arc::new(self.window_frame.reverse()),
-                )) as _
+    fn get_reverse_expr(&self) -> Result<ReversedWindowExpr> {
+        Ok(match self.aggregate.reverse_expr()? {
+            ReversedAggregateExpr::Identical => ReversedWindowExpr::Identical,
+            ReversedAggregateExpr::NotSupported => ReversedWindowExpr::NotSupported,
+            ReversedAggregateExpr::Reversed(reverse_expr) => {
+                let reverse_window_frame = self.window_frame.reverse();
+                ReversedWindowExpr::Reversed(
+                    if reverse_window_frame.start_bound.is_unbounded() {
+                        Arc::new(PlainAggregateWindowExpr::new(
+                            reverse_expr,
+                            &self.partition_by.clone(),
+                            &reverse_order_bys(&self.order_by),
+                            Arc::new(self.window_frame.reverse()),
+                        )) as _
+                    } else {
+                        Arc::new(SlidingAggregateWindowExpr::new(
+                            reverse_expr,
+                            &self.partition_by.clone(),
+                            &reverse_order_bys(&self.order_by),
+                            Arc::new(self.window_frame.reverse()),
+                        )) as _
+                    },
+                )
             }
         })
     }
