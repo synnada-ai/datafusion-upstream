@@ -27,6 +27,7 @@ use crate::window::window_expr::{get_orderby_values, ReversedWindowExpr, WindowF
 use crate::window::{PartitionBatches, PartitionWindowAggStates, WindowState};
 use crate::{reverse_order_bys, EquivalenceProperties, PhysicalExpr};
 
+use crate::window::built_in_window_function_expr::ReversedBuiltinWindowFnExpr;
 use arrow::array::{new_empty_array, ArrayRef};
 use arrow::compute::SortOptions;
 use arrow::datatypes::Field;
@@ -35,7 +36,6 @@ use datafusion_common::utils::evaluate_partition_ranges;
 use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::window_state::{WindowAggState, WindowFrameContext};
 use datafusion_expr::WindowFrame;
-use crate::window::built_in_window_function_expr::ReversedBuiltinWindowFnExpr;
 
 /// A window expr that takes the form of a [`BuiltInWindowFunctionExpr`].
 #[derive(Debug)]
@@ -264,7 +264,7 @@ impl WindowExpr for BuiltInWindowExpr {
     }
 
     fn get_reverse_expr(&self) -> Result<ReversedWindowExpr> {
-        Ok(match self.expr.reverse_expr()?{
+        Ok(match self.expr.reverse_expr()? {
             ReversedBuiltinWindowFnExpr::Identical => ReversedWindowExpr::Identical,
             ReversedBuiltinWindowFnExpr::NotSupported => ReversedWindowExpr::NotSupported,
             ReversedBuiltinWindowFnExpr::Reversed(reverse_expr) => {

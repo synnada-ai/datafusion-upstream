@@ -29,11 +29,13 @@ mod window_expr;
 
 pub use aggregate::PlainAggregateWindowExpr;
 pub use built_in::BuiltInWindowExpr;
-pub use built_in_window_function_expr::{BuiltInWindowFunctionExpr, ReversedBuiltinWindowFnExpr};
+pub use built_in_window_function_expr::{
+    BuiltInWindowFunctionExpr, ReversedBuiltinWindowFnExpr,
+};
 pub use sliding_aggregate::SlidingAggregateWindowExpr;
 pub use window_expr::NthValueKind;
 pub use window_expr::PartitionBatches;
 pub use window_expr::PartitionKey;
 pub use window_expr::PartitionWindowAggStates;
-pub use window_expr::WindowExpr;
 pub use window_expr::WindowState;
+pub use window_expr::{ReversedWindowExpr, WindowExpr};

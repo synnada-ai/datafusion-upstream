@@ -48,10 +48,10 @@ mod bounded_window_agg_exec;
 mod window_agg_exec;
 
 pub use bounded_window_agg_exec::BoundedWindowAggExec;
-pub use datafusion_physical_expr::window::{
-    BuiltInWindowExpr, PlainAggregateWindowExpr, WindowExpr,
-};
 use datafusion_physical_expr::window::ReversedBuiltinWindowFnExpr;
+pub use datafusion_physical_expr::window::{
+    BuiltInWindowExpr, PlainAggregateWindowExpr, ReversedWindowExpr, WindowExpr,
+};
 pub use window_agg_exec::WindowAggExec;
 
 /// Build field from window function and add it into schema
@@ -489,17 +489,23 @@ pub fn get_best_fitting_window(
     };
 
     let window_expr = if should_reverse {
-        if let Some(reversed_window_expr) = window_exprs
-            .iter()
-            .map(|e| e.get_reverse_expr())
-            .collect::<Option<Vec<_>>>()
-        {
-            reversed_window_expr
-        } else {
-            // Cannot take reverse of any of the window expr
-            // In this case, with existing ordering window cannot be run
-            return Ok(None);
+        let mut reversed_window_exprs = vec![];
+        for e in window_exprs {
+            match e.get_reverse_expr()? {
+                ReversedWindowExpr::Identical => {
+                    reversed_window_exprs.push(e.clone());
+                }
+                ReversedWindowExpr::NotSupported => {
+                    // Cannot take reverse of one of the window expr
+                    // In this case, with existing ordering window cannot be run
+                    return Ok(None);
+                }
+                ReversedWindowExpr::Reversed(reversed) => {
+                    reversed_window_exprs.push(reversed);
+                }
+            }
         }
+        reversed_window_exprs
     } else {
         window_exprs.to_vec()
     };

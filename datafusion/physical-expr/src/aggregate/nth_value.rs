@@ -136,7 +136,7 @@ impl AggregateExpr for NthValueAgg {
     }
 
     fn reverse_expr(&self) -> Result<ReversedAggregateExpr> {
-         Ok(ReversedAggregateExpr::Reversed(Arc::new(Self {
+        Ok(ReversedAggregateExpr::Reversed(Arc::new(Self {
             name: self.name.to_string(),
             input_data_type: self.input_data_type.clone(),
             expr: self.expr.clone(),

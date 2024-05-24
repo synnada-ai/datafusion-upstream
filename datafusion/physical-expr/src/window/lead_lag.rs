@@ -17,6 +17,7 @@
 
 //! Defines physical expression for `lead` and `lag` that can evaluated
 //! at runtime during query execution
+use crate::window::built_in_window_function_expr::ReversedBuiltinWindowFnExpr;
 use crate::window::BuiltInWindowFunctionExpr;
 use crate::PhysicalExpr;
 use arrow::array::ArrayRef;
@@ -29,7 +30,6 @@ use std::cmp::min;
 use std::collections::VecDeque;
 use std::ops::{Neg, Range};
 use std::sync::Arc;
-use crate::window::built_in_window_function_expr::ReversedBuiltinWindowFnExpr;
 
 /// window shift expression
 #[derive(Debug)]
@@ -122,16 +122,14 @@ impl BuiltInWindowFunctionExpr for WindowShift {
     }
 
     fn reverse_expr(&self) -> Result<ReversedBuiltinWindowFnExpr> {
-        Ok(ReversedBuiltinWindowFnExpr::Reversed(
-            Arc::new(Self {
-                name: self.name.clone(),
-                data_type: self.data_type.clone(),
-                shift_offset: -self.shift_offset,
-                expr: self.expr.clone(),
-                default_value: self.default_value.clone(),
-                ignore_nulls: self.ignore_nulls,
-            })
-        ))
+        Ok(ReversedBuiltinWindowFnExpr::Reversed(Arc::new(Self {
+            name: self.name.clone(),
+            data_type: self.data_type.clone(),
+            shift_offset: -self.shift_offset,
+            expr: self.expr.clone(),
+            default_value: self.default_value.clone(),
+            ignore_nulls: self.ignore_nulls,
+        })))
     }
 }
 

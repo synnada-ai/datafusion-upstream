@@ -32,7 +32,9 @@ use datafusion_common::{exec_err, not_impl_err, Result};
 use datafusion_expr::function::StateFieldsArgs;
 use datafusion_expr::type_coercion::aggregates::check_arg_count;
 use datafusion_expr::utils::AggregateOrderSensitivity;
-use datafusion_expr::{function::AccumulatorArgs, Accumulator, AggregateUDF, Expr, GroupsAccumulator};
+use datafusion_expr::{
+    function::AccumulatorArgs, Accumulator, AggregateUDF, Expr, GroupsAccumulator,
+};
 
 /// Creates a physical expression of the UDAF, that includes all necessary type coercion.
 /// This function errors when `args`' can't be coerced to a valid argument type of the UDAF.
@@ -187,7 +189,7 @@ pub trait AggregateExpr: Send + Sync + Debug + PartialEq<dyn Any> {
 }
 
 #[derive(Debug, Clone)]
-pub enum ReversedAggregateExpr{
+pub enum ReversedAggregateExpr {
     /// The expression is the same as the original expression, like SUM, COUNT
     Identical,
     /// The expression does not support reverse calculation, like ArrayAgg

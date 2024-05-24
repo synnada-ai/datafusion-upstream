@@ -140,21 +140,23 @@ impl WindowExpr for PlainAggregateWindowExpr {
             ReversedAggregateExpr::NotSupported => ReversedWindowExpr::NotSupported,
             ReversedAggregateExpr::Reversed(reverse_expr) => {
                 let reverse_window_frame = self.window_frame.reverse();
-                ReversedWindowExpr::Reversed(if reverse_window_frame.start_bound.is_unbounded() {
-                    Arc::new(PlainAggregateWindowExpr::new(
-                        reverse_expr,
-                        &self.partition_by.clone(),
-                        &reverse_order_bys(&self.order_by),
-                        Arc::new(self.window_frame.reverse()),
-                    )) as _
-                } else {
-                    Arc::new(SlidingAggregateWindowExpr::new(
-                        reverse_expr,
-                        &self.partition_by.clone(),
-                        &reverse_order_bys(&self.order_by),
-                        Arc::new(self.window_frame.reverse()),
-                    )) as _
-                })
+                ReversedWindowExpr::Reversed(
+                    if reverse_window_frame.start_bound.is_unbounded() {
+                        Arc::new(PlainAggregateWindowExpr::new(
+                            reverse_expr,
+                            &self.partition_by.clone(),
+                            &reverse_order_bys(&self.order_by),
+                            Arc::new(self.window_frame.reverse()),
+                        )) as _
+                    } else {
+                        Arc::new(SlidingAggregateWindowExpr::new(
+                            reverse_expr,
+                            &self.partition_by.clone(),
+                            &reverse_order_bys(&self.order_by),
+                            Arc::new(self.window_frame.reverse()),
+                        )) as _
+                    },
+                )
             }
         })
     }

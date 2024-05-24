@@ -131,7 +131,7 @@ pub trait WindowExpr: Send + Sync + Debug {
 }
 
 #[derive(Debug, Clone)]
-pub enum ReversedWindowExpr{
+pub enum ReversedWindowExpr {
     /// The expression is the same as the original expression, like SUM, COUNT
     Identical,
     /// The expression does not support reverse calculation, like ArrayAgg

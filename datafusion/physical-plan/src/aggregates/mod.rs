@@ -957,7 +957,7 @@ fn get_finer_aggregate_exprs_requirement(
             requirement = finer_ordering;
             continue;
         }
-        match aggr_expr.reverse_expr()?{
+        match aggr_expr.reverse_expr()? {
             ReversedAggregateExpr::Identical => {}
             ReversedAggregateExpr::NotSupported => {}
             ReversedAggregateExpr::Reversed(reverse_aggr_expr) => {

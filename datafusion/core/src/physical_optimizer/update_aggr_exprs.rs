@@ -28,6 +28,7 @@ use datafusion_common::{plan_datafusion_err, Result};
 use datafusion_physical_expr::{
     reverse_order_bys, AggregateExpr, EquivalenceProperties, PhysicalSortRequirement,
 };
+use datafusion_physical_expr_common::aggregate::ReversedAggregateExpr;
 use datafusion_physical_plan::aggregates::concat_slices;
 use datafusion_physical_plan::windows::get_ordered_partition_by_indices;
 use datafusion_physical_plan::{
@@ -160,10 +161,13 @@ fn try_convert_aggregate_if_better(
                 )) {
                     // Converting to reverse enables more efficient execution
                     // given the existing ordering (if possible):
-                    aggr_expr
-                        .reverse_expr()
-                        .unwrap_or(aggr_expr)
-                        .with_requirement_satisfied(true)?
+                    match aggr_expr.reverse_expr()? {
+                        ReversedAggregateExpr::Identical
+                        | ReversedAggregateExpr::NotSupported => Some(aggr_expr),
+                        ReversedAggregateExpr::Reversed(reversed) => {
+                            reversed.with_requirement_satisfied(true)?
+                        }
+                    }
                 } else {
                     // There is no beneficial ordering present -- aggregation
                     // will still work albeit in a less efficient mode.

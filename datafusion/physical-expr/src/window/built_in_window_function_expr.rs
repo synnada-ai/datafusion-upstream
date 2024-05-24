@@ -94,7 +94,7 @@ pub trait BuiltInWindowFunctionExpr: Send + Sync + std::fmt::Debug {
 }
 
 #[derive(Debug, Clone)]
-pub enum ReversedBuiltinWindowFnExpr{
+pub enum ReversedBuiltinWindowFnExpr {
     /// The expression is the same as the original expression, like SUM, COUNT
     Identical,
     /// The expression does not support reverse calculation, like ArrayAgg
