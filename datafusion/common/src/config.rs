@@ -212,6 +212,65 @@ config_namespace! {
     }
 }
 
+#[macro_export]
+macro_rules! config_namespace_with_normalize {
+    (
+     $(#[doc = $struct_d:tt])*
+     $vis:vis struct $struct_name:ident {
+        $(
+        $(#[doc = $d:tt])*
+        $field_vis:vis $field_name:ident : $field_type:ty, default = $default:expr $(, normalize = $normalize:expr)?
+        )*$(,)*
+    }
+    ) => {
+
+        $(#[doc = $struct_d])*
+        #[derive(Debug, Clone, PartialEq)]
+        $vis struct $struct_name{
+            $(
+            $(#[doc = $d])*
+            $field_vis $field_name : $field_type,
+            )*
+        }
+
+        impl ConfigField for $struct_name {
+            fn set(&mut self, key: &str, value: &str) -> Result<()> {
+                let (key, rem) = key.split_once('.').unwrap_or((key, ""));
+                match key {
+                    $(
+                        stringify!($field_name) => {
+                            let normalized_value = match key {
+                                $(stringify!($field_name) => $normalize(value),)?
+                                _ => value.to_string(),
+                            };
+                            self.$field_name.set(rem, normalized_value.as_str())
+                        },
+                    )*
+                    _ => return _config_err!(
+                        "Config value \"{}\" not found on {}", key, stringify!($struct_name)
+                    )
+                }
+            }
+
+            fn visit<V: Visit>(&self, v: &mut V, key_prefix: &str, _description: &'static str) {
+                $(
+                let key = format!(concat!("{}.", stringify!($field_name)), key_prefix);
+                let desc = concat!($($d),*).trim();
+                self.$field_name.visit(v, key.as_str(), desc);
+                )*
+            }
+        }
+
+        impl Default for $struct_name {
+            fn default() -> Self {
+                Self {
+                    $($field_name: $default),*
+                }
+            }
+        }
+    }
+}
+
 config_namespace! {
     /// Options related to query execution
     ///
@@ -1577,7 +1636,7 @@ config_namespace_with_hashmap! {
     }
 }
 
-config_namespace! {
+config_namespace_with_normalize! {
     /// Options controlling CSV format
     pub struct CsvOptions {
         /// Specifies whether there is a CSV header (i.e. the first line
@@ -1593,7 +1652,7 @@ config_namespace! {
         pub date_format: Option<String>, default = None
         pub datetime_format: Option<String>, default = None
         pub timestamp_format: Option<String>, default = None
-        pub timestamp_tz_format: Option<String>, default = None
+        pub timestamp_tz_format: Option<String>, default = None, normalize = str::to_uppercase
         pub time_format: Option<String>, default = None
         pub null_value: Option<String>, default = None
         pub comment: Option<u8>, default = None
