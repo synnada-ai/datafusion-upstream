@@ -551,11 +551,17 @@ impl EquivalenceProperties {
         rhs: LexOrderingRef,
     ) -> Option<LexOrdering> {
         let lhs = self.normalize_sort_exprs(lhs);
-        let rhs = self.normalize_sort_exprs(rhs);
+        let constants = self.constants();
+        // Do not normalize rhs with constants
+        let mut new_self = self.clone();
+        new_self.constants = vec![];
+        let rhs = new_self.normalize_sort_exprs(rhs);
         let mut meet = vec![];
-        for (lhs, rhs) in lhs.into_iter().zip(rhs.into_iter()) {
-            if lhs.eq(&rhs) {
-                meet.push(lhs);
+        for (idx, rhs) in rhs.into_iter().enumerate() {
+            if idx < lhs.len() && lhs[idx].eq(&rhs) {
+                meet.push(rhs);
+            } else if const_exprs_contains(constants, &rhs.expr) {
+                meet.push(rhs);
             } else {
                 break;
             }

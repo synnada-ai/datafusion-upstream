@@ -148,10 +148,9 @@ fn calculate_union_eq_properties(
     //       classes and constants. Add support for such cases.
     let mut eq_properties = EquivalenceProperties::new(schema);
     // Use the ordering equivalence class of the first child as the seed:
-    let mut meets = children_eqs[0]
-        .oeq_class()
+    let mut meets = children_eqs
         .iter()
-        .map(|item| item.to_vec())
+        .flat_map(|child_eq| child_eq.oeq_class().iter().map(|item| item.to_vec()))
         .collect::<Vec<_>>();
     // Iterate over all the children:
     for child_eqs in &children_eqs[1..] {
@@ -160,9 +159,15 @@ fn calculate_union_eq_properties(
         let mut idx = 0;
         while idx < meets.len() {
             // Find all the meets of `current_meet` with this child's orderings:
-            let valid_meets = child_eqs.oeq_class().iter().filter_map(|ordering| {
-                child_eqs.get_meet_ordering(ordering, &meets[idx])
-            });
+            let orderings = child_eqs.oeq_class();
+            let empty_ordering = vec![vec![]];
+            let valid_meets =
+                orderings
+                    .iter()
+                    .chain(empty_ordering.iter())
+                    .filter_map(|ordering| {
+                        child_eqs.get_meet_ordering(ordering, &meets[idx])
+                    });
             // Use the longest of these meets as others are redundant:
             if let Some(next_meet) = valid_meets.max_by_key(|m| m.len()) {
                 meets[idx] = next_meet;
