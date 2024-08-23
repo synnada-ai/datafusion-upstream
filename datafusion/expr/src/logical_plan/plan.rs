@@ -967,6 +967,7 @@ impl LogicalPlan {
                 if_not_exists,
                 or_replace,
                 column_defaults,
+                order_exprs,
                 ..
             })) => Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
                 CreateMemoryTable {
@@ -976,6 +977,7 @@ impl LogicalPlan {
                     if_not_exists: *if_not_exists,
                     or_replace: *or_replace,
                     column_defaults: column_defaults.clone(),
+                    order_exprs: order_exprs.to_vec(),
                 },
             ))),
             LogicalPlan::Ddl(DdlStatement::CreateView(CreateView {

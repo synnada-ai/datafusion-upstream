@@ -246,6 +246,8 @@ pub struct CreateMemoryTable {
     pub or_replace: bool,
     /// Default values for columns
     pub column_defaults: Vec<(String, Expr)>,
+    /// Order expressions supplied by user
+    pub order_exprs: Vec<Vec<Expr>>,
 }
 
 /// Creates a view.

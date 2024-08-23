@@ -652,6 +652,7 @@ impl SessionContext {
             or_replace,
             constraints,
             column_defaults,
+            order_exprs,
         } = cmd;
 
         let input = Arc::try_unwrap(input).unwrap_or_else(|e| e.as_ref().clone());
@@ -669,7 +670,8 @@ impl SessionContext {
                     // pass constraints and column defaults to the mem table.
                     MemTable::try_new(schema, batches)?
                         .with_constraints(constraints)
-                        .with_column_defaults(column_defaults.into_iter().collect()),
+                        .with_column_defaults(column_defaults.into_iter().collect())
+                        .with_sort_order(order_exprs),
                 );
 
                 self.register_table(name.clone(), table)?;

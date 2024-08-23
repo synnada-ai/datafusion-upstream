@@ -33,6 +33,18 @@ LOCATION '../../datafusion/core/tests/data/window_2.csv'
 OPTIONS ('format.has_header' 'true');
 
 
+statement ok
+CREATE TABLE multiple_ordered_table2 (
+  a0 INTEGER,
+  a INTEGER,
+  b INTEGER,
+  c INTEGER,
+  d INTEGER
+)
+WITH ORDER (a ASC, b ASC)
+WITH ORDER (c ASC);
+
+
 query TT
 EXPLAIN SELECT a, ARRAY_AGG(c ORDER BY c)[1] as result
                         FROM multiple_ordered_table

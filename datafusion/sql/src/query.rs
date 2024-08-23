@@ -150,6 +150,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     if_not_exists: false,
                     or_replace: false,
                     column_defaults: vec![],
+                    order_exprs: vec![],
                 },
             ))),
             _ => Ok(plan),

@@ -229,6 +229,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 with_options,
                 if_not_exists,
                 or_replace,
+                with_order,
                 ..
             }) if table_properties.is_empty() && with_options.is_empty() => {
                 // Merge inline constraints and existing constraints
@@ -238,13 +239,22 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 // Build column default values
                 let column_defaults =
                     self.build_column_defaults(&columns, planner_context)?;
+                let schema = self.build_schema(columns.clone())?.to_dfschema_ref()?;
+
+                let mut order_exprs: Vec<LexOrdering> = vec![];
+                for o in with_order.iter() {
+                    for e in o.iter() {
+                        order_exprs.push(e.clone())
+                    }
+                }
+                let order_by = self.build_order_by(order_exprs, &schema, planner_context);
+
                 match query {
                     Some(query) => {
                         let plan = self.query_to_plan(*query, planner_context)?;
                         let input_schema = plan.schema();
 
                         let plan = if !columns.is_empty() {
-                            let schema = self.build_schema(columns)?.to_dfschema_ref()?;
                             if schema.fields().len() != input_schema.fields().len() {
                                 return plan_err!(
                             "Mismatch: {} columns specified, but result has {} columns",
@@ -285,12 +295,13 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                                 if_not_exists,
                                 or_replace,
                                 column_defaults,
+                                order_exprs: order_by?,
                             },
                         )))
                     }
-
                     None => {
-                        let schema = self.build_schema(columns)?.to_dfschema_ref()?;
+                        let schema =
+                            self.build_schema(columns.clone())?.to_dfschema_ref()?;
                         let plan = EmptyRelation {
                             produce_one_row: false,
                             schema,
@@ -308,6 +319,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                                 if_not_exists,
                                 or_replace,
                                 column_defaults,
+                                order_exprs: order_by?,
                             },
                         )))
                     }

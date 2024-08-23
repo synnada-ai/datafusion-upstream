@@ -433,7 +433,7 @@ DROP TABLE datafusion.public.some_table;
 # information_schema_describe_table_not_exists
 
 statement error Error during planning: table 'datafusion.public.table' not found
-describe table;
+describe "table";
 
 
 # information_schema_show_tables
