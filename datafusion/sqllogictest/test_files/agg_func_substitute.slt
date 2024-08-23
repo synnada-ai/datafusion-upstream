@@ -15,6 +15,17 @@
 # specific language governing permissions and limitations
 # under the License.
 
+
+statement ok
+CREATE TABLE ordered_memory_table (
+  a0 INTEGER,
+  a INTEGER,
+  b INTEGER,
+  c INTEGER,
+  d INTEGER
+)
+WITH ORDER (a ASC, b ASC);
+
 #######
 # Setup test data table
 #######
@@ -31,18 +42,6 @@ WITH ORDER (a ASC, b ASC)
 WITH ORDER (c ASC)
 LOCATION '../../datafusion/core/tests/data/window_2.csv'
 OPTIONS ('format.has_header' 'true');
-
-
-statement ok
-CREATE TABLE multiple_ordered_table2 (
-  a0 INTEGER,
-  a INTEGER,
-  b INTEGER,
-  c INTEGER,
-  d INTEGER
-)
-WITH ORDER (a ASC, b ASC)
-WITH ORDER (c ASC);
 
 
 query TT
