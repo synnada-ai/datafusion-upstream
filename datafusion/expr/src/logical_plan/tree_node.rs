@@ -285,6 +285,7 @@ impl TreeNode for LogicalPlan {
                         if_not_exists,
                         or_replace,
                         column_defaults,
+                        order_exprs,
                     }) => rewrite_arc(input, f)?.update_data(|input| {
                         DdlStatement::CreateMemoryTable(CreateMemoryTable {
                             name,
@@ -293,6 +294,7 @@ impl TreeNode for LogicalPlan {
                             if_not_exists,
                             or_replace,
                             column_defaults,
+                            order_exprs,
                         })
                     }),
                     DdlStatement::CreateView(CreateView {
