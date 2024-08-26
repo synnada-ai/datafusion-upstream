@@ -15,17 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-
-statement ok
-CREATE TABLE ordered_memory_table (
-  a0 INTEGER,
-  a INTEGER,
-  b INTEGER,
-  c INTEGER,
-  d INTEGER
-)
-WITH ORDER (a ASC, b ASC);
-
 #######
 # Setup test data table
 #######
