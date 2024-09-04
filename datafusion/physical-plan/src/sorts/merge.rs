@@ -100,12 +100,6 @@ pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
 
     /// number of rows produced
     produced: usize,
-
-    /// This vector contains partition indices in order. When a partition is polled and returns `Poll::Ready`,
-    /// it is removed from the vector. If a partition returns `Poll::Pending`, it is moved to the end of the
-    /// vector to ensure the next iteration starts with a different partition, preventing the same partition
-    /// from being continuously polled.
-    uninitiated_partitions: Vec<usize>,
 }
 
 impl<C: CursorValues> SortPreservingMergeStream<C> {
@@ -130,7 +124,6 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             batch_size,
             fetch,
             produced: 0,
-            uninitiated_partitions: (0..stream_count).collect(),
         }
     }
 
@@ -167,22 +160,27 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
         // try to initialize the loser tree
         if self.loser_tree.is_empty() {
             // Ensure all non-exhausted streams have a cursor from which rows can be pulled
-            let remaining_partitions = self.uninitiated_partitions.clone();
-            for i in remaining_partitions {
+            let mut any_pending = false;
+            for i in 0..self.streams.partitions() {
                 match self.maybe_poll_stream(cx, i) {
                     Poll::Ready(Err(e)) => {
                         self.aborted = true;
                         return Poll::Ready(Some(Err(e)));
                     }
-                    Poll::Pending => {
-                        self.uninitiated_partitions.rotate_left(1);
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
+                    Poll::Ready(Ok(())) => {
+                        // input i is ready
                     }
-                    _ => {
-                        self.uninitiated_partitions.retain(|idx| *idx != i);
+                    Poll::Pending => {
+                        // input i is not ready
+                        any_pending = true;
                     }
                 }
+            }
+            if any_pending {
+                // If any stream is not ready, return pending and tell the executor to wake us up
+                // to try again when it is ready
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
             }
             self.init_loser_tree();
         }

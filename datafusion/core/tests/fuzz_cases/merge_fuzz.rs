@@ -37,7 +37,7 @@ use datafusion::physical_plan::{
     sorts::sort_preserving_merge::SortPreservingMergeExec,
 };
 use datafusion::prelude::{SessionConfig, SessionContext};
-use datafusion_common::{DataFusionError, Result};
+use datafusion_common::{exec_err, Result};
 use datafusion_common_runtime::SpawnedTask;
 use datafusion_execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion_physical_expr::expressions::Column;
@@ -310,11 +310,9 @@ async fn test_spm_congestion() -> Result<()> {
     match result {
         Ok(Ok(Ok(_batches))) => Ok(()),
         Ok(Ok(Err(e))) => Err(e),
-        Ok(Err(_)) => Err(DataFusionError::Execution(
-            "SortPreservingMerge task panicked or was cancelled".to_string(),
-        )),
-        Err(_) => Err(DataFusionError::Execution(
-            "SortPreservingMerge caused a deadlock".to_string(),
-        )),
+        Ok(Err(e)) => {
+            exec_err!("SortPreservingMerge task panicked or was cancelled: {e}")
+        }
+        Err(e) => exec_err!("SortPreservingMerge caused a deadlock: {e}"),
     }
 }
