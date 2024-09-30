@@ -20,6 +20,7 @@
 //! determined by the [`JoinType`].
 
 use std::any::Any;
+use std::collections::VecDeque;
 use std::fmt::Formatter;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -45,6 +46,7 @@ use arrow::compute::concat_batches;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use arrow::util::bit_util;
+use arrow_array::Array;
 use datafusion_common::{exec_datafusion_err, JoinSide, Result, Statistics};
 use datafusion_execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion_execution::TaskContext;
@@ -97,6 +99,105 @@ impl JoinLeftData {
     /// if caller is the last running thread
     fn report_probe_completed(&self) -> bool {
         self.probe_threads_counter.fetch_sub(1, Ordering::Relaxed) == 1
+    }
+}
+
+struct JoinIndicesBuffer {
+    queue: VecDeque<(RecordBatch, UInt64Array, UInt32Array)>,
+    schema: SchemaRef,
+    join_type: JoinType,
+    column_indices: Vec<ColumnIndex>,
+    target_batch_size: usize,
+    memory_reservation: MemoryReservation,
+}
+
+impl JoinIndicesBuffer {
+    fn new(
+        schema: SchemaRef,
+        join_type: JoinType,
+        column_indices: Vec<ColumnIndex>,
+        target_batch_size: usize,
+        memory_reservation: MemoryReservation,
+    ) -> Self {
+        Self {
+            queue: VecDeque::new(),
+            schema,
+            join_type,
+            column_indices,
+            target_batch_size,
+            memory_reservation,
+        }
+    }
+
+    fn push(
+        &mut self,
+        batch: RecordBatch,
+        indices: (UInt64Array, UInt32Array),
+    ) -> Result<()> {
+        let (left_indices, right_indices) = indices;
+        self.memory_reservation.try_grow(
+            batch.get_array_memory_size()
+                + left_indices.get_array_memory_size()
+                + right_indices.get_array_memory_size(),
+        )?;
+        self.queue.push_back((batch, left_indices, right_indices));
+        Ok(())
+    }
+
+    fn next(&mut self, left_batch: &RecordBatch) -> Result<Option<RecordBatch>> {
+        loop {
+            let Some((right_batch, left_indices, right_indices)) = self.queue.front_mut()
+            else {
+                return Ok(None);
+            };
+            if left_indices.len() == 0 || right_indices.len() == 0 {
+                self.memory_reservation.try_shrink(
+                    right_batch.get_array_memory_size()
+                        + left_indices.get_array_memory_size()
+                        + right_indices.get_array_memory_size(),
+                )?;
+                self.queue.pop_front();
+            } else {
+                let rows_to_take = self
+                    .target_batch_size
+                    .min(left_indices.len())
+                    .min(right_indices.len());
+
+                let left_indices_slice = if !matches!(
+                    self.join_type,
+                    JoinType::RightAnti | JoinType::RightSemi
+                ) {
+                    let slice = left_indices.slice(0, rows_to_take);
+                    *left_indices = left_indices
+                        .slice(rows_to_take, left_indices.len() - rows_to_take);
+                    slice
+                } else {
+                    UInt64Array::new_null(0)
+                };
+
+                let right_indices_slice =
+                    if !matches!(self.join_type, JoinType::LeftAnti | JoinType::LeftSemi)
+                    {
+                        let slice = right_indices.slice(0, rows_to_take);
+                        *right_indices = right_indices
+                            .slice(rows_to_take, right_indices.len() - rows_to_take);
+                        slice
+                    } else {
+                        UInt32Array::new_null(0)
+                    };
+
+                return Some(build_batch_from_indices(
+                    &self.schema,
+                    left_batch,
+                    &right_batch,
+                    &left_indices_slice,
+                    &right_indices_slice,
+                    &self.column_indices,
+                    JoinSide::Left,
+                ))
+                .transpose();
+            }
+        }
     }
 }
 
@@ -334,6 +435,13 @@ impl ExecutionPlan for NestedLoopJoinExec {
             MemoryConsumer::new(format!("NestedLoopJoinLoad[{partition}]"))
                 .register(context.memory_pool());
 
+        // Initialization reservation for load of inner table
+        let buffer_reservation =
+            MemoryConsumer::new(format!("NestedLoopJoinBuffer[{partition}]"))
+                .register(context.memory_pool());
+
+        let target_batch_size = context.session_config().batch_size();
+
         let inner_table = self.inner_table.once(|| {
             collect_left_input(
                 Arc::clone(&self.left),
@@ -352,6 +460,15 @@ impl ExecutionPlan for NestedLoopJoinExec {
         // Right side has an order and it is maintained during operation.
         let right_side_ordered =
             self.maintains_input_order()[1] && self.right.output_ordering().is_some();
+
+        let join_indices_buffer = JoinIndicesBuffer::new(
+            Arc::clone(&self.schema),
+            self.join_type,
+            self.column_indices.clone(),
+            target_batch_size,
+            buffer_reservation,
+        );
+
         Ok(Box::pin(NestedLoopJoinStream {
             schema: Arc::clone(&self.schema),
             filter: self.filter.clone(),
@@ -359,10 +476,10 @@ impl ExecutionPlan for NestedLoopJoinExec {
             outer_table,
             inner_table,
             is_exhausted: false,
-            column_indices: self.column_indices.clone(),
             join_metrics,
             indices_cache,
             right_side_ordered,
+            join_indices_buffer,
         }))
     }
 
@@ -456,8 +573,6 @@ struct NestedLoopJoinStream {
     inner_table: OnceFut<JoinLeftData>,
     /// There is nothing to process anymore and left side is processed in case of full join
     is_exhausted: bool,
-    /// Information of index and left / right placement of columns
-    column_indices: Vec<ColumnIndex>,
     // TODO: support null aware equal
     // null_equals_null: bool
     /// Join execution metrics
@@ -466,6 +581,8 @@ struct NestedLoopJoinStream {
     indices_cache: (UInt64Array, UInt32Array),
     /// Whether the right side is ordered
     right_side_ordered: bool,
+    /// Buffer for join indices that is used to produce output batches
+    join_indices_buffer: JoinIndicesBuffer,
 }
 
 /// Creates a Cartesian product of two input batches, preserving the order of the right batch,
@@ -560,15 +677,22 @@ impl NestedLoopJoinStream {
         // Get or initialize visited_left_side bitmap if required by join type
         let visited_left_side = left_data.bitmap();
 
-        // Check is_exhausted before polling the outer_table, such that when the outer table
-        // does not support `FusedStream`, Self will not poll it again
-        if self.is_exhausted {
-            return Poll::Ready(None);
-        }
+        loop {
+            let timer = self.join_metrics.join_time.timer();
+            let next = self.join_indices_buffer.next(left_data.batch()).transpose();
+            timer.done();
 
-        self.outer_table
-            .poll_next_unpin(cx)
-            .map(|maybe_batch| match maybe_batch {
+            if let Some(result) = next {
+                return Poll::Ready(Some(result));
+            }
+
+            // Check is_exhausted before polling the outer_table, such that when the outer table
+            // does not support `FusedStream`, Self will not poll it again
+            if self.is_exhausted {
+                return Poll::Ready(None);
+            }
+
+            match ready!(self.outer_table.poll_next_unpin(cx)) {
                 Some(Ok(right_batch)) => {
                     // Setting up timer & updating input metrics
                     self.join_metrics.input_batches.add(1);
@@ -580,23 +704,24 @@ impl NestedLoopJoinStream {
                         &right_batch,
                         self.join_type,
                         self.filter.as_ref(),
-                        &self.column_indices,
-                        &self.schema,
                         visited_left_side,
                         &mut self.indices_cache,
                         self.right_side_ordered,
                     );
 
                     // Recording time & updating output metrics
-                    if let Ok(batch) = &result {
-                        timer.done();
-                        self.join_metrics.output_batches.add(1);
-                        self.join_metrics.output_rows.add(batch.num_rows());
+                    match result {
+                        Ok(join_indices) => {
+                            self.join_indices_buffer.push(right_batch, join_indices)?;
+                            timer.done();
+                            continue;
+                        }
+                        Err(err) => {
+                            return Poll::Ready(Some(Err(err)));
+                        }
                     }
-
-                    Some(result)
                 }
-                Some(err) => Some(err),
+                Some(err) => return Poll::Ready(Some(err)),
                 None => {
                     if need_produce_result_in_final(self.join_type) {
                         // At this stage `visited_left_side` won't be updated, so it's
@@ -606,45 +731,30 @@ impl NestedLoopJoinStream {
                         // multiple calls of `report_probe_completed()`
                         if !left_data.report_probe_completed() {
                             self.is_exhausted = true;
-                            return None;
+                            continue;
                         };
 
                         // Only setting up timer, input is exhausted
                         let timer = self.join_metrics.join_time.timer();
                         // use the global left bitmap to produce the left indices and right indices
-                        let (left_side, right_side) =
-                            get_final_indices_from_shared_bitmap(
-                                visited_left_side,
-                                self.join_type,
-                            );
+                        let indices = get_final_indices_from_shared_bitmap(
+                            visited_left_side,
+                            self.join_type,
+                        );
                         let empty_right_batch =
                             RecordBatch::new_empty(self.outer_table.schema());
-                        // use the left and right indices to produce the batch result
-                        let result = build_batch_from_indices(
-                            &self.schema,
-                            left_data.batch(),
-                            &empty_right_batch,
-                            &left_side,
-                            &right_side,
-                            &self.column_indices,
-                            JoinSide::Left,
-                        );
                         self.is_exhausted = true;
 
-                        // Recording time & updating output metrics
-                        if let Ok(batch) = &result {
-                            timer.done();
-                            self.join_metrics.output_batches.add(1);
-                            self.join_metrics.output_rows.add(batch.num_rows());
-                        }
-
-                        Some(result)
+                        timer.done();
+                        self.join_indices_buffer.push(empty_right_batch, indices)?;
+                        continue;
                     } else {
-                        // end of the join loop
-                        None
+                        self.is_exhausted = true;
+                        continue;
                     }
                 }
-            })
+            }
+        }
     }
 }
 
@@ -654,12 +764,10 @@ fn join_left_and_right_batch(
     right_batch: &RecordBatch,
     join_type: JoinType,
     filter: Option<&JoinFilter>,
-    column_indices: &[ColumnIndex],
-    schema: &Schema,
     visited_left_side: &SharedBitmapBuilder,
     indices_cache: &mut (UInt64Array, UInt32Array),
     right_side_ordered: bool,
-) -> Result<RecordBatch> {
+) -> Result<(UInt64Array, UInt32Array)> {
     let (left_side, right_side) =
         build_join_indices(left_batch, right_batch, filter, indices_cache).map_err(
             |e| {
@@ -686,15 +794,7 @@ fn join_left_and_right_batch(
         right_side_ordered,
     );
 
-    build_batch_from_indices(
-        schema,
-        left_batch,
-        right_batch,
-        &left_side,
-        &right_side,
-        column_indices,
-        JoinSide::Left,
-    )
+    Ok((left_side, right_side))
 }
 
 fn get_final_indices_from_shared_bitmap(
@@ -1172,8 +1272,10 @@ mod tests {
 
             assert_contains!(
                 err.to_string(),
-                "External error: Resources exhausted: Additional allocation failed with top memory consumers (across reservations) as: NestedLoopJoinLoad[0]"
+                "External error: Resources exhausted: Additional allocation failed with top memory consumers (across reservations) as:"
             );
+            assert_contains!(err.to_string(), "NestedLoopJoinLoad[0] consumed 0 bytes");
+            assert_contains!(err.to_string(), "NestedLoopJoinBuffer[0] consumed 0 bytes");
         }
 
         Ok(())
