@@ -683,7 +683,16 @@ impl NestedLoopJoinStream {
             timer.done();
 
             if let Some(result) = next {
-                return Poll::Ready(Some(result));
+                return match result {
+                    Ok(batch) => {
+                        self.join_metrics.output_batches.add(1);
+                        self.join_metrics.output_rows.add(batch.num_rows());
+                        Poll::Ready(Some(Ok(batch)))
+                    }
+                    Err(err) => {
+                        Poll::Ready(Some(Err(err)))
+                    }
+                }
             }
 
             // Check is_exhausted before polling the outer_table, such that when the outer table
