@@ -150,7 +150,7 @@ impl JoinIndicesBuffer {
             else {
                 return Ok(None);
             };
-            if left_indices.len() == 0 || right_indices.len() == 0 {
+            if left_indices.is_empty() || right_indices.is_empty() {
                 self.memory_reservation.try_shrink(
                     right_batch.get_array_memory_size()
                         + left_indices.get_array_memory_size()
@@ -189,7 +189,7 @@ impl JoinIndicesBuffer {
                 return Some(build_batch_from_indices(
                     &self.schema,
                     left_batch,
-                    &right_batch,
+                    right_batch,
                     &left_indices_slice,
                     &right_indices_slice,
                     &self.column_indices,
@@ -480,6 +480,7 @@ impl ExecutionPlan for NestedLoopJoinExec {
             indices_cache,
             right_side_ordered,
             join_indices_buffer,
+            has_produced_output: false,
         }))
     }
 
@@ -583,6 +584,7 @@ struct NestedLoopJoinStream {
     right_side_ordered: bool,
     /// Buffer for join indices that is used to produce output batches
     join_indices_buffer: JoinIndicesBuffer,
+    has_produced_output: bool,
 }
 
 /// Creates a Cartesian product of two input batches, preserving the order of the right batch,
@@ -687,18 +689,24 @@ impl NestedLoopJoinStream {
                     Ok(batch) => {
                         self.join_metrics.output_batches.add(1);
                         self.join_metrics.output_rows.add(batch.num_rows());
+                        self.has_produced_output = true;
                         Poll::Ready(Some(Ok(batch)))
                     }
-                    Err(err) => {
-                        Poll::Ready(Some(Err(err)))
-                    }
-                }
+                    Err(err) => Poll::Ready(Some(Err(err))),
+                };
             }
 
             // Check is_exhausted before polling the outer_table, such that when the outer table
             // does not support `FusedStream`, Self will not poll it again
             if self.is_exhausted {
-                return Poll::Ready(None);
+                return if self.has_produced_output {
+                    Poll::Ready(None)
+                } else {
+                    self.has_produced_output = true;
+                    Poll::Ready(Some(Ok(RecordBatch::new_empty(Arc::clone(
+                        &self.schema,
+                    )))))
+                };
             }
 
             match ready!(self.outer_table.poll_next_unpin(cx)) {
