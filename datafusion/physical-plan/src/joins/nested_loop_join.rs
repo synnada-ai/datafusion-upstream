@@ -453,12 +453,16 @@ async fn collect_left_input(
     ))
 }
 
+/// Represents the state of the `NestedLoopJoinStream`.
 enum NestedLoopJoinStreamState {
+    /// Fetching probe data and performing the join.
     FetchProbeAndJoin,
+    /// Producing the output batch.
+    /// Contains a tuple with the `RecordBatch` being sliced and the last index sliced until.
     ProduceOutput((RecordBatch, usize)),
+    /// The stream is exhausted and no more data is available.
     Exhausted,
 }
-
 impl NestedLoopJoinStreamState {
     fn try_as_produce_output_mut(&mut self) -> Result<&mut (RecordBatch, usize)> {
         match self {
