@@ -45,7 +45,9 @@ use arrow::compute::concat_batches;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use arrow::util::bit_util;
-use datafusion_common::{exec_datafusion_err, JoinSide, Result, Statistics};
+use datafusion_common::{
+    exec_datafusion_err, internal_err, JoinSide, Result, Statistics,
+};
 use datafusion_execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion_execution::TaskContext;
 use datafusion_expr::JoinType;
@@ -329,9 +331,16 @@ impl ExecutionPlan for NestedLoopJoinExec {
     ) -> Result<SendableRecordBatchStream> {
         let join_metrics = BuildProbeJoinMetrics::new(partition, &self.metrics);
 
+        let target_batch_size = context.session_config().batch_size();
+
         // Initialization reservation for load of inner table
         let load_reservation =
             MemoryConsumer::new(format!("NestedLoopJoinLoad[{partition}]"))
+                .register(context.memory_pool());
+
+        // Initialization reservation for produce output buffer
+        let buffer_reservation =
+            MemoryConsumer::new(format!("NestedLoopJoinBuffer[{partition}]"))
                 .register(context.memory_pool());
 
         let inner_table = self.inner_table.once(|| {
@@ -358,11 +367,13 @@ impl ExecutionPlan for NestedLoopJoinExec {
             join_type: self.join_type,
             outer_table,
             inner_table,
-            is_exhausted: false,
             column_indices: self.column_indices.clone(),
             join_metrics,
             indices_cache,
             right_side_ordered,
+            state: NestedLoopJoinStreamState::FetchProbeAndJoin,
+            target_batch_size,
+            buffer_reservation,
         }))
     }
 
@@ -442,6 +453,20 @@ async fn collect_left_input(
     ))
 }
 
+enum NestedLoopJoinStreamState {
+    FetchProbeAndJoin,
+    ProduceOutput((RecordBatch, usize)),
+    Exhausted,
+}
+
+impl NestedLoopJoinStreamState {
+    fn try_as_produce_output_mut(&mut self) -> Result<&mut (RecordBatch, usize)> {
+        match self {
+            Self::ProduceOutput(state) => Ok(state),
+            _ => internal_err!("Expected nested loop join stream in ProduceOutput state"),
+        }
+    }
+}
 /// A stream that issues [RecordBatch]es as they arrive from the right  of the join.
 struct NestedLoopJoinStream {
     /// Input schema
@@ -454,8 +479,6 @@ struct NestedLoopJoinStream {
     outer_table: SendableRecordBatchStream,
     /// the inner table data of the nested loop join
     inner_table: OnceFut<JoinLeftData>,
-    /// There is nothing to process anymore and left side is processed in case of full join
-    is_exhausted: bool,
     /// Information of index and left / right placement of columns
     column_indices: Vec<ColumnIndex>,
     // TODO: support null aware equal
@@ -466,6 +489,12 @@ struct NestedLoopJoinStream {
     indices_cache: (UInt64Array, UInt32Array),
     /// Whether the right side is ordered
     right_side_ordered: bool,
+    /// Current state of the stream
+    state: NestedLoopJoinStreamState,
+    /// The target batch size
+    target_batch_size: usize,
+    /// Memory reservation for buffer
+    buffer_reservation: MemoryReservation,
 }
 
 /// Creates a Cartesian product of two input batches, preserving the order of the right batch,
@@ -560,91 +589,118 @@ impl NestedLoopJoinStream {
         // Get or initialize visited_left_side bitmap if required by join type
         let visited_left_side = left_data.bitmap();
 
-        // Check is_exhausted before polling the outer_table, such that when the outer table
-        // does not support `FusedStream`, Self will not poll it again
-        if self.is_exhausted {
-            return Poll::Ready(None);
-        }
+        loop {
+            match &mut self.state {
+                NestedLoopJoinStreamState::FetchProbeAndJoin => {
+                    match ready!(self.outer_table.poll_next_unpin(cx)) {
+                        Some(Ok(right_batch)) => {
+                            // Setting up timer & updating input metrics
+                            self.join_metrics.input_batches.add(1);
+                            self.join_metrics.input_rows.add(right_batch.num_rows());
+                            let timer = self.join_metrics.join_time.timer();
 
-        self.outer_table
-            .poll_next_unpin(cx)
-            .map(|maybe_batch| match maybe_batch {
-                Some(Ok(right_batch)) => {
-                    // Setting up timer & updating input metrics
-                    self.join_metrics.input_batches.add(1);
-                    self.join_metrics.input_rows.add(right_batch.num_rows());
-                    let timer = self.join_metrics.join_time.timer();
-
-                    let result = join_left_and_right_batch(
-                        left_data.batch(),
-                        &right_batch,
-                        self.join_type,
-                        self.filter.as_ref(),
-                        &self.column_indices,
-                        &self.schema,
-                        visited_left_side,
-                        &mut self.indices_cache,
-                        self.right_side_ordered,
-                    );
-
-                    // Recording time & updating output metrics
-                    if let Ok(batch) = &result {
-                        timer.done();
-                        self.join_metrics.output_batches.add(1);
-                        self.join_metrics.output_rows.add(batch.num_rows());
-                    }
-
-                    Some(result)
-                }
-                Some(err) => Some(err),
-                None => {
-                    if need_produce_result_in_final(self.join_type) {
-                        // At this stage `visited_left_side` won't be updated, so it's
-                        // safe to report about probe completion.
-                        //
-                        // Setting `is_exhausted` / returning None will prevent from
-                        // multiple calls of `report_probe_completed()`
-                        if !left_data.report_probe_completed() {
-                            self.is_exhausted = true;
-                            return None;
-                        };
-
-                        // Only setting up timer, input is exhausted
-                        let timer = self.join_metrics.join_time.timer();
-                        // use the global left bitmap to produce the left indices and right indices
-                        let (left_side, right_side) =
-                            get_final_indices_from_shared_bitmap(
-                                visited_left_side,
+                            let result = join_left_and_right_batch(
+                                left_data.batch(),
+                                &right_batch,
                                 self.join_type,
+                                self.filter.as_ref(),
+                                &self.column_indices,
+                                &self.schema,
+                                visited_left_side,
+                                &mut self.indices_cache,
+                                self.right_side_ordered,
                             );
-                        let empty_right_batch =
-                            RecordBatch::new_empty(self.outer_table.schema());
-                        // use the left and right indices to produce the batch result
-                        let result = build_batch_from_indices(
-                            &self.schema,
-                            left_data.batch(),
-                            &empty_right_batch,
-                            &left_side,
-                            &right_side,
-                            &self.column_indices,
-                            JoinSide::Left,
-                        );
-                        self.is_exhausted = true;
 
-                        // Recording time & updating output metrics
-                        if let Ok(batch) = &result {
-                            timer.done();
-                            self.join_metrics.output_batches.add(1);
-                            self.join_metrics.output_rows.add(batch.num_rows());
+                            // Recording time & updating output metrics
+                            match result {
+                                Ok(batch) => {
+                                    timer.done();
+                                    self.buffer_reservation
+                                        .try_grow(batch.get_array_memory_size())?;
+                                    self.state = NestedLoopJoinStreamState::ProduceOutput(
+                                        (batch, 0),
+                                    );
+                                    continue;
+                                }
+                                Err(err) => {
+                                    return Poll::Ready(Some(Err(err)));
+                                }
+                            }
                         }
+                        Some(err) => return Poll::Ready(Some(err)),
+                        None => {
+                            if need_produce_result_in_final(self.join_type) {
+                                // At this stage `visited_left_side` won't be updated, so it's
+                                // safe to report about probe completion.
+                                //
+                                // Setting `is_exhausted` / returning None will prevent from
+                                // multiple calls of `report_probe_completed()`
+                                if !left_data.report_probe_completed() {
+                                    self.state = NestedLoopJoinStreamState::Exhausted;
+                                    continue;
+                                };
 
-                        Some(result)
-                    } else {
-                        // end of the join loop
-                        None
-                    }
+                                // Only setting up timer, input is exhausted
+                                let timer = self.join_metrics.join_time.timer();
+                                // use the global left bitmap to produce the left indices and right indices
+                                let (left_side, right_side) =
+                                    get_final_indices_from_shared_bitmap(
+                                        visited_left_side,
+                                        self.join_type,
+                                    );
+                                let empty_right_batch =
+                                    RecordBatch::new_empty(self.outer_table.schema());
+                                // use the left and right indices to produce the batch result
+                                let result = build_batch_from_indices(
+                                    &self.schema,
+                                    left_data.batch(),
+                                    &empty_right_batch,
+                                    &left_side,
+                                    &right_side,
+                                    &self.column_indices,
+                                    JoinSide::Left,
+                                );
+                                self.state = NestedLoopJoinStreamState::Exhausted;
+
+                                // Recording time & updating output metrics
+                                if let Ok(batch) = &result {
+                                    timer.done();
+                                    self.join_metrics.output_batches.add(1);
+                                    self.join_metrics.output_rows.add(batch.num_rows());
+                                }
+
+                                return Poll::Ready(Some(result));
+                            } else {
+                                // end of the join loop
+                                self.state = NestedLoopJoinStreamState::Exhausted;
+                            };
+                        }
+                    };
                 }
-            })
+                NestedLoopJoinStreamState::ProduceOutput(_) => {
+                    let (batch, index) = self.state.try_as_produce_output_mut()?;
+                    let slice_until =
+                        batch.num_rows().min(*index + self.target_batch_size);
+                    let output_batch = batch.slice(*index, slice_until - *index);
+
+                    self.join_metrics.output_batches.add(1);
+                    self.join_metrics.output_rows.add(output_batch.num_rows());
+
+                    if slice_until == batch.num_rows() {
+                        self.buffer_reservation
+                            .try_shrink(batch.get_array_memory_size())?;
+                        self.state = NestedLoopJoinStreamState::FetchProbeAndJoin;
+                    } else {
+                        *index = slice_until;
+                    }
+
+                    return Poll::Ready(Some(Ok(output_batch)));
+                }
+                NestedLoopJoinStreamState::Exhausted => {
+                    return Poll::Ready(None);
+                }
+            }
+        }
     }
 }
 
@@ -1172,8 +1228,10 @@ mod tests {
 
             assert_contains!(
                 err.to_string(),
-                "External error: Resources exhausted: Additional allocation failed with top memory consumers (across reservations) as: NestedLoopJoinLoad[0]"
+                "External error: Resources exhausted: Additional allocation failed with top memory consumers (across reservations) as:"
             );
+            assert_contains!(err.to_string(), "NestedLoopJoinLoad[0] consumed 0 bytes");
+            assert_contains!(err.to_string(), "NestedLoopJoinBuffer[0] consumed 0 bytes");
         }
 
         Ok(())
