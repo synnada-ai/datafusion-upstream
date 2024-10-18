@@ -181,6 +181,7 @@ impl MemoryConsumer {
                 consumer: self,
             }),
             size: 0,
+            max_size: 0,
         }
     }
 }
@@ -210,6 +211,7 @@ impl Drop for SharedRegistration {
 pub struct MemoryReservation {
     registration: Arc<SharedRegistration>,
     size: usize,
+    max_size: usize,
 }
 
 impl MemoryReservation {
@@ -292,6 +294,11 @@ impl MemoryReservation {
     pub fn try_grow(&mut self, capacity: usize) -> Result<()> {
         self.registration.pool.try_grow(self, capacity)?;
         self.size += capacity;
+        // TODO: Remove. For measuring the memory between the change
+        // if self.size > self.max_size {
+        //     self.max_size = self.size;
+        //     println!("max size: {}", self.max_size)
+        // }
         Ok(())
     }
 
@@ -310,6 +317,7 @@ impl MemoryReservation {
         Self {
             size: capacity,
             registration: Arc::clone(&self.registration),
+            max_size: self.max_size,
         }
     }
 
@@ -318,6 +326,7 @@ impl MemoryReservation {
         Self {
             size: 0,
             registration: Arc::clone(&self.registration),
+            max_size: self.max_size,
         }
     }
 
