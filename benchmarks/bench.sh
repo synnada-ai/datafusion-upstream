@@ -34,6 +34,7 @@ COMMAND=
 BENCHMARK=all
 DATAFUSION_DIR=${DATAFUSION_DIR:-$SCRIPT_DIR/..}
 DATA_DIR=${DATA_DIR:-$SCRIPT_DIR/data}
+DATA_SPM_DIR=${DATA_SPM_DIR:-$SCRIPT_DIR/spm_data}
 CARGO_COMMAND=${CARGO_COMMAND:-"cargo run --release"}
 PREFER_HASH_JOIN=${PREFER_HASH_JOIN:-true}
 VIRTUAL_ENV=${VIRTUAL_ENV:-$SCRIPT_DIR/venv}
@@ -231,6 +232,9 @@ main() {
                 sort)
                     run_sort
                     ;;
+                spm)
+                    run_spm
+                    ;;
                 clickbench_1)
                     run_clickbench_1
                     ;;
@@ -420,6 +424,18 @@ run_clickbench_1() {
     echo "RESULTS_FILE: ${RESULTS_FILE}"
     echo "Running clickbench (1 file) benchmark..."
     $CARGO_COMMAND --bin dfbench -- clickbench  --iterations 5 --path "${DATA_DIR}/hits.parquet"  --queries-path "${SCRIPT_DIR}/queries/clickbench/queries.sql" -o "${RESULTS_FILE}"
+}
+
+run_spm() {
+    RESULTS_FILE="${RESULTS_DIR}/spm.json"
+    echo "RESULTS_FILE: ${RESULTS_FILE}"
+    echo "Running spm benchmark..."
+    echo "Path: ${DATA_SPM_DIR}"
+    $CARGO_COMMAND --bin dfbench -- spm  --iterations 5 --batch_size 4 --path "${DATA_SPM_DIR}/low_card_spm_small_batch.csv"  --queries-path "${SCRIPT_DIR}/queries/spm/queries.sql" -o "${RESULTS_FILE}"
+    $CARGO_COMMAND --bin dfbench -- spm  --iterations 5 --batch_size 4 --partition 2 --path "${DATA_SPM_DIR}/low_card_spm_small_batch.csv"  --queries-path "${SCRIPT_DIR}/queries/spm/queries.sql" -o "${RESULTS_FILE}"
+    $CARGO_COMMAND --bin dfbench -- spm  --iterations 5 --path "${DATA_SPM_DIR}/low_card_spm.csv"  --queries-path "${SCRIPT_DIR}/queries/spm/queries.sql" -o "${RESULTS_FILE}"
+    $CARGO_COMMAND --bin dfbench -- spm  --iterations 5 --partition 2 --path "${DATA_SPM_DIR}/low_card_spm.csv"  --queries-path "${SCRIPT_DIR}/queries/spm/queries.sql" -o "${RESULTS_FILE}"
+    $CARGO_COMMAND --bin dfbench -- spm  --iterations 5 --path "${DATA_SPM_DIR}/high_card_spm.csv"  --queries-path "${SCRIPT_DIR}/queries/spm/queries.sql" -o "${RESULTS_FILE}"
 }
 
  # Runs the clickbench benchmark with the partitioned parquet files
