@@ -96,6 +96,11 @@ pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
 
     /// Cursors for each input partition. `None` means the input is exhausted
     cursors: Vec<Option<Cursor<C>>>,
+    /// Calculate the number of polled with the same value.
+    /// We select the one that has less poll counts for tie-breaker in loser tree.
+    num_of_polled_with_same_value: Vec<usize>,
+    /// Store previous batch for tracking the poll counts on the same value
+    prev_cursors: Vec<Option<Cursor<C>>>,
 
     /// Optional number of rows to fetch
     fetch: Option<usize>,
@@ -127,6 +132,8 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             metrics,
             aborted: false,
             cursors: (0..stream_count).map(|_| None).collect(),
+            prev_cursors: (0..stream_count).map(|_| None).collect(),
+            num_of_polled_with_same_value: vec![0; stream_count],
             loser_tree: vec![],
             loser_tree_adjusted: false,
             batch_size,
@@ -214,6 +221,10 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
                     self.aborted = true;
                     return Poll::Ready(Some(Err(e)));
                 }
+
+                // adjust poll count
+                self.adjuct_poll_count(winner);
+
                 self.update_loser_tree();
             }
 
@@ -236,6 +247,21 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
         }
     }
 
+    fn adjuct_poll_count(&mut self, stream_idx: usize) {
+        let slot = &mut self.cursors[stream_idx];
+
+        if let Some(c) = slot.as_mut() {
+            // To compare with the last row in the previous batch
+            let prev_cursor = &self.prev_cursors[stream_idx];
+            let is_eq = c.is_eq_to_prev_one(prev_cursor.as_ref());
+            if is_eq {
+                self.num_of_polled_with_same_value[stream_idx] += 1;
+            } else {
+                self.num_of_polled_with_same_value[stream_idx] = 0;
+            }
+        }
+    }
+
     fn fetch_reached(&mut self) -> bool {
         self.fetch
             .map(|fetch| self.produced + self.in_progress.len() >= fetch)
@@ -246,8 +272,9 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
         let slot = &mut self.cursors[stream_idx];
         match slot.as_mut() {
             Some(c) => {
-                c.advance();
+                let _ = c.advance();
                 if c.is_finished() {
+                    std::mem::swap(slot, &mut self.prev_cursors[stream_idx]);
                     *slot = None;
                 }
                 true
@@ -262,7 +289,14 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
         match (&self.cursors[a], &self.cursors[b]) {
             (None, _) => true,
             (_, None) => false,
-            (Some(ac), Some(bc)) => ac.cmp(bc).then_with(|| a.cmp(&b)).is_gt(),
+            (Some(ac), Some(bc)) => {
+                let number_of_polled_a = self.num_of_polled_with_same_value[a];
+                let number_of_polled_b = self.num_of_polled_with_same_value[b];
+                ac.cmp(bc)
+                    .then_with(|| number_of_polled_a.cmp(&number_of_polled_b))
+                    .then_with(|| a.cmp(&b))
+                    .is_gt()
+            }
         }
     }
 
