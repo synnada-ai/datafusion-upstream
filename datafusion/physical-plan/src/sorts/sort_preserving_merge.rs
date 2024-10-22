@@ -332,7 +332,7 @@ mod tests {
     use crate::repartition::RepartitionExec;
     use crate::sorts::sort::SortExec;
     use crate::stream::RecordBatchReceiverStream;
-    use crate::test::exec::{assert_strong_count_converges_to_zero, BlockingExec};
+    use crate::test::exec::{assert_strong_count_converges_to_zero, BlockingExec, EndlessMemoryExec};
     use crate::test::{self, assert_is_pending, make_partition};
     use crate::{collect, common, ExecutionMode};
 
@@ -388,7 +388,7 @@ mod tests {
             },
         ];
 
-        let exec = MemoryExec::try_new(&[rbs], schema, None).unwrap();
+        let exec = EndlessMemoryExec::try_new(&[rbs], rb, schema, None).unwrap();
         let repartition_exec =
             RepartitionExec::try_new(Arc::new(exec), Partitioning::RoundRobinBatch(128))?;
         let coalesce_batches_exec =
