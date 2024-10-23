@@ -85,6 +85,7 @@ impl MemoryPool for GreedyMemoryPool {
         self.used
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 let new_used = used + additional;
+                println!("name: {} used: {}", reservation.consumer().name(), new_used);
                 (new_used <= self.pool_size).then_some(new_used)
             })
             .map_err(|used| {
