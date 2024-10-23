@@ -17,13 +17,13 @@
 
 //! Simple iterator over batches for use in testing
 
+use std::fmt;
 use std::{
     any::Any,
     pin::Pin,
     sync::{Arc, Weak},
     task::{Context, Poll},
 };
-use std::fmt;
 
 use crate::stream::{RecordBatchReceiverStream, RecordBatchStreamAdapter};
 use crate::{
@@ -33,15 +33,15 @@ use crate::{
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use datafusion_common::{internal_err, DataFusionError, Result};
-use datafusion_execution::TaskContext;
-use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 use datafusion_common::project_schema;
+use datafusion_common::{internal_err, DataFusionError, Result};
 use datafusion_execution::memory_pool::MemoryReservation;
+use datafusion_execution::TaskContext;
 use datafusion_physical_expr::equivalence::ProjectionMapping;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::utils::collect_columns;
 use datafusion_physical_expr::LexOrdering;
+use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 
 use futures::Stream;
 use tokio::sync::Barrier;

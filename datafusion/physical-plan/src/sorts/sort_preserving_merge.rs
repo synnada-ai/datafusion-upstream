@@ -332,7 +332,9 @@ mod tests {
     use crate::repartition::RepartitionExec;
     use crate::sorts::sort::SortExec;
     use crate::stream::RecordBatchReceiverStream;
-    use crate::test::exec::{assert_strong_count_converges_to_zero, BlockingExec, EndlessMemoryExec};
+    use crate::test::exec::{
+        assert_strong_count_converges_to_zero, BlockingExec, EndlessMemoryExec,
+    };
     use crate::test::{self, assert_is_pending, make_partition};
     use crate::{collect, common, ExecutionMode};
 
