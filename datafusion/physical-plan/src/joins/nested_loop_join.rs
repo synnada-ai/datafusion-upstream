@@ -17,6 +17,7 @@
 
 //! [`NestedLoopJoinExec`]: joins without equijoin (equality predicates).
 
+use crate::joins::utils::CloneableExactSizeIterator;
 use std::any::Any;
 use std::fmt::Formatter;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,8 +25,10 @@ use std::sync::Arc;
 use std::task::Poll;
 
 use super::utils::{
-    asymmetric_join_output_partitioning, need_produce_result_in_final, BatchSplitter,
-    BatchTransformer, NoopBatchTransformer, StatefulStreamResult,
+    adjust_iterator_indices_by_join_type, apply_join_filter_to_iterator_indices,
+    asymmetric_join_output_partitioning, build_batch_from_iterator_indices,
+    need_produce_result_in_final, BatchSplitter, BatchTransformer, NoopBatchTransformer,
+    StatefulStreamResult,
 };
 use crate::coalesce_partitions::CoalescePartitionsExec;
 use crate::joins::utils::{
@@ -55,6 +58,7 @@ use datafusion_expr::JoinType;
 use datafusion_physical_expr::equivalence::join_equivalence_properties;
 
 use futures::{ready, Stream, StreamExt, TryStreamExt};
+use itertools::Itertools;
 use parking_lot::Mutex;
 
 /// Shared bitmap for visited left-side indices
@@ -559,7 +563,10 @@ fn build_join_indices(
     right_batch: &RecordBatch,
     filter: Option<&JoinFilter>,
     indices_cache: &mut (UInt64Array, UInt32Array),
-) -> Result<(UInt64Array, UInt32Array)> {
+) -> Result<(
+    Box<dyn CloneableExactSizeIterator<Item = usize>>,
+    Box<dyn CloneableExactSizeIterator<Item = usize>>,
+)> {
     let left_row_count = left_batch.num_rows();
     let right_row_count = right_batch.num_rows();
     let output_row_count = left_row_count * right_row_count;
@@ -602,16 +609,40 @@ fn build_join_indices(
         };
 
     if let Some(filter) = filter {
-        apply_join_filter_to_indices(
+        match apply_join_filter_to_iterator_indices(
             left_batch,
             right_batch,
-            left_indices,
-            right_indices,
+            Box::leak(Box::new(left_indices))
+                .values()
+                .iter()
+                .map(|x| *x as usize),
+            Box::leak(Box::new(right_indices))
+                .values()
+                .iter()
+                .map(|x| *x as usize),
             filter,
             JoinSide::Left,
-        )
+        ) {
+            Ok((left_indices, right_indices)) => {
+                Ok((Box::new(left_indices), Box::new(right_indices)))
+            }
+            Err(e) => Err(e),
+        }
     } else {
-        Ok((left_indices, right_indices))
+        Ok((
+            Box::new(
+                Box::leak(Box::new(left_indices))
+                    .values()
+                    .iter()
+                    .map(|x| *x as usize),
+            ),
+            Box::new(
+                Box::leak(Box::new(right_indices))
+                    .values()
+                    .iter()
+                    .map(|x| *x as usize),
+            ),
+        ))
     }
 }
 
@@ -801,12 +832,13 @@ fn join_left_and_right_batch(
     // and only full join need the left bitmap
     if need_produce_result_in_final(join_type) {
         let mut bitmap = visited_left_side.lock();
-        left_side.values().iter().for_each(|x| {
-            bitmap.set_bit(*x as usize, true);
+        left_side.clone().for_each(|x| {
+            bitmap.set_bit(x, true);
         });
     }
+
     // adjust the two side indices base on the join type
-    let (left_side, right_side) = adjust_indices_by_join_type(
+    let (left_side, right_side, left_has_nulls) = adjust_iterator_indices_by_join_type(
         left_side,
         right_side,
         0..right_batch.num_rows(),
@@ -814,12 +846,13 @@ fn join_left_and_right_batch(
         right_side_ordered,
     )?;
 
-    build_batch_from_indices(
+    build_batch_from_iterator_indices(
         schema,
         left_batch,
         right_batch,
-        &left_side,
-        &right_side,
+        left_side,
+        right_side,
+        left_has_nulls,
         column_indices,
         JoinSide::Left,
     )

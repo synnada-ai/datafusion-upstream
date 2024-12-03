@@ -20,6 +20,7 @@
 use std::collections::HashSet;
 use std::fmt::{self, Debug};
 use std::future::Future;
+use std::iter;
 use std::iter::once;
 use std::ops::{IndexMut, Range};
 use std::sync::Arc;
@@ -35,11 +36,14 @@ use arrow::array::{
     UInt32Builder, UInt64Array,
 };
 use arrow::compute;
+use arrow::compute::TakeOptions;
 use arrow::datatypes::{Field, Schema, SchemaBuilder, UInt32Type, UInt64Type};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use arrow_array::builder::UInt64Builder;
-use arrow_array::{ArrowPrimitiveType, NativeAdapter, PrimitiveArray};
-use arrow_buffer::ArrowNativeType;
+use arrow_array::{downcast_primitive_array, ArrayRef, ArrowPrimitiveType, BooleanArray, NativeAdapter, PrimitiveArray};
+use arrow_array::cast::AsArray;
+use arrow_buffer::{bit_util, ArrowNativeType, BooleanBuffer, MutableBuffer, NullBuffer, ScalarBuffer};
+use arrow_schema::ArrowError;
 use datafusion_common::cast::as_boolean_array;
 use datafusion_common::stats::Precision;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -1244,6 +1248,129 @@ pub(crate) fn apply_join_filter_to_indices(
     ))
 }
 
+#[derive(Clone)]
+struct UserDefinedExactSize<I> {
+    iter: I,
+    size: usize,
+}
+
+impl<I> UserDefinedExactSize<I> {
+    fn new(iter: I, size: usize) -> Self {
+        UserDefinedExactSize { iter, size }
+    }
+}
+
+impl<I> Iterator for UserDefinedExactSize<I>
+where
+    I: Iterator,
+{
+    type Item = I::Item;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.size, Some(self.size))
+    }
+}
+
+impl<I> ExactSizeIterator for UserDefinedExactSize<I>
+where
+    I: Iterator,
+{
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.size
+    }
+}
+
+pub(crate) trait CloneableExactSizeIterator: Iterator {
+    fn clone_box(&self) -> Box<dyn CloneableExactSizeIterator<Item = Self::Item>>;
+}
+
+impl<T> CloneableExactSizeIterator for T
+where
+    T: 'static + Iterator + ExactSizeIterator + Clone,
+{
+    fn clone_box(&self) -> Box<dyn CloneableExactSizeIterator<Item = Self::Item>> {
+        Box::new(self.clone())
+    }
+}
+
+impl<T: 'static> Clone for Box<dyn CloneableExactSizeIterator<Item = T>> {
+    fn clone(&self) -> Self {
+        (**self).clone_box()
+    }
+}
+
+impl<T> ExactSizeIterator for Box<dyn CloneableExactSizeIterator<Item = T>> {}
+
+trait IteratorExt {
+    fn exact_size(self, size: usize) -> UserDefinedExactSize<Self>
+    where
+        Self: Sized;
+}
+
+impl<I> IteratorExt for I
+where
+    I: Iterator + ?Sized,
+{
+    fn exact_size(self, size: usize) -> UserDefinedExactSize<Self>
+    where
+        Self: Sized,
+    {
+        UserDefinedExactSize::new(self, size)
+    }
+}
+
+pub(crate) fn apply_join_filter_to_iterator_indices<I1, I2>(
+    build_input_buffer: &RecordBatch,
+    probe_batch: &RecordBatch,
+    build_indices: I1,
+    probe_indices: I2,
+    filter: &JoinFilter,
+    build_side: JoinSide,
+) -> Result<(
+    impl ExactSizeIterator<Item = usize> + Clone,
+    impl ExactSizeIterator<Item = usize> + Clone,
+)>
+where
+    I1: Iterator<Item = usize> + ExactSizeIterator + Clone,
+    I2: Iterator<Item = usize> + ExactSizeIterator + Clone,
+{
+    let intermediate_batch = build_batch_from_iterator_indices(
+        filter.schema(),
+        build_input_buffer,
+        probe_batch,
+        build_indices.clone(),
+        probe_indices.clone(),
+        false,
+        filter.column_indices(),
+        build_side,
+    )?;
+    let filter_result = filter
+        .expression()
+        .evaluate(&intermediate_batch)?
+        .into_array(intermediate_batch.num_rows())?;
+    let mask = Box::leak(Box::new(as_boolean_array(&filter_result)?.clone()));
+    let true_count = mask.true_count();
+    let left_len = build_input_buffer.num_rows();
+    let left_filtered = mask
+        .values()
+        .set_indices()
+        .exact_size(true_count)
+        .map(move |idx| idx % left_len);
+    let right_filtered = mask
+        .values()
+        .set_indices()
+        .exact_size(true_count)
+        .map(move |idx| idx / left_len);
+    Ok((left_filtered, right_filtered))
+}
+
 /// Returns a new [RecordBatch] by combining the `left` and `right` according to `indices`.
 /// The resulting batch has [Schema] `schema`.
 pub(crate) fn build_batch_from_indices(
@@ -1301,6 +1428,282 @@ pub(crate) fn build_batch_from_indices(
     Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
 }
 
+pub(crate) fn build_batch_from_iterator_indices(
+    schema: &Schema,
+    build_input_buffer: &RecordBatch,
+    probe_batch: &RecordBatch,
+    build_indices: impl ExactSizeIterator<Item = usize> + Clone,
+    probe_indices: impl ExactSizeIterator<Item = usize> + Clone,
+    left_has_nulls: bool,
+    column_indices: &[ColumnIndex],
+    build_side: JoinSide,
+) -> Result<RecordBatch> {
+    if build_indices.len() == 0 && probe_indices.len() == 0 {
+        return Ok(RecordBatch::new_empty(Arc::new(schema.clone())));
+    }
+
+    if schema.fields().is_empty() {
+        let options = RecordBatchOptions::new()
+            .with_match_field_names(true)
+            .with_row_count(Some(build_indices.len()));
+
+        return Ok(RecordBatch::try_new_with_options(
+            Arc::new(schema.clone()),
+            vec![],
+            &options,
+        )?);
+    }
+
+    // build the columns of the new [RecordBatch]:
+    // 1. pick whether the column is from the left or right
+    // 2. based on the pick, `take` items from the different RecordBatches
+    let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(schema.fields().len());
+
+    for column_index in column_indices {
+        let array = if column_index.side == JoinSide::None {
+            // LeftMark join, the mark column is a true if the indices is not null, otherwise it will be false
+            Arc::new(BooleanArray::from(vec![true; build_indices.len()]))
+        } else if column_index.side == build_side {
+            let array = build_input_buffer.column(column_index.index);
+            if array.is_empty() {
+                // Outer join would generate a null index when finding no match at our side.
+                // Therefore, it's possible we are empty but need to populate an n-length null array,
+                // where n is the length of the index array.
+                new_null_array(array.data_type(), build_indices.len())
+            } else {
+                if left_has_nulls {
+                    take_with_iter(array.as_ref(), build_indices.clone(), None)?
+                } else {
+                    take_with_iter_unchecked(
+                        array.as_ref(),
+                        build_indices.clone(),
+                        None,
+                    )?
+                }
+            }
+        } else {
+            let array = probe_batch.column(column_index.index);
+            if array.is_empty() {
+                new_null_array(array.data_type(), probe_indices.len())
+            } else {
+                take_with_iter_unchecked(
+                    array.as_ref(),
+                    probe_indices.clone(),
+                    None,
+                )?
+            }
+        };
+        columns.push(array);
+    }
+    Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
+}
+
+
+fn take_with_iter(
+    values: &dyn Array,
+    indices: impl ExactSizeIterator<Item = usize> + Clone,
+    options: Option<TakeOptions>,
+) -> Result<ArrayRef, ArrowError> {
+    let options = options.unwrap_or_default();
+    if options.check_bounds {
+        check_bounds_with_iter(values.len(), indices.clone())?;
+    }
+    take_with_iter_impl(values, indices)
+}
+
+fn check_bounds_with_iter(
+    len: usize,
+    indices: impl ExactSizeIterator<Item = usize> + Clone,
+) -> Result<(), ArrowError> {
+    indices.filter(|x| *x != usize::MAX).try_for_each(|index| {
+        let ix = index;
+        if ix >= len {
+            return Err(ArrowError::ComputeError(format!(
+                "Array index out of bounds, cannot get item at index {ix} from {len} entries"
+            )));
+        }
+        Ok(())
+    })
+}
+
+#[inline(never)]
+fn take_with_iter_impl(
+    values: &dyn Array,
+    indices: impl ExactSizeIterator<Item = usize> + Clone,
+) -> Result<ArrayRef, ArrowError> {
+    downcast_primitive_array! {
+        values => Ok(Arc::new(take_primitive_with_iter(values, indices)?)),
+        t => unimplemented!("Take not supported for data type {:?}", t)
+    }
+}
+
+fn take_primitive_with_iter<T>(
+    values: &PrimitiveArray<T>,
+    indices: impl ExactSizeIterator<Item = usize> + Clone,
+) -> Result<PrimitiveArray<T>, ArrowError>
+where
+    T: ArrowPrimitiveType,
+{
+    let values_buf = take_native_with_iter(values.values(), indices.clone());
+    let nulls = take_nulls_with_iter(values.nulls(), indices);
+    Ok(PrimitiveArray::new(values_buf, nulls).with_data_type(values.data_type().clone()))
+}
+
+#[inline(never)]
+fn take_nulls_with_iter(
+    values: Option<&NullBuffer>,
+    indices: impl ExactSizeIterator<Item = usize> + Clone,
+) -> Option<NullBuffer> {
+    match values.filter(|n| n.null_count() > 0) {
+        Some(n) => {
+            let buffer = take_bits_with_iter(n.inner(), indices);
+            Some(NullBuffer::new(buffer)).filter(|n| n.null_count() > 0)
+        }
+        None => {
+            let len = indices.len();
+
+            let mut output_buffer = MutableBuffer::new_null(len);
+            let output_slice = output_buffer.as_slice_mut();
+            indices
+                .enumerate()
+                .filter(|(_, index)| *index != usize::MAX)
+                .for_each(|(idx, _)| {
+                    bit_util::set_bit(output_slice, idx);
+                });
+            Some(NullBuffer::new(BooleanBuffer::new(
+                output_buffer.into(),
+                0,
+                len,
+            )))
+        }
+    }
+}
+
+#[inline(never)]
+fn take_native_with_iter<T: ArrowNativeType>(
+    values: &[T],
+    indices: impl ExactSizeIterator<Item = usize> + Clone,
+) -> ScalarBuffer<T> {
+    indices
+        .map(|index| {
+            if index != usize::MAX {
+                values[index]
+            } else {
+                T::default()
+            }
+        })
+        .collect()
+}
+
+#[inline(never)]
+fn take_bits_with_iter(
+    values: &BooleanBuffer,
+    indices: impl ExactSizeIterator<Item = usize> + Clone,
+) -> BooleanBuffer {
+    let len = indices.len();
+
+    let mut output_buffer = MutableBuffer::new_null(len);
+    let output_slice = output_buffer.as_slice_mut();
+    indices
+        .enumerate()
+        .filter(|(_, index)| *index != usize::MAX)
+        .for_each(|(idx, index)| {
+            if values.value(index) {
+                bit_util::set_bit(output_slice, idx);
+            }
+        });
+    BooleanBuffer::new(output_buffer.into(), 0, len)
+}
+
+fn take_with_iter_unchecked(
+    values: &dyn Array,
+    indices: impl ExactSizeIterator<Item = usize> + Clone + Sized,
+    options: Option<TakeOptions>,
+) -> Result<ArrayRef, ArrowError> {
+    let options = options.unwrap_or_default();
+    if options.check_bounds {
+        check_bounds_with_iter_unchecked(values.len(), indices.clone())?;
+    }
+    take_with_iter_unchecked_impl(values, indices)
+}
+
+fn check_bounds_with_iter_unchecked(
+    len: usize,
+    mut indices: impl ExactSizeIterator<Item = usize> + Clone,
+) -> Result<(), ArrowError> {
+    indices.try_for_each(|index| {
+        let ix = index;
+        if ix >= len {
+            return Err(ArrowError::ComputeError(format!(
+                "Array index out of bounds, cannot get item at index {ix} from {len} entries"
+            )));
+        }
+        Ok(())
+    })
+}
+
+#[inline(never)]
+fn take_with_iter_unchecked_impl(
+    values: &dyn Array,
+    indices: impl ExactSizeIterator<Item = usize> + Clone,
+) -> Result<ArrayRef, ArrowError> {
+    downcast_primitive_array! {
+        values => Ok(Arc::new(take_primitive_with_iter_unchecked(values, indices)?)),
+        t => unimplemented!("Take not supported for data type {:?}", t)
+    }
+}
+
+fn take_primitive_with_iter_unchecked<T>(
+    values: &PrimitiveArray<T>,
+    indices: impl ExactSizeIterator<Item = usize> + Clone,
+) -> Result<PrimitiveArray<T>, ArrowError>
+where
+    T: ArrowPrimitiveType,
+{
+    let values_buf = take_native_with_iter_unchecked(values.values(), indices.clone());
+    let nulls = take_nulls_with_iter_unchecked(values.nulls(), indices);
+    Ok(PrimitiveArray::new(values_buf, nulls).with_data_type(values.data_type().clone()))
+}
+
+#[inline(never)]
+fn take_nulls_with_iter_unchecked(
+    values: Option<&NullBuffer>,
+    indices: impl ExactSizeIterator<Item = usize> + Clone,
+) -> Option<NullBuffer> {
+    match values.filter(|n| n.null_count() > 0) {
+        Some(n) => {
+            let buffer = take_bits_with_iter_unchecked(n.inner(), indices);
+            Some(NullBuffer::new(buffer)).filter(|n| n.null_count() > 0)
+        }
+        None => None,
+    }
+}
+
+#[inline(never)]
+fn take_native_with_iter_unchecked<T: ArrowNativeType>(
+    values: &[T],
+    indices: impl ExactSizeIterator<Item = usize> + Clone,
+) -> ScalarBuffer<T> {
+    indices.map(|index| values[index]).collect()
+}
+
+#[inline(never)]
+fn take_bits_with_iter_unchecked(
+    values: &BooleanBuffer,
+    indices: impl ExactSizeIterator<Item = usize> + Clone,
+) -> BooleanBuffer {
+    let len = indices.len();
+
+    let mut output_buffer = MutableBuffer::new_null(len);
+    let output_slice = output_buffer.as_slice_mut();
+    indices.enumerate().for_each(|(idx, index)| {
+        if values.value(index) {
+            bit_util::set_bit(output_slice, idx);
+        }
+    });
+    BooleanBuffer::new(output_buffer.into(), 0, len)
+}
+
 /// The input is the matched indices for left and right and
 /// adjust the indices according to the join type
 pub(crate) fn adjust_indices_by_join_type(
@@ -1351,6 +1754,89 @@ pub(crate) fn adjust_indices_by_join_type(
             Ok((
                 UInt64Array::from_iter_values(vec![]),
                 UInt32Array::from_iter_values(vec![]),
+            ))
+        }
+    }
+}
+pub(crate) fn adjust_iterator_indices_by_join_type(
+    left_indices: Box<dyn CloneableExactSizeIterator<Item = usize>>,
+    right_indices: Box<dyn CloneableExactSizeIterator<Item = usize>>,
+    adjust_range: Range<usize>,
+    join_type: JoinType,
+    preserve_order_for_right: bool,
+) -> Result<(
+    Box<dyn CloneableExactSizeIterator<Item = usize>>,
+    Box<dyn CloneableExactSizeIterator<Item = usize>>,
+    bool,
+)> {
+    match join_type {
+        JoinType::Inner => {
+            // matched
+            Ok((Box::new(left_indices), Box::new(right_indices), false))
+        }
+        JoinType::Left => {
+            // matched
+            Ok((Box::new(left_indices), Box::new(right_indices), false))
+            // unmatched left row will be produced in the end of loop, and it has been set in the left visited bitmap
+        }
+        JoinType::Right if preserve_order_for_right => {
+            // combine the matched and unmatched right result together
+            Ok({
+                let right_unmatched_indices =
+                    get_anti_iterator_indices(adjust_range.clone(), &right_indices);
+                let right_unmatched_indices_len = right_unmatched_indices.len();
+                if right_unmatched_indices_len == 0 {
+                    return Ok((Box::new(left_indices), Box::new(right_indices), false));
+                }
+                let (left, right) = append_probe_iterator_indices_in_order(
+                    left_indices,
+                    right_indices,
+                    adjust_range,
+                );
+                (Box::new(left), Box::new(right), true)
+            })
+        }
+        JoinType::Right | JoinType::Full => Ok({
+            let right_unmatched_indices =
+                get_anti_iterator_indices(adjust_range, &right_indices);
+            let right_unmatched_indices_len = right_unmatched_indices.len();
+            if right_unmatched_indices_len == 0 {
+                return Ok((Box::new(left_indices), Box::new(right_indices), false));
+            }
+            let left_indices_len = left_indices.len();
+            let right_indices_len = right_indices.len();
+            let new_left_indices = left_indices
+                .chain(std::iter::repeat(usize::MAX).take(right_unmatched_indices.len()))
+                .exact_size(left_indices_len + right_unmatched_indices_len);
+            let new_right_indices = right_indices
+                .chain(right_unmatched_indices)
+                .exact_size(right_indices_len + right_unmatched_indices_len);
+            (
+                Box::new(new_left_indices),
+                Box::new(new_right_indices),
+                true,
+            )
+        }),
+        JoinType::RightSemi => {
+            // need to remove the duplicated record in the right side
+            let right_indices = get_semi_iterator_indices(adjust_range, &right_indices);
+            // the left_indices will not be used later for the `right semi` join
+            Ok((Box::new(left_indices), Box::new(right_indices), false))
+        }
+        JoinType::RightAnti => {
+            // need to remove the duplicated record in the right side
+            // get the anti index for the right side
+            let right_indices = get_anti_iterator_indices(adjust_range, &right_indices);
+            // the left_indices will not be used later for the `right anti` join
+            Ok((Box::new(left_indices), Box::new(right_indices), false))
+        }
+        JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => {
+            // matched or unmatched left row will be produced in the end of loop
+            // When visit the right batch, we can output the matched left row and don't need to wait the end of loop
+            Ok((
+                Box::new(std::iter::empty()),
+                Box::new(std::iter::empty()),
+                false,
             ))
         }
     }
@@ -1438,6 +1924,38 @@ pub(crate) fn append_right_indices(
     }
 }
 
+pub(crate) fn append_right_iterator_indices(
+    left_indices: impl ExactSizeIterator<Item = usize> + Clone + 'static,
+    right_indices: impl ExactSizeIterator<Item = usize> + Clone + 'static,
+    adjust_range: Range<usize>,
+    preserve_order_for_right: bool,
+) -> (
+    Box<dyn CloneableExactSizeIterator<Item = usize>>,
+    Box<dyn CloneableExactSizeIterator<Item = usize>>,
+) {
+    if preserve_order_for_right {
+        let (left, right) = append_probe_iterator_indices_in_order(
+            left_indices,
+            right_indices,
+            adjust_range,
+        );
+        (Box::new(left), Box::new(right))
+    } else {
+        let right_unmatched_indices =
+            get_anti_iterator_indices(adjust_range, &right_indices);
+        let right_unmatched_indices_len = right_unmatched_indices.len();
+        let left_indices_len = left_indices.len();
+        let right_indices_len = right_indices.len();
+        let new_left_indices = left_indices
+            .chain(std::iter::repeat(usize::MAX).take(right_unmatched_indices.len()))
+            .exact_size(left_indices_len + right_unmatched_indices_len);
+        let new_right_indices = right_indices
+            .chain(right_unmatched_indices)
+            .exact_size(right_indices_len + right_unmatched_indices_len);
+        (Box::new(new_left_indices), Box::new(new_right_indices))
+    }
+}
+
 /// Returns `range` indices which are not present in `input_indices`
 pub(crate) fn get_anti_indices<T: ArrowPrimitiveType>(
     range: Range<usize>,
@@ -1467,6 +1985,24 @@ where
         .collect()
 }
 
+pub(crate) fn get_anti_iterator_indices(
+    range: Range<usize>,
+    input_indices: &(impl ExactSizeIterator<Item = usize> + Clone),
+) -> impl ExactSizeIterator<Item = usize> + Clone {
+    let mut bitmap = BooleanBufferBuilder::new(range.len());
+    bitmap.append_n(range.len(), false);
+    input_indices.clone().for_each(|v| {
+        bitmap.set_bit(v - range.start, true);
+    });
+
+    let offset = range.start;
+
+    // get the anti index
+    (range)
+        .filter_map(move |idx| (!bitmap.get_bit(idx - offset)).then_some(idx))
+        .collect::<Vec<_>>()
+        .into_iter()
+}
 /// Returns intersection of `range` and `input_indices` omitting duplicates
 pub(crate) fn get_semi_indices<T: ArrowPrimitiveType>(
     range: Range<usize>,
@@ -1494,6 +2030,25 @@ where
             (bitmap.get_bit(idx - offset)).then_some(T::Native::from_usize(idx))
         })
         .collect()
+}
+
+pub(crate) fn get_semi_iterator_indices(
+    range: Range<usize>,
+    input_indices: &(impl ExactSizeIterator<Item = usize> + Clone),
+) -> impl ExactSizeIterator<Item = usize> + Clone {
+    let mut bitmap = BooleanBufferBuilder::new(range.len());
+    bitmap.append_n(range.len(), false);
+    input_indices.clone().for_each(|v| {
+        bitmap.set_bit(v - range.start, true);
+    });
+
+    let offset = range.start;
+
+    // get the semi index
+    (range)
+        .filter_map(move |idx| (bitmap.get_bit(idx - offset)).then_some(idx))
+        .collect::<Vec<_>>()
+        .into_iter()
 }
 
 /// Appends probe indices in order by considering the given build indices.
@@ -1548,6 +2103,50 @@ fn append_probe_indices_in_order(
     }
     // Build arrays and return:
     (new_build_indices.finish(), new_probe_indices.finish())
+}
+
+fn append_probe_iterator_indices_in_order(
+    mut build_indices: impl ExactSizeIterator<Item = usize> + Clone + 'static,
+    probe_indices: impl ExactSizeIterator<Item = usize> + Clone + 'static,
+    range: Range<usize>,
+) -> (
+    Box<dyn CloneableExactSizeIterator<Item = usize>>,
+    Box<dyn CloneableExactSizeIterator<Item = usize>>,
+) {
+    let right_unmatched_indices =
+        get_anti_iterator_indices(range.clone(), &probe_indices);
+    let right_unmatched_indices_len = right_unmatched_indices.len();
+    if right_unmatched_indices_len == 0 {
+        return (Box::new(build_indices), Box::new(probe_indices));
+    }
+
+    let build_indices_len = build_indices.len();
+
+    let mut prev_index = range.start;
+    let build_indices_iter = probe_indices
+        .map(move |probe_index| {
+            let build_index = build_indices.next().unwrap();
+            let indices = (prev_index..probe_index)
+                .map(|value| (usize::MAX, value))
+                .chain(once((build_index, probe_index)));
+            prev_index = probe_index + 1;
+            indices
+        })
+        .flatten();
+
+    let remaining_indices = (prev_index..range.end).map(|value| (usize::MAX, value));
+
+    let final_iter = build_indices_iter.chain(remaining_indices);
+
+    let new_build_indices = final_iter
+        .clone()
+        .map(|(build_index, _)| build_index)
+        .exact_size(build_indices_len + right_unmatched_indices_len);
+    let new_probe_indices = final_iter
+        .map(|(_, probe_index)| probe_index)
+        .exact_size(build_indices_len + right_unmatched_indices_len);
+
+    (Box::new(new_build_indices), Box::new(new_probe_indices))
 }
 
 /// Metrics for build & probe joins
