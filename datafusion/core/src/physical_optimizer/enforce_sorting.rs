@@ -214,9 +214,6 @@ fn replace_with_partial_sort(
     let plan_any = plan.as_any();
     if let Some(sort_plan) = plan_any.downcast_ref::<SortExec>() {
         let child = Arc::clone(sort_plan.children()[0]);
-        if !child.execution_mode().is_unbounded() {
-            return Ok(plan);
-        }
 
         // here we're trying to find the common prefix for sorted columns that is required for the
         // sort and already satisfied by the given ordering
@@ -1433,7 +1430,7 @@ mod tests {
 
         let expected_optimized = ["SortPreservingMergeExec: [nullable_col@0 ASC, non_nullable_col@1 ASC]",
             "  UnionExec",
-            "    SortExec: expr=[nullable_col@0 ASC, non_nullable_col@1 ASC], preserve_partitioning=[false]",
+            "    PartialSortExec: expr=[nullable_col@0 ASC, non_nullable_col@1 ASC], common_prefix_length=[1]",
             "      ParquetExec: file_groups={1 group: [[x]]}, projection=[nullable_col, non_nullable_col], output_ordering=[nullable_col@0 ASC]",
             "    SortExec: expr=[nullable_col@0 ASC, non_nullable_col@1 ASC], preserve_partitioning=[false]",
             "      ParquetExec: file_groups={1 group: [[x]]}, projection=[nullable_col, non_nullable_col]"];
@@ -1517,7 +1514,7 @@ mod tests {
             "  UnionExec",
             "    SortExec: expr=[nullable_col@0 ASC, non_nullable_col@1 ASC], preserve_partitioning=[false]",
             "      ParquetExec: file_groups={1 group: [[x]]}, projection=[nullable_col, non_nullable_col]",
-            "    SortExec: expr=[nullable_col@0 ASC, non_nullable_col@1 ASC], preserve_partitioning=[false]",
+            "    PartialSortExec: expr=[nullable_col@0 ASC, non_nullable_col@1 ASC], common_prefix_length=[1]",
             "      ParquetExec: file_groups={1 group: [[x]]}, projection=[nullable_col, non_nullable_col], output_ordering=[nullable_col@0 ASC]",
             "    SortExec: expr=[nullable_col@0 ASC, non_nullable_col@1 ASC], preserve_partitioning=[false]",
             "      ParquetExec: file_groups={1 group: [[x]]}, projection=[nullable_col, non_nullable_col]"];
@@ -2045,7 +2042,7 @@ mod tests {
             "    ParquetExec: file_groups={1 group: [[x]]}, projection=[col_a, col_b]"];
 
         // can not push down the sort requirements, need to add SortExec
-        let expected_optimized = ["SortExec: expr=[nullable_col@0 ASC, col_b@3 ASC, col_a@2 ASC], preserve_partitioning=[false]",
+        let expected_optimized = ["PartialSortExec: expr=[nullable_col@0 ASC, col_b@3 ASC, col_a@2 ASC], common_prefix_length=[1]",
             "  SortMergeJoin: join_type=Inner, on=[(nullable_col@0, col_a@0)]",
             "    SortExec: expr=[nullable_col@0 ASC], preserve_partitioning=[false]",
             "      ParquetExec: file_groups={1 group: [[x]]}, projection=[nullable_col, non_nullable_col]",
@@ -2381,7 +2378,7 @@ mod tests {
             "    RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1",
             "      CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC, b@1 ASC], has_header=false",];
         let expected_optimized = ["SortPreservingMergeExec: [a@0 ASC, b@1 ASC]",
-            "  SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC], preserve_partitioning=[true]",
+            "  PartialSortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC], common_prefix_length=[2]",
             "    RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1",
             "      CsvExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC, b@1 ASC], has_header=false",];
         assert_optimized!(expected_input, expected_optimized, physical_plan, false);
