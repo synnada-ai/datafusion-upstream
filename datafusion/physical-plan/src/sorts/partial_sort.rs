@@ -396,28 +396,20 @@ impl PartialSortStream {
     ///
     /// If fetch is specified for PartialSortStream `sort_in_mem_batches` will limit
     /// the last RecordBatch returned and will mark the stream as closed
-    fn sort_in_mem_batches(self: &mut Pin<&mut Self>) -> Result<Option<RecordBatch>> {
+    fn sort_in_mem_batches(self: &mut Pin<&mut Self>) -> Result<RecordBatch> {
         let input_batch = concat_batches(&self.schema(), &self.in_mem_batches)?;
         self.in_mem_batches.clear();
-        if input_batch.num_rows() > 0 && self.fetch.map(|fetch| fetch > 0).unwrap_or(true)
-        {
-            let result = sort_batch(&input_batch, self.expr.as_ref(), self.fetch)?;
-            if let Some(remaining_fetch) = self.fetch {
-                // remaining_fetch - result.num_rows() is always be >= 0
-                // because result length of sort_batch with limit cannot be
-                // more than the requested limit
-                self.fetch = Some(remaining_fetch - result.num_rows());
-                if remaining_fetch == result.num_rows() {
-                    self.is_closed = true;
-                }
+        let result = sort_batch(&input_batch, self.expr.as_ref(), self.fetch)?;
+        if let Some(remaining_fetch) = self.fetch {
+            // remaining_fetch - result.num_rows() is always be >= 0
+            // because result length of sort_batch with limit cannot be
+            // more than the requested limit
+            self.fetch = Some(remaining_fetch - result.num_rows());
+            if remaining_fetch == result.num_rows() {
+                self.is_closed = true;
             }
-            // Empty record batches should not be emitted.
-            // They need to be treated as [`Option<RecordBatch>`]es and handle separately
-            debug_assert!(result.num_rows() > 0);
-            Ok(Some(result))
-        } else {
-            Ok(None)
         }
+        Ok(result)
     }
 
     /// Return the end index of the second last partition if the batch
