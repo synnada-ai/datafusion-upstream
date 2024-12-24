@@ -421,6 +421,11 @@ pub(crate) fn try_collect_left(
     }
 }
 
+/// Creates a partitioned hash join execution plan, swapping inputs if beneficial.
+///
+/// Checks if the join order should be swapped based on the join type and input statistics.
+/// If swapping is optimal and supported, creates a swapped partitioned hash join; otherwise,
+/// creates a standard partitioned hash join.
 pub(crate) fn partitioned_hash_join(
     hash_join: &HashJoinExec,
 ) -> Result<Arc<dyn ExecutionPlan>> {
