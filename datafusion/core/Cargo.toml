@@ -172,6 +172,11 @@ name = "distinct_query_sql"
 
 [[bench]]
 harness = false
+name = "cast"
+
+
+[[bench]]
+harness = false
 name = "sort_limit_query_sql"
 
 [[bench]]
