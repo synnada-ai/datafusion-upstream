@@ -223,10 +223,11 @@ impl ExecutionPlan for WindowAggExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
-        if self.partition_keys().is_empty() {
+        let keys = self.partition_keys();
+        if keys.is_empty() {
             vec![Distribution::SinglePartition]
         } else {
-            vec![Distribution::HashPartitioned(self.partition_keys())]
+            vec![Distribution::HashPartitioned(keys)]
         }
     }
 

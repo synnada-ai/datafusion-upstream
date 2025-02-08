@@ -83,12 +83,12 @@ use datafusion_expr::{
 use datafusion_physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
 use datafusion_physical_expr::expressions::Literal;
 use datafusion_physical_expr::LexOrdering;
+use datafusion_physical_optimizer::PhysicalOptimizerRule;
 use datafusion_physical_plan::execution_plan::InvariantLevel;
 use datafusion_physical_plan::placeholder_row::PlaceholderRowExec;
 use datafusion_physical_plan::unnest::ListUnnest;
 
 use async_trait::async_trait;
-use datafusion_physical_optimizer::PhysicalOptimizerRule;
 use futures::{StreamExt, TryStreamExt};
 use itertools::{multiunzip, Itertools};
 use log::{debug, trace};
@@ -605,7 +605,12 @@ impl DefaultPhysicalPlanner {
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                let can_repartition = session_state.config().target_partitions() > 1
+                let partitioned_window_exprs = window_expr
+                    .iter()
+                    .map(|expr| expr.partition_by())
+                    .any(|pb| !pb.is_empty());
+                let can_repartition = partitioned_window_exprs
+                    && session_state.config().target_partitions() > 1
                     && session_state.config().repartition_window_functions();
 
                 let uses_bounded_memory =

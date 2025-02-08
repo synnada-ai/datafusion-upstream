@@ -26,11 +26,10 @@ use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeRecursion, TreeNodeRewriter,
 };
 use datafusion_common::{
-    exec_err, internal_err, plan_err, Column, DFSchemaRef, DataFusionError, Diagnostic,
-    HashMap, Result, ScalarValue,
+    internal_err, plan_err, Column, DFSchemaRef, Diagnostic, HashMap, Result, ScalarValue,
 };
 use datafusion_expr::builder::get_struct_unnested_columns;
-use datafusion_expr::expr::{Alias, GroupingSet, Unnest, WindowFunction};
+use datafusion_expr::expr::{Alias, GroupingSet, Unnest};
 use datafusion_expr::utils::{expr_as_column_expr, find_column_exprs};
 use datafusion_expr::{
     col, expr_vec_fmt, ColumnUnnestList, Expr, ExprSchemable, LogicalPlan,
@@ -232,31 +231,6 @@ pub(crate) fn resolve_aliases_to_exprs(
         _ => Ok(Transformed::no(nested_expr)),
     })
     .data()
-}
-
-/// Given a slice of window expressions sharing the same sort key, find their common partition
-/// keys.
-pub fn window_expr_common_partition_keys(window_exprs: &[Expr]) -> Result<&[Expr]> {
-    let all_partition_keys = window_exprs
-        .iter()
-        .map(|expr| match expr {
-            Expr::WindowFunction(WindowFunction { partition_by, .. }) => Ok(partition_by),
-            Expr::Alias(Alias { expr, .. }) => match expr.as_ref() {
-                Expr::WindowFunction(WindowFunction { partition_by, .. }) => {
-                    Ok(partition_by)
-                }
-                expr => exec_err!("Impossibly got non-window expr {expr:?}"),
-            },
-            expr => exec_err!("Impossibly got non-window expr {expr:?}"),
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let result = all_partition_keys
-        .iter()
-        .min_by_key(|s| s.len())
-        .ok_or_else(|| {
-            DataFusionError::Execution("No window expressions found".to_owned())
-        })?;
-    Ok(result)
 }
 
 /// Returns a validated `DataType` for the specified precision and
