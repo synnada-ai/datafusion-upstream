@@ -81,7 +81,7 @@ pub enum AggregateMode {
     ///
     /// Note: Adjacent `Partial` and `Final` mode aggregation is equivalent to a `Single`
     /// mode aggregation node. The `Final` mode is required since this is used in an
-    /// intermediate step. The [`CombinePartialFinalAggregate`] physical optimizer rule
+    /// intermediate step. The `CombinePartialFinalAggregate` physical optimizer rule
     /// will replace this combination with `Single` mode for more efficient execution.
     Final,
     /// *Final* of multiple layers of aggregation, input is *Partitioned*
