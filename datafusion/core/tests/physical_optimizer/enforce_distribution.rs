@@ -41,7 +41,6 @@ use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_expr::{
     expressions::binary, expressions::lit, LexOrdering, PhysicalSortExpr,
 };
-use datafusion_physical_expr_common::sort_expr::LexRequirement;
 use datafusion_physical_optimizer::enforce_distribution::*;
 use datafusion_physical_optimizer::enforce_sorting::EnforceSorting;
 use datafusion_physical_optimizer::output_requirements::OutputRequirements;
@@ -50,7 +49,7 @@ use datafusion_physical_plan::aggregates::{
     AggregateExec, AggregateMode, PhysicalGroupBy,
 };
 use datafusion_physical_plan::coalesce_batches::CoalesceBatchesExec;
-use datafusion_physical_plan::execution_plan::ExecutionPlan;
+use datafusion_physical_plan::execution_plan::{ExecutionPlan, RequiredInputOrdering};
 use datafusion_physical_plan::expressions::col;
 use datafusion_physical_plan::filter::FilterExec;
 use datafusion_physical_plan::joins::utils::JoinOn;
@@ -138,11 +137,11 @@ impl ExecutionPlan for SortRequiredExec {
     }
 
     // model that it requires the output ordering of its input
-    fn required_input_ordering(&self) -> Vec<Option<LexRequirement>> {
+    fn required_input_ordering(&self) -> Vec<Option<RequiredInputOrdering>> {
         if self.expr.is_empty() {
             vec![None]
         } else {
-            vec![Some(LexRequirement::from(self.expr.clone()))]
+            vec![Some(RequiredInputOrdering::from(self.expr.clone()))]
         }
     }
 
@@ -344,7 +343,6 @@ fn sort_required_exec_with_req(
 fn ensure_distribution_helper(
     plan: Arc<dyn ExecutionPlan>,
     target_partitions: usize,
-    prefer_existing_sort: bool,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let distribution_context = DistributionContext::new_default(plan);
     let mut config = ConfigOptions::new();
@@ -352,7 +350,6 @@ fn ensure_distribution_helper(
     config.optimizer.enable_round_robin_repartition = true;
     config.optimizer.repartition_file_scans = false;
     config.optimizer.repartition_file_min_size = 1024;
-    config.optimizer.prefer_existing_sort = prefer_existing_sort;
     ensure_distribution(distribution_context, &config).map(|item| item.data.plan)
 }
 
@@ -374,9 +371,6 @@ macro_rules! plans_matches_expected {
 
 fn test_suite_default_config_options() -> ConfigOptions {
     let mut config = ConfigOptions::new();
-
-    // By default, will not repartition / resort data if it is already sorted.
-    config.optimizer.prefer_existing_sort = false;
 
     // By default, will attempt to convert Union to Interleave.
     config.optimizer.prefer_existing_union = false;
@@ -415,12 +409,6 @@ impl TestConfig {
             config: test_suite_default_config_options(),
             optimizers_to_run,
         }
-    }
-
-    /// If preferred, will not repartition / resort data if it is already sorted.
-    fn with_prefer_existing_sort(mut self) -> Self {
-        self.config.optimizer.prefer_existing_sort = true;
-        self
     }
 
     /// If preferred, will not attempt to convert Union to Interleave.
@@ -1138,7 +1126,6 @@ fn reorder_join_keys_to_left_input() -> Result<()> {
     let bottom_left_join = ensure_distribution_helper(
         hash_join_exec(left.clone(), right.clone(), &join_on, &JoinType::Inner),
         10,
-        true,
     )?;
 
     // Projection(a as A, a as AA, b as B, c as C)
@@ -1169,7 +1156,6 @@ fn reorder_join_keys_to_left_input() -> Result<()> {
     let bottom_right_join = ensure_distribution_helper(
         hash_join_exec(left, right.clone(), &join_on, &JoinType::Inner),
         10,
-        true,
     )?;
 
     // Join on (B == b1 and C == c and AA = a1)
@@ -1272,7 +1258,6 @@ fn reorder_join_keys_to_right_input() -> Result<()> {
     let bottom_left_join = ensure_distribution_helper(
         hash_join_exec(left.clone(), right.clone(), &join_on, &JoinType::Inner),
         10,
-        true,
     )?;
 
     // Projection(a as A, a as AA, b as B, c as C)
@@ -1303,7 +1288,6 @@ fn reorder_join_keys_to_right_input() -> Result<()> {
     let bottom_right_join = ensure_distribution_helper(
         hash_join_exec(left, right.clone(), &join_on, &JoinType::Inner),
         10,
-        true,
     )?;
 
     // Join on (B == b1 and C == c and AA = a1)
@@ -1382,7 +1366,6 @@ fn reorder_join_keys_to_right_input() -> Result<()> {
     Ok(())
 }
 
-/// These test cases use [`TestConfig::with_prefer_existing_sort`].
 #[test]
 fn multi_smj_joins() -> Result<()> {
     let left = parquet_exec();
@@ -1487,7 +1470,7 @@ fn multi_smj_joins() -> Result<()> {
         assert_optimized!(
             expected,
             top_join.clone(),
-            &TestConfig::new(DoFirst::Distribution).with_prefer_existing_sort()
+            &TestConfig::new(DoFirst::Distribution)
         );
 
         let expected_first_sort_enforcement = match join_type {
@@ -1545,7 +1528,7 @@ fn multi_smj_joins() -> Result<()> {
         assert_optimized!(
             expected_first_sort_enforcement,
             top_join,
-            &TestConfig::new(DoFirst::Sorting).with_prefer_existing_sort()
+            &TestConfig::new(DoFirst::Sorting)
         );
 
         match join_type {
@@ -1606,7 +1589,7 @@ fn multi_smj_joins() -> Result<()> {
                 assert_optimized!(
                     expected,
                     top_join.clone(),
-                    &TestConfig::new(DoFirst::Distribution).with_prefer_existing_sort()
+                    &TestConfig::new(DoFirst::Distribution)
                 );
 
                 let expected_first_sort_enforcement = match join_type {
@@ -1657,7 +1640,7 @@ fn multi_smj_joins() -> Result<()> {
                 assert_optimized!(
                     expected_first_sort_enforcement,
                     top_join,
-                    &TestConfig::new(DoFirst::Sorting).with_prefer_existing_sort()
+                    &TestConfig::new(DoFirst::Sorting)
                 );
             }
             _ => {}
@@ -1667,7 +1650,6 @@ fn multi_smj_joins() -> Result<()> {
     Ok(())
 }
 
-/// These test cases use [`TestConfig::with_prefer_existing_sort`].
 #[test]
 fn smj_join_key_ordering() -> Result<()> {
     // group by (a as a1, b as b1)
@@ -1736,7 +1718,7 @@ fn smj_join_key_ordering() -> Result<()> {
     assert_optimized!(
         expected,
         join.clone(),
-        &TestConfig::new(DoFirst::Distribution).with_prefer_existing_sort()
+        &TestConfig::new(DoFirst::Distribution)
     );
 
     let expected_first_sort_enforcement = &[
@@ -1766,7 +1748,7 @@ fn smj_join_key_ordering() -> Result<()> {
     assert_optimized!(
         expected_first_sort_enforcement,
         join,
-        &TestConfig::new(DoFirst::Sorting).with_prefer_existing_sort()
+        &TestConfig::new(DoFirst::Sorting)
     );
 
     Ok(())
@@ -1799,17 +1781,6 @@ fn merge_does_not_need_sort() -> Result<()> {
         "    DataSourceExec: file_groups={2 groups: [[x], [y]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=parquet",
     ];
     assert_optimized!(expected, exec, &TestConfig::new(DoFirst::Distribution));
-
-    // In this case preserving ordering through order preserving operators is not desirable
-    // (according to flag: PREFER_EXISTING_SORT)
-    // hence in this case ordering lost during CoalescePartitionsExec and re-introduced with
-    // SortExec at the top.
-    let expected = &[
-        "SortExec: expr=[a@0 ASC], preserve_partitioning=[false]",
-        "  CoalescePartitionsExec",
-        "    CoalesceBatchesExec: target_batch_size=4096",
-        "      DataSourceExec: file_groups={2 groups: [[x], [y]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=parquet",
-    ];
     assert_optimized!(expected, exec, &TestConfig::new(DoFirst::Sorting));
 
     Ok(())
@@ -2148,12 +2119,6 @@ fn repartition_ignores_sort_preserving_merge() -> Result<()> {
         plan.clone(),
         &TestConfig::new(DoFirst::Distribution)
     );
-
-    let expected = &[
-        "SortExec: expr=[c@2 ASC], preserve_partitioning=[false]",
-        "  CoalescePartitionsExec",
-        "    DataSourceExec: file_groups={2 groups: [[x], [y]]}, projection=[a, b, c, d, e], output_ordering=[c@2 ASC], file_type=parquet",
-    ];
     assert_optimized!(expected, plan, &TestConfig::new(DoFirst::Sorting));
 
     Ok(())
@@ -2183,20 +2148,11 @@ fn repartition_ignores_sort_preserving_merge_with_union() -> Result<()> {
         plan.clone(),
         &TestConfig::new(DoFirst::Distribution)
     );
-
-    let expected = &[
-        "SortExec: expr=[c@2 ASC], preserve_partitioning=[false]",
-        "  CoalescePartitionsExec",
-        "    UnionExec",
-        "      DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[c@2 ASC], file_type=parquet",
-        "      DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[c@2 ASC], file_type=parquet",
-    ];
     assert_optimized!(expected, plan, &TestConfig::new(DoFirst::Sorting));
 
     Ok(())
 }
 
-/// These test cases use [`TestConfig::with_prefer_existing_sort`].
 #[test]
 fn repartition_does_not_destroy_sort() -> Result<()> {
     //  SortRequired
@@ -2222,13 +2178,9 @@ fn repartition_does_not_destroy_sort() -> Result<()> {
     assert_optimized!(
         expected,
         plan.clone(),
-        &TestConfig::new(DoFirst::Distribution).with_prefer_existing_sort()
+        &TestConfig::new(DoFirst::Distribution)
     );
-    assert_optimized!(
-        expected,
-        plan,
-        &TestConfig::new(DoFirst::Sorting).with_prefer_existing_sort()
-    );
+    assert_optimized!(expected, plan, &TestConfig::new(DoFirst::Sorting));
 
     Ok(())
 }
@@ -2538,9 +2490,8 @@ fn parallelization_multiple_files() -> Result<()> {
     let plan = filter_exec(parquet_exec_multiple_sorted(vec![sort_key.clone()]));
     let plan = sort_required_exec_with_req(plan, sort_key);
 
-    let test_config = TestConfig::new(DoFirst::Distribution)
-        .with_prefer_existing_sort()
-        .with_prefer_repartition_file_scans(1);
+    let test_config =
+        TestConfig::new(DoFirst::Distribution).with_prefer_repartition_file_scans(1);
 
     // The groups must have only contiguous ranges of rows from the same file
     // if any group has rows from multiple files, the data is no longer sorted destroyed
@@ -3100,7 +3051,6 @@ fn remove_redundant_roundrobins() -> Result<()> {
     Ok(())
 }
 
-/// This test case uses [`TestConfig::with_prefer_existing_sort`].
 #[test]
 fn remove_unnecessary_spm_after_filter() -> Result<()> {
     let schema = schema();
@@ -3122,18 +3072,13 @@ fn remove_unnecessary_spm_after_filter() -> Result<()> {
     assert_optimized!(
         expected,
         physical_plan.clone(),
-        &TestConfig::new(DoFirst::Distribution).with_prefer_existing_sort()
+        &TestConfig::new(DoFirst::Distribution)
     );
-    assert_optimized!(
-        expected,
-        physical_plan,
-        &TestConfig::new(DoFirst::Sorting).with_prefer_existing_sort()
-    );
+    assert_optimized!(expected, physical_plan, &TestConfig::new(DoFirst::Sorting));
 
     Ok(())
 }
 
-/// This test case uses [`TestConfig::with_prefer_existing_sort`].
 #[test]
 fn preserve_ordering_through_repartition() -> Result<()> {
     let schema = schema();
@@ -3153,48 +3098,8 @@ fn preserve_ordering_through_repartition() -> Result<()> {
     assert_optimized!(
         expected,
         physical_plan.clone(),
-        &TestConfig::new(DoFirst::Distribution).with_prefer_existing_sort()
-    );
-    assert_optimized!(
-        expected,
-        physical_plan,
-        &TestConfig::new(DoFirst::Sorting).with_prefer_existing_sort()
-    );
-
-    Ok(())
-}
-
-#[test]
-fn do_not_preserve_ordering_through_repartition() -> Result<()> {
-    let schema = schema();
-    let sort_key = LexOrdering::new(vec![PhysicalSortExpr {
-        expr: col("a", &schema).unwrap(),
-        options: SortOptions::default(),
-    }]);
-    let input = parquet_exec_multiple_sorted(vec![sort_key.clone()]);
-    let physical_plan = sort_preserving_merge_exec(sort_key, filter_exec(input));
-
-    let expected = &[
-        "SortPreservingMergeExec: [a@0 ASC]",
-        "  SortExec: expr=[a@0 ASC], preserve_partitioning=[true]",
-        "    FilterExec: c@2 = 0",
-        "      RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=2",
-        "        DataSourceExec: file_groups={2 groups: [[x], [y]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=parquet",
-    ];
-
-    assert_optimized!(
-        expected,
-        physical_plan.clone(),
         &TestConfig::new(DoFirst::Distribution)
     );
-
-    let expected = &[
-        "SortExec: expr=[a@0 ASC], preserve_partitioning=[false]",
-        "  CoalescePartitionsExec",
-        "    FilterExec: c@2 = 0",
-        "      RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=2",
-        "        DataSourceExec: file_groups={2 groups: [[x], [y]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=parquet",
-    ];
     assert_optimized!(expected, physical_plan, &TestConfig::new(DoFirst::Sorting));
 
     Ok(())
@@ -3215,7 +3120,7 @@ fn no_need_for_sort_after_filter() -> Result<()> {
         "CoalescePartitionsExec",
         // Since after this stage c is constant. c@2 ASC ordering is already satisfied.
         "  FilterExec: c@2 = 0",
-        "    RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=2",
+        "    RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=2, preserve_order=true, sort_exprs=c@2 ASC",
         "      DataSourceExec: file_groups={2 groups: [[x], [y]]}, projection=[a, b, c, d, e], output_ordering=[c@2 ASC], file_type=parquet",
     ];
     assert_optimized!(
@@ -3229,7 +3134,7 @@ fn no_need_for_sort_after_filter() -> Result<()> {
 }
 
 #[test]
-fn do_not_preserve_ordering_through_repartition2() -> Result<()> {
+fn do_not_preserve_ordering_through_repartition() -> Result<()> {
     let schema = schema();
     let sort_key = LexOrdering::new(vec![PhysicalSortExpr {
         expr: col("c", &schema).unwrap(),
@@ -3256,22 +3161,13 @@ fn do_not_preserve_ordering_through_repartition2() -> Result<()> {
         physical_plan.clone(),
         &TestConfig::new(DoFirst::Distribution)
     );
-
-    let expected = &[
-        "SortExec: expr=[a@0 ASC], preserve_partitioning=[false]",
-        "  CoalescePartitionsExec",
-        "    SortExec: expr=[a@0 ASC], preserve_partitioning=[true]",
-        "      FilterExec: c@2 = 0",
-        "        RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=2",
-        "          DataSourceExec: file_groups={2 groups: [[x], [y]]}, projection=[a, b, c, d, e], output_ordering=[c@2 ASC], file_type=parquet",
-    ];
     assert_optimized!(expected, physical_plan, &TestConfig::new(DoFirst::Sorting));
 
     Ok(())
 }
 
 #[test]
-fn do_not_preserve_ordering_through_repartition3() -> Result<()> {
+fn do_not_preserve_ordering_through_repartition2() -> Result<()> {
     let schema = schema();
     let sort_key = LexOrdering::new(vec![PhysicalSortExpr {
         expr: col("c", &schema).unwrap(),
@@ -3325,7 +3221,6 @@ fn do_not_put_sort_when_input_is_invalid() -> Result<()> {
     let mut config = ConfigOptions::new();
     config.execution.target_partitions = 10;
     config.optimizer.enable_round_robin_repartition = true;
-    config.optimizer.prefer_existing_sort = false;
     let dist_plan = EnforceDistribution::new().optimize(physical_plan, &config)?;
     assert_plan_txt!(expected, dist_plan);
 
@@ -3362,7 +3257,6 @@ fn put_sort_when_input_is_valid() -> Result<()> {
     let mut config = ConfigOptions::new();
     config.execution.target_partitions = 10;
     config.optimizer.enable_round_robin_repartition = true;
-    config.optimizer.prefer_existing_sort = false;
     let dist_plan = EnforceDistribution::new().optimize(physical_plan, &config)?;
     assert_plan_txt!(expected, dist_plan);
 

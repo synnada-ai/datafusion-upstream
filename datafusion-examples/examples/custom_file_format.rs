@@ -21,14 +21,12 @@ use arrow::{
     array::{AsArray, RecordBatch, StringArray, UInt8Array},
     datatypes::{DataType, Field, Schema, SchemaRef, UInt64Type},
 };
-use datafusion::physical_expr::LexRequirement;
+use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_plan::execution_plan::RequiredInputOrdering;
 use datafusion::{
     catalog::Session,
     common::{GetExt, Statistics},
-};
-use datafusion::{
-    datasource::physical_plan::FileSource, execution::session_state::SessionStateBuilder,
 };
 use datafusion::{
     datasource::{
@@ -36,7 +34,7 @@ use datafusion::{
             csv::CsvFormatFactory, file_compression_type::FileCompressionType,
             FileFormat, FileFormatFactory,
         },
-        physical_plan::{FileScanConfig, FileSinkConfig},
+        physical_plan::{FileScanConfig, FileSinkConfig, FileSource},
         MemTable,
     },
     error::Result,
@@ -124,7 +122,7 @@ impl FileFormat for TSVFileFormat {
         input: Arc<dyn ExecutionPlan>,
         state: &dyn Session,
         conf: FileSinkConfig,
-        order_requirements: Option<LexRequirement>,
+        order_requirements: Option<RequiredInputOrdering>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         self.csv_file_format
             .create_writer_physical_plan(input, state, conf, order_requirements)

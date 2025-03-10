@@ -41,7 +41,9 @@ use datafusion_expr::{SortExpr, TableType};
 use datafusion_physical_plan::empty::EmptyExec;
 use datafusion_physical_plan::{ExecutionPlan, Statistics};
 
-use arrow::datatypes::{DataType, Field, Schema, SchemaBuilder, SchemaRef};
+use arrow::datatypes::{DataType, Field, SchemaBuilder, SchemaRef};
+use arrow_schema::Schema;
+use datafusion_catalog::Session;
 use datafusion_common::{
     config_datafusion_err, internal_err, plan_err, project_schema, Constraints,
     SchemaExt, ToDFSchema,
@@ -52,10 +54,10 @@ use datafusion_execution::cache::{
 use datafusion_physical_expr::{
     create_physical_expr, LexOrdering, PhysicalSortRequirement,
 };
+use datafusion_physical_expr_common::sort_expr::LexRequirement;
+use datafusion_physical_plan::execution_plan::RequiredInputOrdering;
 
 use async_trait::async_trait;
-use datafusion_catalog::Session;
-use datafusion_physical_expr_common::sort_expr::LexRequirement;
 use futures::{future, stream, StreamExt, TryStreamExt};
 use itertools::Itertools;
 use object_store::ObjectStore;
@@ -1056,13 +1058,13 @@ impl TableProvider for ListingTable {
                 );
             };
             // Converts Vec<Vec<SortExpr>> into type required by execution plan to specify its required input ordering
-            Some(LexRequirement::new(
+            Some(RequiredInputOrdering::Hard(LexRequirement::new(
                 ordering
                     .into_iter()
                     .cloned()
                     .map(PhysicalSortRequirement::from)
                     .collect::<Vec<_>>(),
-            ))
+            )))
         } else {
             None
         };
