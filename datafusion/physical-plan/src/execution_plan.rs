@@ -1137,9 +1137,7 @@ impl RequiredInputOrdering {
         match self {
             RequiredInputOrdering::Hard(_) => !self.is_empty(),
             RequiredInputOrdering::Soft(_) => false,
-            RequiredInputOrdering::Mixed((hard, _)) => {
-                !hard.is_empty()
-            }
+            RequiredInputOrdering::Mixed((hard, _)) => !hard.is_empty(),
         }
     }
 }

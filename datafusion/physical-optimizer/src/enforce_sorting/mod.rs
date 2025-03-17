@@ -323,9 +323,11 @@ fn replace_with_partial_sort(
 
     let mut common_prefix_length = 0;
     // TODO Why did we need to add this check?
-    while sort_req.len() > common_prefix_length && child_eq_properties.ordering_satisfy_requirement(&LexRequirement {
-        inner: sort_req[0..common_prefix_length + 1].to_vec(),
-    }) {
+    while sort_req.len() > common_prefix_length
+        && child_eq_properties.ordering_satisfy_requirement(&LexRequirement {
+            inner: sort_req[0..common_prefix_length + 1].to_vec(),
+        })
+    {
         common_prefix_length += 1;
     }
     if common_prefix_length > 0 {

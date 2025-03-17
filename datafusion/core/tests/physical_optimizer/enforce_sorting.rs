@@ -17,7 +17,16 @@
 
 use std::sync::Arc;
 
-use crate::physical_optimizer::test_utils::{aggregate_exec, bounded_window_exec, bounded_window_exec_with_partition, check_integrity, coalesce_batches_exec, coalesce_partitions_exec, create_test_schema, create_test_schema2, create_test_schema3, filter_exec, global_limit_exec, hash_join_exec, limit_exec, local_limit_exec, memory_exec, parquet_exec, projection_exec, repartition_exec, sort_exec, sort_exec_with_fetch, sort_expr, sort_expr_options, sort_merge_join_exec, sort_preserving_merge_exec, sort_preserving_merge_exec_with_fetch, spr_repartition_exec, stream_exec_ordered, union_exec, RequirementsTestExec};
+use crate::physical_optimizer::test_utils::{
+    aggregate_exec, bounded_window_exec, bounded_window_exec_with_partition,
+    check_integrity, coalesce_batches_exec, coalesce_partitions_exec, create_test_schema,
+    create_test_schema2, create_test_schema3, filter_exec, global_limit_exec,
+    hash_join_exec, limit_exec, local_limit_exec, memory_exec, parquet_exec,
+    projection_exec, repartition_exec, sort_exec, sort_exec_with_fetch, sort_expr,
+    sort_expr_options, sort_merge_join_exec, sort_preserving_merge_exec,
+    sort_preserving_merge_exec_with_fetch, spr_repartition_exec, stream_exec_ordered,
+    union_exec, RequirementsTestExec,
+};
 
 use arrow::compute::SortOptions;
 use arrow::datatypes::{DataType, SchemaRef};
@@ -278,12 +287,8 @@ async fn test_soft_hard_requirements_remove_soft_requirement() -> Result<()> {
     )];
     let sort = sort_exec(sort_exprs.clone(), Arc::clone(&source));
     let partition_bys = &[col("nullable_col", &schema)?];
-    let bounded_window = bounded_window_exec_with_partition(
-        "nullable_col",
-        vec![],
-        partition_bys,
-        sort,
-    );
+    let bounded_window =
+        bounded_window_exec_with_partition("nullable_col", vec![], partition_bys, sort);
 
     let physical_plan = bounded_window;
 
@@ -324,12 +329,8 @@ async fn test_soft_hard_requirements_remove_soft_requirement_without_pushdowns(
         "count".to_string(),
     )];
     let partition_bys = &[col("nullable_col", &schema)?];
-    let bounded_window = bounded_window_exec_with_partition(
-        "nullable_col",
-        vec![],
-        partition_bys,
-        sort,
-    );
+    let bounded_window =
+        bounded_window_exec_with_partition("nullable_col", vec![], partition_bys, sort);
     let projection = projection_exec(proj_exprs, bounded_window)?;
     let physical_plan = projection;
 
@@ -575,12 +576,8 @@ async fn test_soft_hard_requirements_with_multiple_soft_requirements_and_output_
     )];
     let sort = sort_exec(sort_exprs1.clone(), source.clone());
     let partition_bys1 = &[col("nullable_col", &schema)?];
-    let bounded_window = bounded_window_exec_with_partition(
-        "nullable_col",
-        vec![],
-        partition_bys1,
-        sort,
-    );
+    let bounded_window =
+        bounded_window_exec_with_partition("nullable_col", vec![], partition_bys1, sort);
 
     let sort_exprs2 = vec![sort_expr_options(
         "non_nullable_col",
@@ -1007,8 +1004,9 @@ async fn test_union_inputs_different_sorted3() -> Result<()> {
 
     let union = union_exec(vec![sort1, source2, sort2]);
     let physical_plan = sort_preserving_merge_exec(parquet_sort_exprs.clone(), union);
-    let requirement =
-        RequiredInputOrdering::Hard(LexRequirement::from(LexOrdering::new(parquet_sort_exprs)));
+    let requirement = RequiredInputOrdering::Hard(LexRequirement::from(
+        LexOrdering::new(parquet_sort_exprs),
+    ));
     let physical_plan = Arc::new(OutputRequirementExec::new(
         physical_plan,
         Some(requirement),
@@ -1172,8 +1170,9 @@ async fn test_union_inputs_different_sorted6() -> Result<()> {
 
     let union = union_exec(vec![sort1, source2, spm]);
     let physical_plan = sort_preserving_merge_exec(parquet_sort_exprs.clone(), union);
-    let requirement =
-        RequiredInputOrdering::Hard(LexRequirement::from(LexOrdering::new(parquet_sort_exprs)));
+    let requirement = RequiredInputOrdering::Hard(LexRequirement::from(
+        LexOrdering::new(parquet_sort_exprs),
+    ));
     let physical_plan = Arc::new(OutputRequirementExec::new(
         physical_plan,
         Some(requirement),
@@ -2672,7 +2671,8 @@ async fn test_multiple_sort_window_exec() -> Result<()> {
 
     let sort1 = sort_exec(sort_exprs1.clone(), source);
     let window_agg1 = bounded_window_exec("non_nullable_col", sort_exprs1.clone(), sort1);
-    let window_agg2 = bounded_window_exec("non_nullable_col", sort_exprs2.clone(), window_agg1);
+    let window_agg2 =
+        bounded_window_exec("non_nullable_col", sort_exprs2.clone(), window_agg1);
     // let filter_exec = sort_exec;
     let physical_plan = bounded_window_exec("non_nullable_col", sort_exprs1, window_agg2);
     let requirement =
@@ -4347,8 +4347,9 @@ async fn test_window_partial_constant_and_set_monotonicity() -> Result<()> {
             .collect::<Vec<_>>();
         let physical_plan = sort_exec(sort_expr.clone(), window_exec);
 
-        let requirement =
-            RequiredInputOrdering::Hard(LexRequirement::from(LexOrdering::new(sort_expr)));
+        let requirement = RequiredInputOrdering::Hard(LexRequirement::from(
+            LexOrdering::new(sort_expr),
+        ));
         let physical_plan: Arc<dyn ExecutionPlan> = Arc::new(OutputRequirementExec::new(
             physical_plan,
             Some(requirement),
@@ -4402,8 +4403,9 @@ fn test_keeps_used_orthogonal_sort() -> Result<()> {
     let orthogonal_sort =
         sort_exec_with_fetch(vec![sort_expr("a", &schema)], Some(3), unbounded_input); // has fetch, so this orthogonal sort changes the output
     let output_sort = sort_exec(input_sort_exprs.clone(), orthogonal_sort);
-    let requirement =
-        RequiredInputOrdering::Hard(LexRequirement::from(LexOrdering::new(input_sort_exprs)));
+    let requirement = RequiredInputOrdering::Hard(LexRequirement::from(
+        LexOrdering::new(input_sort_exprs),
+    ));
     let physical_plan = Arc::new(OutputRequirementExec::new(
         output_sort,
         Some(requirement),
@@ -4439,8 +4441,9 @@ fn test_handles_multiple_orthogonal_sorts() -> Result<()> {
     let orthogonal_sort_3 = sort_exec(vec![sort_expr("a", &schema)], orthogonal_sort_2); // has no fetch, so can be removed
     let output_sort = sort_exec(input_sort_exprs.clone(), orthogonal_sort_3); // final sort
 
-    let requirement =
-        RequiredInputOrdering::Hard(LexRequirement::from(LexOrdering::new(input_sort_exprs)));
+    let requirement = RequiredInputOrdering::Hard(LexRequirement::from(
+        LexOrdering::new(input_sort_exprs),
+    ));
     let physical_plan = Arc::new(OutputRequirementExec::new(
         output_sort,
         Some(requirement),

@@ -315,7 +315,7 @@ pub(crate) fn calc_requirements<
         for element in order_by_requirements.into_iter() {
             let PhysicalSortRequirement { expr, options } = element.borrow();
             // TODO Find değil de filter ile gezinmeli sanki
-            if  let Some(exists) = lex_requirements.iter().find(|e| e.expr.eq(expr)) {
+            if let Some(exists) = lex_requirements.iter().find(|e| e.expr.eq(expr)) {
                 if exists.options != options.clone() {
                     lex_requirements
                         .push(PhysicalSortRequirement::new(Arc::clone(expr), *options));
@@ -340,8 +340,10 @@ pub(crate) fn calc_requirements<
                 let PhysicalSortRequirement { expr, options } = element.borrow();
                 if let Some(exists) = soft_requirements.iter().find(|e| e.expr.eq(expr)) {
                     if exists.options != options.clone() {
-                        soft_requirements
-                            .push(PhysicalSortRequirement::new(Arc::clone(expr), *options));
+                        soft_requirements.push(PhysicalSortRequirement::new(
+                            Arc::clone(expr),
+                            *options,
+                        ));
                     }
                 } else {
                     soft_requirements

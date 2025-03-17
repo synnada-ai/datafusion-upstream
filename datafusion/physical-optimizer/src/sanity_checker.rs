@@ -137,7 +137,9 @@ pub fn check_plan_sanity(
     ) {
         let child_eq_props = child.equivalence_properties();
         if let Some(sort_req) = sort_req {
-            if sort_req.is_hard_and_non_empty() && !child_eq_props.ordering_satisfy_requirement(sort_req.lex_requirement())
+            if sort_req.is_hard_and_non_empty()
+                && !child_eq_props
+                    .ordering_satisfy_requirement(sort_req.lex_requirement())
                 && !child_eq_props
                     .ordering_satisfy_requirement(sort_req.mixed_lex_requirement())
             {

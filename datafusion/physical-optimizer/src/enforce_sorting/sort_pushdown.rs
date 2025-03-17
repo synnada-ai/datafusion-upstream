@@ -23,7 +23,9 @@ use crate::utils::{
 };
 
 use arrow::datatypes::SchemaRef;
-use datafusion_common::tree_node::{ConcreteTreeNode, Transformed, TreeNode, TreeNodeRecursion};
+use datafusion_common::tree_node::{
+    ConcreteTreeNode, Transformed, TreeNode, TreeNodeRecursion,
+};
 use datafusion_common::{plan_err, HashSet, JoinSide, Result};
 use datafusion_expr::JoinType;
 use datafusion_physical_expr::expressions::Column;
@@ -206,17 +208,22 @@ fn decide_sort_exec_requirement(
     output_ordering: &RequiredInputOrdering,
     parent_reqs: &RequiredInputOrdering,
     sort_push_down: &SortPushDown,
-    current_is_stricter: bool
+    current_is_stricter: bool,
 ) -> RequiredInputOrdering {
     // set the stricter ordering
     // println!("Decide SortExec Req, current is stricter {current_is_stricter}");
-    let lex_requirement =  if current_is_stricter {
+    let lex_requirement = if current_is_stricter {
         output_ordering.lex_requirement().clone()
     } else {
         parent_reqs.lex_requirement().clone()
     };
 
-    if let Some(hard_parent) = sort_push_down.data.hard_parent_requirement.specification.clone() {
+    if let Some(hard_parent) = sort_push_down
+        .data
+        .hard_parent_requirement
+        .specification
+        .clone()
+    {
         hard_parent
     } else if parent_reqs.is_hard_and_non_empty() {
         RequiredInputOrdering::Hard(lex_requirement)
@@ -281,10 +288,15 @@ fn remove_soft_sort_exec_if_possible(
     if !parent_reqs.is_hard_and_non_empty()
         && !required_ordering.is_hard_and_non_empty()
         && sort_fetch.is_none()
-        && sort_push_down.data.hard_parent_requirement.specification.is_none()
+        && sort_push_down
+            .data
+            .hard_parent_requirement
+            .specification
+            .is_none()
     // || (required_ordering == parent_reqs)
     {
-        let old_keep_children_as_hard = sort_push_down.data.keep_hard_requirement.keep_hard;
+        let old_keep_children_as_hard =
+            sort_push_down.data.keep_hard_requirement.keep_hard;
         // println!("Removing Soft Sort Exec... {}", sort_push_down.data.soft_requirement_plans.len());
         let old_soft_plans = sort_push_down.data.soft_requirement_plans.clone();
         sort_push_down = sort_push_down.children.swap_remove(0);
@@ -308,7 +320,12 @@ fn remove_soft_sort_exec_if_possible(
                 // println!("Parent mixed, changing sort To Linear Count: {} Soft count: {} Keep Hard {:?}\n Hard Parent {:?}", sort_push_down.data.to_linear_plans.len(), sort_push_down.data.soft_requirement_plans.len(), sort_push_down.data.keep_hard_requirement.clone(), sort_push_down.data.hard_parent_requirement);
                 // We already have the SortExec, replace it with soft sort_push_down
                 // because we couldn't avoid Sorting operation anyway
-                if sort_push_down.data.hard_parent_requirement.specification.is_some() {
+                if sort_push_down
+                    .data
+                    .hard_parent_requirement
+                    .specification
+                    .is_some()
+                {
                     if let Some(spec) = sort_push_down
                         .data
                         .hard_parent_requirement
@@ -340,7 +357,8 @@ fn remove_soft_sort_exec_if_possible(
                             ));
                             // TODO Burada Spec'e güncelliyoruz ama Child requirement ile çelişiyorsa başka bir şey yapmalıyız. Karar vermeli.
                             // println!("Not satisfying... change {:?}\n\nSoft {}", spec, sort_push_down.data.soft_requirement_plans.len());
-                            let old_soft_plans = sort_push_down.data.soft_requirement_plans;
+                            let old_soft_plans =
+                                sort_push_down.data.soft_requirement_plans;
                             sort_push_down = sort_push_down.children.swap_remove(0);
                             sort_push_down = add_sort_above(
                                 sort_push_down,
@@ -402,7 +420,15 @@ fn remove_soft_sort_exec_if_possible(
                     let old_soft_plans = sort_push_down.data.soft_requirement_plans;
                     sort_push_down = sort_push_down.children.swap_remove(0);
                     // TODO Burada eğer Sort eklemekten kaçınabilirsek, kaçınmamız lazım.
-                    if sort_push_down.plan.equivalence_properties().ordering_satisfy_requirement(mixed) || sort_push_down.plan.equivalence_properties().ordering_satisfy_requirement(hard) {
+                    if sort_push_down
+                        .plan
+                        .equivalence_properties()
+                        .ordering_satisfy_requirement(mixed)
+                        || sort_push_down
+                            .plan
+                            .equivalence_properties()
+                            .ordering_satisfy_requirement(hard)
+                    {
                         // println!("Satisfies mixed or hard");
                     } else {
                         // println!("Does not satisfy mixed or hard");
@@ -411,20 +437,38 @@ fn remove_soft_sort_exec_if_possible(
                             if let Some(req) = maybe_req {
                                 let mut hard_copy = hard.clone();
                                 while hard_copy.inner.len() == 0 {
-                                    if sort_push_down.plan.equivalence_properties().requirements_compatible(&hard_copy, req.lex_requirement()) {
+                                    if sort_push_down
+                                        .plan
+                                        .equivalence_properties()
+                                        .requirements_compatible(
+                                            &hard_copy,
+                                            req.lex_requirement(),
+                                        )
+                                    {
                                         // println!("Hard is compatible!");
                                     }
                                     hard_copy = LexRequirement {
-                                        inner: hard_copy.inner[0..hard_copy.inner.len()-1].to_vec()
+                                        inner: hard_copy.inner
+                                            [0..hard_copy.inner.len() - 1]
+                                            .to_vec(),
                                     }
                                 }
                                 let mut mixed_copy = mixed.clone();
                                 while mixed_copy.inner.len() == 0 {
-                                    if sort_push_down.plan.equivalence_properties().requirements_compatible(&mixed_copy, req.lex_requirement()) {
+                                    if sort_push_down
+                                        .plan
+                                        .equivalence_properties()
+                                        .requirements_compatible(
+                                            &mixed_copy,
+                                            req.lex_requirement(),
+                                        )
+                                    {
                                         // println!("Mixed is compatible!");
                                     }
                                     hard_copy = LexRequirement {
-                                        inner: mixed_copy.inner[0..mixed_copy.inner.len()-1].to_vec()
+                                        inner: mixed_copy.inner
+                                            [0..mixed_copy.inner.len() - 1]
+                                            .to_vec(),
                                     }
                                 }
                             }
@@ -501,12 +545,12 @@ fn assign_requirements_to_satisfying_child(
                 RequiredInputOrdering::Mixed(mixed)
             }
             // assign_requirements_to_satisfying_child(child, parent_reqs, &RequiredInputOrdering::Hard(mixed), plan, keep_hard_requirement)
-        },
+        }
         // TODO Mixed'i düzgün handle et, sadece Hard'a cast ettik
         (RequiredInputOrdering::Mixed(mixed), _) => {
             // println!("Parent requirements are mixed");
             RequiredInputOrdering::Mixed(mixed)
-        },
+        }
         // There's no parent requirement, if child is also not Soft, Hard requirement can be returned
         (RequiredInputOrdering::Hard(lex), RequiredInputOrdering::Hard(_))
             if lex.is_empty() =>
@@ -548,13 +592,20 @@ fn assign_requirements_to_satisfying_child(
 
             // TODO Mixed'den gelen Hard parent'ı satisfy ediyor ama Sorted mode için partition by indices zorunlu tutuluyor. Öyleyse Sorted mode olmamalı mı?
             child.data.keep_hard_requirement = keep_hard_requirement.clone();
-            let child_is_strict = child.plan.equivalence_properties().requirements_compatible(child_req.lex_requirement(), parent_reqs.lex_requirement());
+            let child_is_strict =
+                child.plan.equivalence_properties().requirements_compatible(
+                    child_req.lex_requirement(),
+                    parent_reqs.lex_requirement(),
+                );
             if child_is_strict {
                 // println!("Child is strict ");
                 RequiredInputOrdering::Hard(LexRequirement::new(child_req.to_vec()))
             } else {
                 // println!("Child is not strict!");
-                if plan.equivalence_properties().ordering_satisfy_requirement(parent_reqs.lex_requirement()) {
+                if plan
+                    .equivalence_properties()
+                    .ordering_satisfy_requirement(parent_reqs.lex_requirement())
+                {
                     // println!("Child is not strict satisfy!");
                     RequiredInputOrdering::Hard(LexRequirement::new(child_req.to_vec()))
                 } else {
@@ -674,22 +725,31 @@ fn pushdown_sorts_helper(
             .map(LexRequirement::from)
             .map(RequiredInputOrdering::Hard)
             .unwrap_or_default();
-        let current_is_stricter = sort_push_down.plan.equivalence_properties().requirements_compatible(
-            output_ordering.lex_requirement(),
-            parent_reqs.lex_requirement(),
-        );
+        let current_is_stricter = sort_push_down
+            .plan
+            .equivalence_properties()
+            .requirements_compatible(
+                output_ordering.lex_requirement(),
+                parent_reqs.lex_requirement(),
+            );
         // println!("Is sort! Fetch {:?} Output ordering {:?} ", current_sort_fetch, output_ordering);
 
         // Decide SortExec's required ordering based on ParentRequirement or previous keep_hard_requirements information
-        let required_ordering =
-            decide_sort_exec_requirement(output_ordering, &parent_reqs, &sort_push_down, current_is_stricter);
+        let required_ordering = decide_sort_exec_requirement(
+            output_ordering,
+            &parent_reqs,
+            &sort_push_down,
+            current_is_stricter,
+        );
         if !satisfy_parent && parent_reqs.is_hard_and_non_empty() {
-        // if !satisfy_parent && !parent_is_stricter && parent_reqs.is_hard_and_non_empty() {
+            // if !satisfy_parent && !parent_is_stricter && parent_reqs.is_hard_and_non_empty() {
             // println!("Adding sort for not satisfied SortExec");
             // TODO Burada Soft'a göre ekledik ama yukarıdakileri değiştirebilir seçmek lazım.
             // TODO Soft için deneyip yukarıdan aşağı gelen planları tutup, onlar için kuralı tekrar çağırsak? Sort sayısına göre karar versek?
-            sort_push_down =
-                add_sort_for_not_satisfied_sort_exec_parent(sort_push_down, current_sort_fetch)
+            sort_push_down = add_sort_for_not_satisfied_sort_exec_parent(
+                sort_push_down,
+                current_sort_fetch,
+            )
         };
 
         // We can safely get the 0th index as we are dealing with a `SortExec`.
@@ -755,33 +815,74 @@ fn pushdown_sorts_helper(
         // Assign input order requirement information to children data
         assign_requirement_to_all_children(&mut sort_push_down, soft_plans, reqs);
         // println!("Could not push down sort, requirements assigned to child S: {} L: {}",sort_push_down.data.soft_requirement_plans.len(),sort_push_down.data.to_linear_plans.len() );
-    // } else if parent_reqs.is_empty() {
-    //     // println!("Parent requirements are empty!");
-    //     // note: this `satisfy_parent`, but we don't want to push down anything.
-    //     // Nothing to do.
-    //     return Ok(Transformed::no(sort_push_down));
+        // } else if parent_reqs.is_empty() {
+        //     // println!("Parent requirements are empty!");
+        //     // note: this `satisfy_parent`, but we don't want to push down anything.
+        //     // Nothing to do.
+        //     return Ok(Transformed::no(sort_push_down));
     } else if satisfy_parent {
         // For non-sort operators, parent requirements are met:
         let reqs = &sort_push_down.plan.required_input_ordering();
         // println!("Satisfies parent... plans required ordering {:?}", reqs);
         // TODO Burada permütasyonları da kontrol etmemiz lazım
-        if matches!(parent_reqs, RequiredInputOrdering::Mixed(_)) && sort_push_down.children.is_empty() {
+        if matches!(parent_reqs, RequiredInputOrdering::Mixed(_))
+            && sort_push_down.children.is_empty()
+        {
             // println!("Parent req add sort");
-            if !sort_push_down.plan.equivalence_properties().ordering_satisfy_requirement(parent_reqs.mixed_lex_requirement()) {
+            if !sort_push_down
+                .plan
+                .equivalence_properties()
+                .ordering_satisfy_requirement(parent_reqs.mixed_lex_requirement())
+            {
                 // println!("To linear...");
-                sort_push_down.data.to_linear_plans = sort_push_down.data.soft_requirement_plans.clone();
+                sort_push_down.data.to_linear_plans =
+                    sort_push_down.data.soft_requirement_plans.clone();
             }
-        } else if matches!(sort_push_down.data.keep_hard_requirement.specification, Some(RequiredInputOrdering::Mixed(_))) && sort_push_down.children.is_empty() {
+        } else if matches!(
+            sort_push_down.data.keep_hard_requirement.specification,
+            Some(RequiredInputOrdering::Mixed(_))
+        ) && sort_push_down.children.is_empty()
+        {
             // println!("Keep Hard req add sort");
-            if !sort_push_down.plan.equivalence_properties().ordering_satisfy_requirement(sort_push_down.data.keep_hard_requirement.specification.clone().unwrap().mixed_lex_requirement()) {
+            if !sort_push_down
+                .plan
+                .equivalence_properties()
+                .ordering_satisfy_requirement(
+                    sort_push_down
+                        .data
+                        .keep_hard_requirement
+                        .specification
+                        .clone()
+                        .unwrap()
+                        .mixed_lex_requirement(),
+                )
+            {
                 // println!("To linear...");
-                sort_push_down.data.to_linear_plans = sort_push_down.data.soft_requirement_plans.clone();
+                sort_push_down.data.to_linear_plans =
+                    sort_push_down.data.soft_requirement_plans.clone();
             }
-        } else if matches!(sort_push_down.data.hard_parent_requirement.specification, Some(RequiredInputOrdering::Mixed(_))) && sort_push_down.children.is_empty() {
+        } else if matches!(
+            sort_push_down.data.hard_parent_requirement.specification,
+            Some(RequiredInputOrdering::Mixed(_))
+        ) && sort_push_down.children.is_empty()
+        {
             // println!("Hard Parent req add sort");
-            if !sort_push_down.plan.equivalence_properties().ordering_satisfy_requirement(sort_push_down.data.hard_parent_requirement.specification.clone().unwrap().mixed_lex_requirement()) {
+            if !sort_push_down
+                .plan
+                .equivalence_properties()
+                .ordering_satisfy_requirement(
+                    sort_push_down
+                        .data
+                        .hard_parent_requirement
+                        .specification
+                        .clone()
+                        .unwrap()
+                        .mixed_lex_requirement(),
+                )
+            {
                 // println!("To linear...");
-                sort_push_down.data.to_linear_plans = sort_push_down.data.soft_requirement_plans.clone();
+                sort_push_down.data.to_linear_plans =
+                    sort_push_down.data.soft_requirement_plans.clone();
             }
         }
 
@@ -818,9 +919,20 @@ fn pushdown_sorts_helper(
             );
             child.data.ordering_requirement = Some(order);
             // TODO bunu yukarıda bir yerde çağırıp karar verip her yerde kullanalım
-            let child_is_strict = child.plan.equivalence_properties().requirements_compatible(child_req.lex_requirement(), parent_reqs.lex_requirement());
-            if child_is_strict && sort_push_down.data.keep_hard_requirement.specification.is_some() {
-                child.data.hard_parent_requirement.specification = Some(child_req.clone());
+            let child_is_strict =
+                child.plan.equivalence_properties().requirements_compatible(
+                    child_req.lex_requirement(),
+                    parent_reqs.lex_requirement(),
+                );
+            if child_is_strict
+                && sort_push_down
+                    .data
+                    .keep_hard_requirement
+                    .specification
+                    .is_some()
+            {
+                child.data.hard_parent_requirement.specification =
+                    Some(child_req.clone());
             } else {
                 child.data.hard_parent_requirement =
                     sort_push_down.data.hard_parent_requirement.clone();
@@ -837,7 +949,8 @@ fn pushdown_sorts_helper(
                 .data
                 .to_linear_plans
                 .append(&mut new_linear_plans);
-            child.data.soft_requirement_plans = sort_push_down.data.soft_requirement_plans.clone();
+            child.data.soft_requirement_plans =
+                sort_push_down.data.soft_requirement_plans.clone();
             child.data.to_linear_plans = sort_push_down.data.to_linear_plans.clone();
             // println!("Requirements lengths soft: {} lin: {}", sort_push_down.data.soft_requirement_plans.len(),sort_push_down.data.to_linear_plans.len() );
         }
@@ -853,15 +966,25 @@ fn pushdown_sorts_helper(
             if let Some(add_sort_req) = pushdown_result.add_sort_requirement {
                 // println!("Non-satisfying child add sort {:?}", add_sort_req);
                 let fetch = sort_push_down.data.fetch;
-                sort_push_down = add_sort_above(sort_push_down, add_sort_req.mixed_lex_requirement().clone(), fetch);
-                sort_push_down.data.hard_parent_requirement = KeepHardRequirement::default();
+                sort_push_down = add_sort_above(
+                    sort_push_down,
+                    add_sort_req.mixed_lex_requirement().clone(),
+                    fetch,
+                );
+                sort_push_down.data.hard_parent_requirement =
+                    KeepHardRequirement::default();
                 sort_push_down.data.soft_requirement_plans = vec![];
             }
             for (child, order) in sort_push_down.children.iter_mut().zip(adjusted) {
                 child.data.ordering_requirement = order.clone();
                 child.data.keep_hard_requirement.keep_hard =
                     sort_push_down.data.keep_hard_requirement.keep_hard;
-                if sort_push_down.data.hard_parent_requirement.specification.is_some() {
+                if sort_push_down
+                    .data
+                    .hard_parent_requirement
+                    .specification
+                    .is_some()
+                {
                     child.data.hard_parent_requirement.specification = order;
                 }
             }
@@ -889,7 +1012,11 @@ fn pushdown_sorts_helper(
                 .specification
                 .clone()
             {
-                if !sort_push_down.plan.equivalence_properties().ordering_satisfy_requirement(spec.mixed_lex_requirement()) {
+                if !sort_push_down
+                    .plan
+                    .equivalence_properties()
+                    .ordering_satisfy_requirement(spec.mixed_lex_requirement())
+                {
                     // println!("Adding SortExec above... {:?}", spec.mixed_lex_requirement());
                     sort_push_down = add_sort_above(
                         sort_push_down,
@@ -956,7 +1083,7 @@ fn determine_satisfied_requirement_for_window(
                 soft_plans.push(plan);
             }
             RequiredInputOrdering::Soft(LexRequirement::new(request_child.to_vec()))
-        },
+        }
         (_, RequiredInputOrdering::Mixed((hard, mixed))) => {
             // println!("Mixed child");
             // determine_satisfied_requirement_for_window(
@@ -970,7 +1097,7 @@ fn determine_satisfied_requirement_for_window(
             // };
             // RequiredInputOrdering::Soft(LexRequirement::new(request_child.to_vec()))
             RequiredInputOrdering::Mixed((hard, mixed))
-        },
+        }
         (RequiredInputOrdering::Mixed((hard, mixed)), _) => {
             // println!("Mixed parent");
             // TODO
@@ -981,7 +1108,7 @@ fn determine_satisfied_requirement_for_window(
             //     soft_plans,
             // )
             RequiredInputOrdering::Mixed((hard, mixed))
-        },
+        }
     }
 }
 
@@ -992,7 +1119,7 @@ struct PushdownRequirementToChildrenResult {
     /// Pushdown may modify given soft_requirement_plans, and returns the modified values
     soft_requirement_plans: Vec<Arc<dyn ExecutionPlan>>,
     /// Requirement that needs to be added as sort above
-    add_sort_requirement: Option<RequiredInputOrdering>
+    add_sort_requirement: Option<RequiredInputOrdering>,
 }
 
 impl PushdownRequirementToChildrenResult {
@@ -1003,7 +1130,7 @@ impl PushdownRequirementToChildrenResult {
         Self {
             required_input_ordering,
             soft_requirement_plans,
-            add_sort_requirement: None
+            add_sort_requirement: None,
         }
     }
 
@@ -1050,8 +1177,11 @@ fn pushdown_requirement_to_children(
         let child_requirement = required_input_ordering[0].clone().unwrap_or_default();
         let child_plan = plan.children().swap_remove(0);
 
-        let mut result = match determine_children_requirement(parent_requirement, &child_requirement, child_plan)
-        {
+        let mut result = match determine_children_requirement(
+            parent_requirement,
+            &child_requirement,
+            child_plan,
+        ) {
             RequirementsCompatibility::Satisfy => {
                 // println!("Window child is satisfying");
                 let req = (!child_requirement.is_empty()).then(|| {
@@ -1062,10 +1192,8 @@ fn pushdown_requirement_to_children(
                         &mut soft_plans,
                     )
                 });
-                let mut result = PushdownRequirementToChildrenResult::new(
-                    Some(vec![req]),
-                    soft_plans,
-                );
+                let mut result =
+                    PushdownRequirementToChildrenResult::new(Some(vec![req]), soft_plans);
 
                 result
             }
@@ -1089,21 +1217,19 @@ fn pushdown_requirement_to_children(
                         // of the window plan, then we can deduce that the parent expects
                         // an ordering from the columns created by window functions. If
                         // that's the case, we block the pushdown of sort operation.
-                        if !plan
-                            .equivalence_properties()
-                            .ordering_satisfy_requirement(parent_requirement.lex_requirement()) {
+                        if !plan.equivalence_properties().ordering_satisfy_requirement(
+                            parent_requirement.lex_requirement(),
+                        ) {
                             // println!("Extra field as sort op parent req: {:?}", parent_requirement);
                             // println!("Extra field as sort op output ordering: {:?}", plan.output_ordering());
-                            return Ok(PushdownRequirementToChildrenResult::new(None, soft_plans))
+                            return Ok(PushdownRequirementToChildrenResult::new(
+                                None, soft_plans,
+                            ));
                         }
                     }
                 }
 
-
-                PushdownRequirementToChildrenResult::new(
-                    Some(vec![adjusted]),
-                    soft_plans,
-                )
+                PushdownRequirementToChildrenResult::new(Some(vec![adjusted]), soft_plans)
             }
             RequirementsCompatibility::NonCompatible => {
                 // println!("Window non-compatible");
@@ -1111,11 +1237,19 @@ fn pushdown_requirement_to_children(
             }
         };
         match (parent_requirement, child_requirement) {
-            (RequiredInputOrdering::Mixed((_, mixed_par)), RequiredInputOrdering::Mixed((_, mixed_child))) => {
-                if !plan.equivalence_properties().requirements_compatible(&mixed_par, &mixed_child) {
-                    result = result.with_add_sort_requirement(RequiredInputOrdering::Hard(mixed_par.clone()));
+            (
+                RequiredInputOrdering::Mixed((_, mixed_par)),
+                RequiredInputOrdering::Mixed((_, mixed_child)),
+            ) => {
+                if !plan
+                    .equivalence_properties()
+                    .requirements_compatible(&mixed_par, &mixed_child)
+                {
+                    result = result.with_add_sort_requirement(
+                        RequiredInputOrdering::Hard(mixed_par.clone()),
+                    );
                 }
-            },
+            }
             _ => {}
         }
         Ok(result)
@@ -1165,7 +1299,9 @@ fn pushdown_requirement_to_children(
             .requirements_compatible(parent_requirement.lex_requirement(), &output_req)
         {
             let req = (!parent_requirement.is_empty()).then(|| {
-                RequiredInputOrdering::Hard(LexRequirement::new(parent_requirement.to_vec()))
+                RequiredInputOrdering::Hard(LexRequirement::new(
+                    parent_requirement.to_vec(),
+                ))
             });
             Ok(PushdownRequirementToChildrenResult::new(
                 Some(vec![req]),
@@ -1235,7 +1371,8 @@ fn pushdown_requirement_to_children(
         // Pushing down is not beneficial
         Ok(PushdownRequirementToChildrenResult::new(None, soft_plans))
     } else if is_sort_preserving_merge(&plan) {
-        let new_ordering = LexOrdering::from(parent_requirement.lex_requirement().clone());
+        let new_ordering =
+            LexOrdering::from(parent_requirement.lex_requirement().clone());
         let mut spm_eqs = plan.equivalence_properties().clone();
         // Sort preserving merge will have new ordering, one requirement above is pushed down to its below.
         spm_eqs = spm_eqs.with_reorder(new_ordering);
@@ -1248,7 +1385,9 @@ fn pushdown_requirement_to_children(
             // Can push-down through SortPreservingMergeExec, because parent requirement is finer
             // than SortPreservingMergeExec output ordering.
             let req = (!parent_requirement.is_empty()).then(|| {
-                RequiredInputOrdering::Hard(LexRequirement::new(parent_requirement.to_vec()))
+                RequiredInputOrdering::Hard(LexRequirement::new(
+                    parent_requirement.to_vec(),
+                ))
             });
             Ok(PushdownRequirementToChildrenResult::new(
                 Some(vec![req]),
@@ -1259,7 +1398,8 @@ fn pushdown_requirement_to_children(
         let res = handle_hash_join(hash_join, parent_requirement)?;
         Ok(PushdownRequirementToChildrenResult::new(res, soft_plans))
     } else {
-        let res = handle_custom_pushdown(&plan, parent_requirement, maintains_input_order)?;
+        let res =
+            handle_custom_pushdown(&plan, parent_requirement, maintains_input_order)?;
         Ok(PushdownRequirementToChildrenResult::new(res, soft_plans))
     }
     // TODO: Add support for Projection push down
