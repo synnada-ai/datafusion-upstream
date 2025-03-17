@@ -137,12 +137,16 @@ pub fn check_plan_sanity(
     ) {
         let child_eq_props = child.equivalence_properties();
         if let Some(sort_req) = sort_req {
-            if !child_eq_props.ordering_satisfy_requirement(sort_req.lex_requirement()) {
+            if sort_req.is_hard_and_non_empty() && !child_eq_props.ordering_satisfy_requirement(sort_req.lex_requirement())
+                && !child_eq_props
+                    .ordering_satisfy_requirement(sort_req.mixed_lex_requirement())
+            {
+                // println!("Grandchild order {:?}", child.children()[0].output_ordering());
                 let plan_str = get_plan_string(&plan);
                 return plan_err!(
                     "Plan: {:?} does not satisfy order requirements: {}. Child-{} order: {}",
                     plan_str,
-                    format_physical_sort_requirement_list(sort_req.lex_requirement()),
+                    format_physical_sort_requirement_list(sort_req.mixed_lex_requirement()),
                     idx,
                     child_eq_props.oeq_class()
                 );

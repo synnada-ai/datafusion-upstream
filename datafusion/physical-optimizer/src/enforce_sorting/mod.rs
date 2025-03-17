@@ -202,14 +202,14 @@ fn update_coalesce_ctx_children(
 /// The subrule `parallelize_sorts` is only applied if `repartition_sorts` is enabled.
 /// Optimizer consists of 5 main parts which work sequentially
 /// 1. `ensure_sorting` Responsible for removing unnecessary [`SortExec`]s, [`SortPreservingMergeExec`]s
-///     adjusting window operators, etc.
+///     adjusting window operators, pushing down sort operators etc. Working bottom-up.
 /// 2. `parallelize_sorts` (Depends on the repartition_sorts configuration) Responsible to identify
 ///     and remove unnecessary partition unifier operators such as [`SortPreservingMergeExec`], [`CoalescePartitionsExec`]
 ///     follows [`SortExec`]s does possible simplifications.
 /// 3. `replace_with_order_preserving_variants` Replaces operators with order preserving variants, for example can merge
 ///     a [`SortExec`] and a [`CoalescePartitionsExec`] into one [`SortPreservingMergeExec`] or [`SortExec`] + [`RepartitionExec`]
 ///     into an order preserving [`RepartitionExec`], etc.
-/// 4. `sort_pushdown` Responsible to push down sort operators as deep as possible in the plan.
+/// 4. `sort_pushdown` Responsible to push down sort operators as deep as possible in the plan. Working top-down
 /// 5. `replace_with_partial_sort` Checks if it's possible to replace [`SortExec`]s with [`PartialSortExec`] operators
 impl PhysicalOptimizerRule for EnforceSorting {
     fn optimize(
@@ -217,10 +217,20 @@ impl PhysicalOptimizerRule for EnforceSorting {
         plan: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        fn print_plan(plan: &Arc<dyn ExecutionPlan>) {
+            let formatted = datafusion_physical_plan::displayable(plan.as_ref())
+                .indent(true)
+                .to_string();
+            let actual: Vec<&str> = formatted.trim().lines().collect();
+            // println!("{:#?}", actual);
+        }
+
         let plan_requirements = PlanWithCorrespondingSort::new_default(plan);
         // Execute a bottom-up traversal to enforce sorting requirements,
         // remove unnecessary sorts, and optimize sort-sensitive operators:
         let adjusted = plan_requirements.transform_up(ensure_sorting)?.data;
+        // println!("Plan After Ensure Sorting {}", config.optimizer.repartition_sorts);
+        print_plan(&adjusted.plan);
         let new_plan = if config.optimizer.repartition_sorts {
             let plan_with_coalesce_partitions =
                 PlanWithCorrespondingCoalescePartitions::new_default(adjusted.plan);
@@ -232,6 +242,9 @@ impl PhysicalOptimizerRule for EnforceSorting {
             adjusted.plan
         };
 
+        // println!("\nPlan After Repartition sorts");
+        print_plan(&new_plan);
+
         let plan_with_pipeline_fixer = OrderPreservationContext::new_default(new_plan);
         let updated_plan = plan_with_pipeline_fixer
             .transform_up(|plan_with_pipeline_fixer| {
@@ -242,14 +255,21 @@ impl PhysicalOptimizerRule for EnforceSorting {
                 )
             })
             .data()?;
+        // println!("\nPlan After Order Preserving Variants");
+        print_plan(&updated_plan.plan);
         // Execute a top-down traversal to exploit sort push-down opportunities
         // missed by the bottom-up traversal:
         let mut sort_pushdown = SortPushDown::new_default(updated_plan.plan);
         assign_initial_requirements(&mut sort_pushdown);
         let adjusted = pushdown_sorts(sort_pushdown)?;
-        adjusted
+        // println!("\nPlan After Sort pushdown\n");
+        print_plan(&adjusted.plan);
+        let res = adjusted
             .plan
             .transform_up(|plan| Ok(Transformed::yes(replace_with_partial_sort(plan)?)))
+            .data()?;
+
+        res.transform_up(|plan| Ok(Transformed::yes(try_new_plans(plan)?)))
             .data()
     }
 
@@ -260,6 +280,20 @@ impl PhysicalOptimizerRule for EnforceSorting {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+fn try_new_plans(plan: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn ExecutionPlan>> {
+    let plan_any = plan.as_any();
+    let Some(bounded) = plan_any.downcast_ref::<BoundedWindowAggExec>() else {
+        return Ok(plan);
+    };
+    let res = Arc::new(BoundedWindowAggExec::try_new(
+        bounded.window_expr().to_vec(),
+        bounded.input().clone(),
+        bounded.input_order_mode.clone(),
+        bounded.can_repartition().clone(),
+    )?);
+    Ok(res)
 }
 
 /// Only interested with [`SortExec`]s and their unbounded children.
@@ -284,14 +318,18 @@ fn replace_with_partial_sort(
     // sort and already satisfied by the given ordering
     let child_eq_properties = child.equivalence_properties();
     let sort_req = LexRequirement::from(sort_plan.expr().clone());
+    // println!("Sort requirement is: {:?}", sort_req);
+    // println!("Child oo is: {:?}", child_eq_properties.output_ordering());
 
     let mut common_prefix_length = 0;
-    while child_eq_properties.ordering_satisfy_requirement(&LexRequirement {
+    // TODO Why did we need to add this check?
+    while sort_req.len() > common_prefix_length && child_eq_properties.ordering_satisfy_requirement(&LexRequirement {
         inner: sort_req[0..common_prefix_length + 1].to_vec(),
     }) {
         common_prefix_length += 1;
     }
     if common_prefix_length > 0 {
+        // println!("Common prefix is > 0 {common_prefix_length}");
         return Ok(Arc::new(
             PartialSortExec::new(
                 LexOrdering::new(sort_plan.expr().to_vec()),
@@ -302,6 +340,8 @@ fn replace_with_partial_sort(
             .with_fetch(sort_plan.fetch()),
         ));
     }
+    // TODO SortExec eklerken Mixed'e göre ekledik hep ama eğer unbounded ise planlardaki ortaklık önemli oluyor diğer türlü pipeline breaking
+    // println!("Common prefix is 0 {common_prefix_length}");
     Ok(plan)
 }
 
@@ -381,7 +421,7 @@ fn replace_with_partial_sort(
 ///
 /// **Steps**
 /// 1. Checks if the plan is either [`SortExec`]/[`SortPreservingMergeExec`]/[`CoalescePartitionsExec`] otherwise does nothing
-/// 2. If the plan is a [`SortExec`] or a final `[SortPreservingMergeExec` (output partitioning is 1)
+/// 2. If the plan is a [`SortExec`] or a final [`SortPreservingMergeExec`] (output partitioning is 1)
 ///     2.1. Check for [`CoalescePartitionsExec`] in children, when found check if it can be removed (with possible [`RepartitionExec`]s)
 ///         if so remove. (see `remove_bottleneck_in_subplan`)
 ///     2.2. If the plan is satisfying the ordering requirements, add a `SortExec`
@@ -393,8 +433,10 @@ pub fn parallelize_sorts(
     mut requirements: PlanWithCorrespondingCoalescePartitions,
 ) -> Result<Transformed<PlanWithCorrespondingCoalescePartitions>> {
     update_coalesce_ctx_children(&mut requirements);
+    // println!("Parallelize Sorts requirements {} {:?}", requirements.data, requirements.plan);
 
     if requirements.children.is_empty() || !requirements.children[0].data {
+        // println!("\nNo children or not connected...");
         // We only take an action when the plan is either a `SortExec`, a
         // `SortPreservingMergeExec` or a `CoalescePartitionsExec`, and they
         // all have a single child. Therefore, if the first child has no
@@ -404,6 +446,7 @@ pub fn parallelize_sorts(
         || is_sort_preserving_merge(&requirements.plan))
         && requirements.plan.output_partitioning().partition_count() <= 1
     {
+        // println!("\nSort or SPM that has lower partition count than 1...");
         // Take the initial sort expressions and requirements
         let (sort_exprs, fetch) = get_sort_exprs(&requirements.plan)?;
         let sort_reqs = RequiredInputOrdering::from(sort_exprs.clone());
@@ -431,12 +474,14 @@ pub fn parallelize_sorts(
             ),
         ))
     } else if is_coalesce_partitions(&requirements.plan) {
+        // println!("\nCOALESCE PARTITIONS!");
         // There is an unnecessary `CoalescePartitionsExec` in the plan.
         // This will handle the recursive `CoalescePartitionsExec` plans.
         requirements = remove_bottleneck_in_subplan(requirements)?;
         // For the removal of self node which is also a `CoalescePartitionsExec`.
         requirements = requirements.children.swap_remove(0);
 
+        // println!("\nCOALESCE PARTITIONS final plan! {:?}", requirements.plan);
         Ok(Transformed::yes(
             PlanWithCorrespondingCoalescePartitions::new(
                 Arc::new(CoalescePartitionsExec::new(Arc::clone(&requirements.plan))),

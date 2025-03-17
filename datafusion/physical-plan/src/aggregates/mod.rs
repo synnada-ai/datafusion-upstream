@@ -521,8 +521,18 @@ impl AggregateExec {
         let group_expr_mapping =
             ProjectionMapping::try_new(&group_by.expr, &input.schema())?;
 
+        // TODO Burası yanlış.
+        // TODO Sadece partition by'dan dolayı olan sort'lar soft olmalı
+        // let required_input_ordering = if !indices.is_empty() && req.is_empty() {
+        //     (!new_requirement.is_empty())
+        //         .then_some(RequiredInputOrdering::Soft(new_requirement))
+        // } else {
+        //     (!new_requirement.is_empty())
+        //         .then_some(RequiredInputOrdering::Hard(new_requirement))
+        // };
+
         let required_input_ordering = (!new_requirement.is_empty())
-            .then_some(RequiredInputOrdering::Soft(new_requirement));
+            .then_some(RequiredInputOrdering::Hard(new_requirement));
 
         let cache = Self::compute_properties(
             &input,

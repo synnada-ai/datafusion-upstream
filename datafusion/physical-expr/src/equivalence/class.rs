@@ -547,9 +547,11 @@ impl EquivalenceGroup {
         // First, we try to project expressions with an exact match. If we are
         // unable to do this, we consult equivalence classes.
         if let Some(target) = mapping.target_expr(expr) {
+            // println!("project_expr Target expr is some.");
             // If we match the source, we can project directly:
             return Some(target);
         } else {
+            // println!("project_expr Target expr is none...");
             // If the given expression is not inside the mapping, try to project
             // expressions considering the equivalence classes.
             for (source, target) in mapping.iter() {
@@ -560,6 +562,7 @@ impl EquivalenceGroup {
                     .get_equivalence_class(source)
                     .is_some_and(|group| group.contains(expr))
                 {
+                    // println!("project_expr Target expr is none, projected.");
                     return Some(Arc::clone(target));
                 }
             }
@@ -567,9 +570,11 @@ impl EquivalenceGroup {
         // Project a non-leaf expression by projecting its children.
         let children = expr.children();
         if children.is_empty() {
+            // println!("project_expr Children is empty!");
             // Leaf expression should be inside mapping.
             return None;
         }
+        // println!("project_expr Iterate over children...");
         children
             .into_iter()
             .map(|child| self.project_expr(mapping, child))

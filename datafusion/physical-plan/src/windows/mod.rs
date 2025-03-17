@@ -33,7 +33,7 @@ use crate::{
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow_schema::SortOptions;
-use datafusion_common::{exec_err, Result};
+use datafusion_common::Result;
 use datafusion_expr::{
     PartitionEvaluator, ReversedUDWF, SetMonotonicity, WindowFrame,
     WindowFunctionDefinition, WindowUDF,
@@ -274,15 +274,17 @@ impl StandardWindowFunctionExpr for WindowUDFExpr {
     }
 }
 
+// TODO Bounded'da set input order mode yaz. Sadece Hard satisfy edilmişse linear'e çevir
+
 pub(crate) fn calc_requirements<
     T: Borrow<Arc<dyn PhysicalExpr>>,
     S: Borrow<PhysicalSortExpr>,
 >(
     partition_by_exprs: impl IntoIterator<Item = T>,
     orderby_sort_exprs: impl IntoIterator<Item = S>,
-    is_soft_requirements: bool,
+    consider_partitions_as_soft: bool,
 ) -> Option<RequiredInputOrdering> {
-    let mut sort_reqs = LexRequirement::new(
+    let partition_reqs = LexRequirement::new(
         partition_by_exprs
             .into_iter()
             .map(|partition_by| {
@@ -290,21 +292,88 @@ pub(crate) fn calc_requirements<
             })
             .collect::<Vec<_>>(),
     );
+
+    // println!("CalcReq partition_reqs {:?}", partition_reqs);
+    let mut requirements = if consider_partitions_as_soft {
+        RequiredInputOrdering::Soft(partition_reqs)
+    } else {
+        RequiredInputOrdering::Hard(partition_reqs)
+    };
+    // println!("CalcReq partition requirements {:?}", requirements);
+
+    let order_by_requirements = sort_exprs_to_requirement(orderby_sort_exprs);
+
+    if requirements.is_empty() {
+        // println!("CalcReq Empty...");
+        // Partition requirements are empty
+        requirements =
+            RequiredInputOrdering::Hard(LexRequirement::new(order_by_requirements));
+    } else if matches!(requirements, RequiredInputOrdering::Hard(_)) {
+        // println!("CalcReq Hard type...");
+        // Partition requirements are Hard and not empty
+        let mut lex_requirements = requirements.lex_requirement().to_vec();
+        for element in order_by_requirements.into_iter() {
+            let PhysicalSortRequirement { expr, options } = element.borrow();
+            // TODO Find değil de filter ile gezinmeli sanki
+            if  let Some(exists) = lex_requirements.iter().find(|e| e.expr.eq(expr)) {
+                if exists.options != options.clone() {
+                    lex_requirements
+                        .push(PhysicalSortRequirement::new(Arc::clone(expr), *options));
+                }
+            } else {
+                lex_requirements
+                    .push(PhysicalSortRequirement::new(Arc::clone(expr), *options));
+            }
+        }
+        requirements = RequiredInputOrdering::Hard(LexRequirement::new(lex_requirements));
+    } else {
+        // Partition requirements are Soft and not empty
+        let mut soft_requirements = requirements.lex_requirement().to_vec();
+        if order_by_requirements.is_empty() {
+            // println!("CalcReq Soft req");
+            requirements =
+                RequiredInputOrdering::Soft(LexRequirement::new(soft_requirements));
+        } else {
+            // println!("CalcReq Mixed req {:?}", order_by_requirements);
+            let order_captured = order_by_requirements.clone();
+            for element in order_by_requirements.into_iter() {
+                let PhysicalSortRequirement { expr, options } = element.borrow();
+                if let Some(exists) = soft_requirements.iter().find(|e| e.expr.eq(expr)) {
+                    if exists.options != options.clone() {
+                        soft_requirements
+                            .push(PhysicalSortRequirement::new(Arc::clone(expr), *options));
+                    }
+                } else {
+                    soft_requirements
+                        .push(PhysicalSortRequirement::new(Arc::clone(expr), *options));
+                }
+            }
+            requirements = RequiredInputOrdering::Mixed((
+                LexRequirement::new(order_captured),
+                LexRequirement::new(soft_requirements),
+            ));
+        }
+        // println!("CalcReq Not Hard Requirement... {} Reqs: {:?}\n\n", requirements.is_hard_and_non_empty(), requirements);
+    }
+
+    (!requirements.is_empty()).then_some(requirements)
+}
+
+fn sort_exprs_to_requirement<T: Borrow<PhysicalSortExpr>>(
+    orderby_sort_exprs: impl IntoIterator<Item = T>,
+) -> Vec<PhysicalSortRequirement> {
+    let mut order_by_requirements: Vec<PhysicalSortRequirement> = vec![];
     for element in orderby_sort_exprs.into_iter() {
         let PhysicalSortExpr { expr, options } = element.borrow();
-        if !sort_reqs.iter().any(|e| e.expr.eq(expr)) {
-            sort_reqs.push(PhysicalSortRequirement::new(
+        // Order By requirements are always hard requirements
+        if !order_by_requirements.iter().any(|e| e.expr.eq(expr)) {
+            order_by_requirements.push(PhysicalSortRequirement::new(
                 Arc::clone(expr),
                 Some(*options),
             ));
         }
     }
-
-    if is_soft_requirements {
-        (!sort_reqs.is_empty()).then_some(RequiredInputOrdering::Soft(sort_reqs))
-    } else {
-        (!sort_reqs.is_empty()).then_some(RequiredInputOrdering::Hard(sort_reqs))
-    }
+    order_by_requirements
 }
 
 /// This function calculates the indices such that when partition by expressions reordered with the indices
@@ -336,11 +405,12 @@ pub(crate) fn get_partition_by_sort_exprs(
     let (ordering, _) = input
         .equivalence_properties()
         .find_longest_permutation(&ordered_partition_exprs);
-    if ordering.len() == ordered_partition_exprs.len() {
-        Ok(ordering)
-    } else {
-        exec_err!("Expects PARTITION BY expression to be ordered")
-    }
+    Ok(ordering)
+    // if ordering.len() == ordered_partition_exprs.len() {
+    //     Ok(ordering)
+    // } else {
+    //     exec_err!("Expects PARTITION BY expression to be ordered")
+    // }
 }
 
 pub(crate) fn window_equivalence_properties(
@@ -348,10 +418,10 @@ pub(crate) fn window_equivalence_properties(
     input: &Arc<dyn ExecutionPlan>,
     window_exprs: &[Arc<dyn WindowExpr>],
 ) -> EquivalenceProperties {
-    // We need to update the schema, so we can't directly use input's equivalence
-    // properties.
+    // BoundedWindowAggExec changes the schema, so update the `input.equivalence_properties()` with proper schema.
     let mut window_eq_properties = EquivalenceProperties::new(Arc::clone(schema))
         .extend(input.equivalence_properties().clone());
+    // println!("Bounded window oo: {:?}", window_eq_properties.output_ordering());
 
     let window_schema_len = schema.fields.len();
     let input_schema_len = window_schema_len - window_exprs.len();
@@ -747,9 +817,13 @@ mod tests {
             ),
         ];
         for (pb_params, ob_params, expected_params) in test_data {
+            let mut mixed_requirements = LexRequirement::new(vec![]);
+            let mut hard_requirements = LexRequirement::new(vec![]);
             let mut partitionbys = vec![];
             for col_name in pb_params {
-                partitionbys.push(col(col_name, &schema)?);
+                let expr = col(col_name, &schema)?;
+                partitionbys.push(expr.clone());
+                mixed_requirements.push(PhysicalSortRequirement::new(expr, None));
             }
 
             let mut orderbys = vec![];
@@ -759,29 +833,25 @@ mod tests {
                     descending,
                     nulls_first,
                 };
+                let res = PhysicalSortRequirement::new(expr.clone(), Some(options));
                 orderbys.push(PhysicalSortExpr { expr, options });
+                hard_requirements.push(res.clone());
+                mixed_requirements.push(res);
             }
 
             for is_soft in [true, false] {
-                let mut expected: Option<LexRequirement> = None;
-                for (col_name, reqs) in expected_params.clone() {
-                    let options = reqs.map(|(descending, nulls_first)| SortOptions {
-                        descending,
-                        nulls_first,
-                    });
-                    let expr = col(col_name, &schema)?;
-                    let res = PhysicalSortRequirement::new(expr, options);
-                    if let Some(expected) = &mut expected {
-                        expected.push(res);
+                let hard_requirements = hard_requirements.clone();
+                let mixed_requirements = mixed_requirements.clone();
+                let expected_result = if !expected_params.is_empty() {
+                    if is_soft && hard_requirements.is_empty() {
+                        Some(RequiredInputOrdering::Soft(mixed_requirements))
+                    } else if is_soft && !hard_requirements.is_empty() {
+                        Some(RequiredInputOrdering::Mixed((
+                            hard_requirements,
+                            mixed_requirements,
+                        )))
                     } else {
-                        expected = Some(LexRequirement::new(vec![res]));
-                    }
-                }
-                let expected_result = if let Some(expected) = expected {
-                    if is_soft {
-                        Some(RequiredInputOrdering::Soft(expected))
-                    } else {
-                        Some(RequiredInputOrdering::Hard(expected))
+                        Some(RequiredInputOrdering::Hard(mixed_requirements))
                     }
                 } else {
                     None

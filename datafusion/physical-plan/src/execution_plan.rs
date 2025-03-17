@@ -1061,6 +1061,10 @@ pub enum RequiredInputOrdering {
     /// The operator can benefit from the ordering if provided
     /// but if not provided it can also work
     Soft(LexRequirement),
+    /// Holds two possible requirement options, first element representing the
+    /// must-have ordering, and the second element represents a combination with
+    /// Hard & Soft requirements
+    Mixed((LexRequirement, LexRequirement)),
 }
 
 impl Default for RequiredInputOrdering {
@@ -1076,15 +1080,26 @@ impl From<LexOrdering> for RequiredInputOrdering {
 }
 
 impl RequiredInputOrdering {
+    /// Returns the inner requirements, if type is Mixed returns the Hard requirement
     pub fn lex_requirement(&self) -> &LexRequirement {
         match self {
             RequiredInputOrdering::Hard(lex) => lex,
             RequiredInputOrdering::Soft(lex) => lex,
+            RequiredInputOrdering::Mixed((hard, _)) => hard,
+        }
+    }
+
+    /// Returns the inner requirements, if type is Mixed returns the Mixed requirement
+    pub fn mixed_lex_requirement(&self) -> &LexRequirement {
+        match self {
+            RequiredInputOrdering::Hard(lex) => lex,
+            RequiredInputOrdering::Soft(lex) => lex,
+            RequiredInputOrdering::Mixed((_, mixed)) => mixed,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.lex_requirement().is_empty()
+        self.mixed_lex_requirement().is_empty()
     }
 
     pub fn to_vec(&self) -> Vec<PhysicalSortRequirement> {
@@ -1102,6 +1117,12 @@ impl RequiredInputOrdering {
             RequiredInputOrdering::Soft(_) => {
                 RequiredInputOrdering::Soft(LexRequirement::new(requirement))
             }
+            RequiredInputOrdering::Mixed(_) => {
+                // println!("Mixed with updated requirements {:?}", requirement);
+                // TODO what to do?
+                let lex_requirement = LexRequirement::new(requirement);
+                RequiredInputOrdering::Mixed((lex_requirement.clone(), lex_requirement))
+            }
         }
     }
 
@@ -1109,6 +1130,17 @@ impl RequiredInputOrdering {
         let mut requirements = self.lex_requirement().clone();
         requirements.push(requirement);
         self.with_updated_requirements(requirements.to_vec())
+    }
+
+    /// Returns if the requirement has any valid Hard requirements
+    pub fn is_hard_and_non_empty(&self) -> bool {
+        match self {
+            RequiredInputOrdering::Hard(_) => !self.is_empty(),
+            RequiredInputOrdering::Soft(_) => false,
+            RequiredInputOrdering::Mixed((hard, _)) => {
+                !hard.is_empty()
+            }
+        }
     }
 }
 

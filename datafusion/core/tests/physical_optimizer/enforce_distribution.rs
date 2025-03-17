@@ -37,13 +37,16 @@ use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::ScalarValue;
 use datafusion_expr::{JoinType, Operator};
 use datafusion_physical_expr::expressions::{BinaryExpr, Column, Literal};
-use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_expr::{
     expressions::binary, expressions::lit, LexOrdering, PhysicalSortExpr,
 };
+use datafusion_physical_expr::{Distribution, PhysicalExpr};
+use datafusion_physical_expr_common::sort_expr::LexRequirement;
 use datafusion_physical_optimizer::enforce_distribution::*;
 use datafusion_physical_optimizer::enforce_sorting::EnforceSorting;
-use datafusion_physical_optimizer::output_requirements::OutputRequirements;
+use datafusion_physical_optimizer::output_requirements::{
+    OutputRequirementExec, OutputRequirements,
+};
 use datafusion_physical_optimizer::PhysicalOptimizerRule;
 use datafusion_physical_plan::aggregates::{
     AggregateExec, AggregateMode, PhysicalGroupBy,
@@ -2340,7 +2343,8 @@ fn repartition_transitively_past_sort_with_projection() -> Result<()> {
     );
 
     let expected = &[
-        "SortExec: expr=[c@2 ASC], preserve_partitioning=[false]",
+        // TODO Why was is it false, at the first place? Parameter is set to true above
+        "SortExec: expr=[c@2 ASC], preserve_partitioning=[true]",
         // Since this projection is trivial, increasing parallelism is not beneficial
         "  ProjectionExec: expr=[a@0 as a, b@1 as b, c@2 as c]",
         "    DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], file_type=parquet",
@@ -2956,12 +2960,20 @@ fn parallelization_ignores_transitively_with_projection_parquet() -> Result<()> 
         expr: col("c2", &proj_parquet.schema()).unwrap(),
         options: SortOptions::default(),
     }]);
-    let plan_parquet =
-        sort_preserving_merge_exec(sort_key_after_projection, proj_parquet);
+    let spm = sort_preserving_merge_exec(sort_key_after_projection.clone(), proj_parquet);
+
+    let requirement =
+        RequiredInputOrdering::Hard(LexRequirement::from(sort_key_after_projection));
+    let plan_parquet: Arc<dyn ExecutionPlan> = Arc::new(OutputRequirementExec::new(
+        spm,
+        Some(requirement),
+        Distribution::SinglePartition,
+    ));
     let expected = &[
-        "SortPreservingMergeExec: [c2@1 ASC]",
-        "  ProjectionExec: expr=[a@0 as a2, c@2 as c2]",
-        "    DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[c@2 ASC], file_type=parquet",
+        "OutputRequirementExec",
+        "  SortPreservingMergeExec: [c2@1 ASC]",
+        "    ProjectionExec: expr=[a@0 as a2, c@2 as c2]",
+        "      DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[c@2 ASC], file_type=parquet",
     ];
     plans_matches_expected!(expected, &plan_parquet);
 

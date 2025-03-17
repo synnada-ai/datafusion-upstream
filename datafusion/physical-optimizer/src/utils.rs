@@ -42,6 +42,7 @@ pub fn add_sort_above<T: Clone + Default>(
     fetch: Option<usize>,
 ) -> PlanContext<T> {
     let mut sort_expr = LexOrdering::from(sort_requirements);
+    // println!("From sort expr: {:?}", sort_expr);
     sort_expr.retain(|sort_expr| {
         !node
             .plan
@@ -63,15 +64,40 @@ pub fn add_sort_above_with_check<T: Clone + Default>(
     sort_requirements: RequiredInputOrdering,
     fetch: Option<usize>,
 ) -> PlanContext<T> {
+    let lex_requirement = sort_requirements.mixed_lex_requirement();
+    // println!("Add sort with check Lex Requirement is {:?}", lex_requirement);
     if !node
         .plan
         .equivalence_properties()
-        .ordering_satisfy_requirement(sort_requirements.lex_requirement())
+        .ordering_satisfy_requirement(lex_requirement)
     {
-        add_sort_above(node, sort_requirements.lex_requirement().clone(), fetch)
+        // println!("Add sort with check does not satisfy");
+        // print_plan(&node.plan);
+        // BoundedWindow'un output ordering'i c9 geliyor sadece c1+c9 gelmiyor
+        // Plan Projection
+        // Child BoundedWindowAgg
+        // GrandChild SortExec
+        // println!("Add sort! Sort Reqs: {:?}\nOutput ordering: {:?}\nChild oo: {:?} Grandchild oo: {:?}", sort_requirements.lex_requirement(), node.plan.equivalence_properties().output_ordering(),
+        //          node.plan.children()[0].output_ordering(),
+        //          node.plan.children()[0].children()[0].output_ordering()
+        // );
+        add_sort_above(node, lex_requirement.clone(), fetch)
     } else {
+        // println!("Add sort with check satisfies");
+        // // // println!("Do not add sort!");
+        // // // println!("Ordering {:?}", &node.plan.output_ordering());
+        // // // println!("Child Ordering {:?}", &node.plan.children()[0].output_ordering());
+        // print_plan(&node.plan);
         node
     }
+}
+
+fn print_plan(plan: &Arc<dyn ExecutionPlan>) {
+    let formatted = datafusion_physical_plan::displayable(plan.as_ref())
+        .indent(true)
+        .to_string();
+    let actual: Vec<&str> = formatted.trim().lines().collect();
+    // println!("{:#?}", actual);
 }
 
 /// Checks whether the given operator is a [`SortExec`].

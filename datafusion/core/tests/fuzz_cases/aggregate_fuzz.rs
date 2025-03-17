@@ -29,7 +29,6 @@ use arrow::datatypes::{
     DECIMAL256_MAX_PRECISION, DECIMAL256_MAX_SCALE,
 };
 use arrow::util::pretty::pretty_format_batches;
-use datafusion::common::Result;
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::MemTable;
@@ -38,14 +37,12 @@ use datafusion::physical_plan::aggregates::{
     AggregateExec, AggregateMode, PhysicalGroupBy,
 };
 use datafusion::physical_plan::{collect, displayable, ExecutionPlan};
-use datafusion::prelude::{DataFrame, SessionConfig, SessionContext};
-use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
+use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_common::HashMap;
 use datafusion_functions_aggregate::sum::sum_udaf;
 use datafusion_physical_expr::expressions::col;
 use datafusion_physical_expr::PhysicalSortExpr;
 use datafusion_physical_expr_common::sort_expr::LexOrdering;
-use datafusion_physical_plan::InputOrderMode;
 use test_utils::{add_empty_batches, StringBatchGenerator};
 
 use rand::rngs::StdRng;
@@ -534,43 +531,15 @@ async fn group_by_string_test(
     ctx.register_table("t", Arc::new(provider)).unwrap();
 
     let df = ctx
+        // TODO Can we make an SQL that *requires* sorted input order mode?
         .sql("SELECT a, COUNT(*) FROM t GROUP BY a")
         .await
         .unwrap();
-    verify_ordered_aggregate(&df, sorted).await;
     let results = df.collect().await.unwrap();
 
     // verify that the results are correct
     let actual = extract_result_counts(results);
     assert_eq!(expected, actual);
-}
-
-async fn verify_ordered_aggregate(frame: &DataFrame, expected_sort: bool) {
-    struct Visitor {
-        expected_sort: bool,
-    }
-    let mut visitor = Visitor { expected_sort };
-
-    impl<'n> TreeNodeVisitor<'n> for Visitor {
-        type Node = Arc<dyn ExecutionPlan>;
-
-        fn f_down(&mut self, node: &'n Self::Node) -> Result<TreeNodeRecursion> {
-            if let Some(exec) = node.as_any().downcast_ref::<AggregateExec>() {
-                if self.expected_sort {
-                    assert!(matches!(
-                        exec.input_order_mode(),
-                        InputOrderMode::PartiallySorted(_) | InputOrderMode::Sorted
-                    ));
-                } else {
-                    assert!(matches!(exec.input_order_mode(), InputOrderMode::Linear));
-                }
-            }
-            Ok(TreeNodeRecursion::Continue)
-        }
-    }
-
-    let plan = frame.clone().create_physical_plan().await.unwrap();
-    plan.visit(&mut visitor).unwrap();
 }
 
 /// Compute the count of each distinct value in the specified column

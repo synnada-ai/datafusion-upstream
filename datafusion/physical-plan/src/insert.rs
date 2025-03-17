@@ -95,7 +95,11 @@ pub struct DataSinkExec {
 
 impl Debug for DataSinkExec {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "DataSinkExec schema: {:?}", self.count_schema)
+        write!(
+            f,
+            "DataSinkExec schema: {:?} input: {:?}",
+            self.count_schema, self.input
+        )
     }
 }
 

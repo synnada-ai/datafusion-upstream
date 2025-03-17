@@ -32,7 +32,7 @@ use crate::execution_plan::RequiredInputOrdering;
 use crate::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use crate::windows::{
     calc_requirements, get_ordered_partition_by_indices, get_partition_by_sort_exprs,
-    window_equivalence_properties,
+    sort_exprs_to_requirement, window_equivalence_properties,
 };
 use crate::{
     ColumnStatistics, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan,
@@ -62,7 +62,7 @@ use datafusion_physical_expr::window::{
     PartitionBatches, PartitionKey, PartitionWindowAggStates, WindowState,
 };
 use datafusion_physical_expr::PhysicalExpr;
-use datafusion_physical_expr_common::sort_expr::LexOrdering;
+use datafusion_physical_expr_common::sort_expr::{LexOrdering, LexRequirement};
 
 use ahash::RandomState;
 use futures::stream::Stream;
@@ -146,6 +146,11 @@ impl BoundedWindowAggExec {
     /// Input plan
     pub fn input(&self) -> &Arc<dyn ExecutionPlan> {
         &self.input
+    }
+
+    /// Can do repartition?
+    pub fn can_repartition(&self) -> &bool {
+        &self.can_repartition
     }
 
     /// Return the output sort order of partition keys: For example
@@ -284,11 +289,38 @@ impl ExecutionPlan for BoundedWindowAggExec {
     fn required_input_ordering(&self) -> Vec<Option<RequiredInputOrdering>> {
         let partition_bys = self.window_expr()[0].partition_by();
         let order_keys = self.window_expr()[0].order_by();
-        let partition_bys = self
-            .ordered_partition_by_indices
-            .iter()
-            .map(|idx| &partition_bys[*idx]);
-        vec![calc_requirements(partition_bys, order_keys.iter(), true)]
+        // TODO This was handling bounded checks too?
+        // let partition_bys = self
+        //     .ordered_partition_by_indices
+        //     .iter()
+        //     .map(|idx| &partition_bys[*idx]);
+        let mixed_requirement = calc_requirements(partition_bys, order_keys.iter(), true);
+        let requirement = if let Some(mixed) = mixed_requirement {
+            let order_by_requirements = sort_exprs_to_requirement(order_keys);
+
+            if order_by_requirements.is_empty() {
+                // println!("Bounded required soft");
+                Some(RequiredInputOrdering::Soft(
+                    mixed.mixed_lex_requirement().clone(),
+                ))
+            } else {
+                let req = LexRequirement::new(order_by_requirements);
+                if mixed.mixed_lex_requirement().clone() == req {
+                    // println!("Bounded required hard");
+                    Some(RequiredInputOrdering::Hard(req))
+                } else {
+                    // println!("Bounded required mixed");
+                    Some(RequiredInputOrdering::Mixed((
+                        req,
+                        mixed.mixed_lex_requirement().clone(),
+                    )))
+                }
+            }
+        } else {
+            // println!("Bounded required none");
+            None
+        };
+        vec![requirement]
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
