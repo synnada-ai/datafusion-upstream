@@ -289,11 +289,10 @@ impl ExecutionPlan for BoundedWindowAggExec {
     fn required_input_ordering(&self) -> Vec<Option<RequiredInputOrdering>> {
         let partition_bys = self.window_expr()[0].partition_by();
         let order_keys = self.window_expr()[0].order_by();
-        // TODO This was handling bounded checks too?
-        // let partition_bys = self
-        //     .ordered_partition_by_indices
-        //     .iter()
-        //     .map(|idx| &partition_bys[*idx]);
+        let partition_bys = self
+            .ordered_partition_by_indices
+            .iter()
+            .map(|idx| &partition_bys[*idx]);
         let mixed_requirement = calc_requirements(partition_bys, order_keys.iter(), true);
         let requirement = if let Some(mixed) = mixed_requirement {
             let order_by_requirements = sort_exprs_to_requirement(order_keys);

@@ -247,7 +247,7 @@ pub fn replace_with_order_preserving_variants(
     // For unbounded cases, we replace with the order-preserving variant in any
     // case, as doing so helps fix the pipeline. Also replace if config allows.
     let use_order_preserving_variant = (requirement.is_some()
-        && matches!(requirement.unwrap(), RequiredInputOrdering::Hard(_)))
+        && requirement.unwrap().is_hard_and_non_empty())
         || (requirements.plan.boundedness().is_unbounded()
             && requirements.plan.pipeline_behavior() == EmissionType::Final);
 
