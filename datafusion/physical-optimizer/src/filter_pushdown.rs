@@ -26,7 +26,7 @@ use datafusion_physical_plan::filter_pushdown::{
     FilterDescription, FilterPushdownSupport,
 };
 use datafusion_physical_plan::tree_node::PlanContext;
-use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_plan::{displayable, ExecutionPlan};
 
 /// A physical optimizer rule that pushes down filters in the execution plan.
 /// See [`ExecutionPlan::try_pushdown_filters`] for a detailed description of the algorithm.

@@ -441,14 +441,18 @@ impl ExecutionPlan for FilterExec {
         mut fd: FilterDescription,
         _config: &ConfigOptions,
     ) -> Result<FilterPushdownSupport<Arc<dyn ExecutionPlan>>> {
-        fd.filters.push(Arc::clone(self.predicate()));
-        let child_filters = vec![fd];
-        let remaining_filters = FilterDescription { filters: vec![] };
-        Ok(FilterPushdownSupport::Supported {
-            child_filters,
-            remaining_filters,
-            op: Arc::clone(&self.input),
-        })
+        if let Some(_projection) = &self.projection {
+            Ok(FilterPushdownSupport::NotSupported(fd))
+        } else {
+            fd.filters.push(Arc::clone(self.predicate()));
+            let child_filters = vec![fd];
+            let remaining_filters = FilterDescription { filters: vec![] };
+            Ok(FilterPushdownSupport::Supported {
+                child_filters,
+                remaining_filters,
+                op: Arc::clone(&self.input),
+            })
+        }
     }
 }
 
