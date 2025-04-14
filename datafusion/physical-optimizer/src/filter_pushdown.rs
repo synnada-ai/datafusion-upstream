@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use crate::PhysicalOptimizerRule;
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_common::{config::ConfigOptions, DataFusionError, Result};
+use datafusion_common::{config::ConfigOptions, Result};
 use datafusion_physical_expr::conjunction;
 use datafusion_physical_plan::filter::FilterExec;
 use datafusion_physical_plan::filter_pushdown::{
@@ -81,7 +81,9 @@ impl PhysicalOptimizerRule for PushdownFilter {
                     }
                 } else {
                     let mut new_child_node = FilterDescriptionContext::new_default(plan);
-                    new_child_node.data = child_filters.swap_remove(0);
+                    if !child_filters.is_empty() {
+                        new_child_node.data = child_filters.swap_remove(0);
+                    }
                     node.plan = Arc::new(FilterExec::try_new(
                         conjunction(remaining_filters.filters),
                         Arc::clone(&new_child_node.plan),

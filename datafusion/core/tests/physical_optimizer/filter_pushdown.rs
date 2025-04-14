@@ -30,14 +30,12 @@ use datafusion_common::{internal_err, Result};
 use datafusion_datasource::file_scan_config::FileScanConfigBuilder;
 use datafusion_datasource::source::DataSourceExec;
 use datafusion_datasource::{
-    file::{FileSource, FileSourceFilterPushdownResult},
-    file_scan_config::FileScanConfig,
-    file_stream::FileOpener,
+    file::FileSource, file_scan_config::FileScanConfig, file_stream::FileOpener,
 };
 use datafusion_expr::test::function_stub::count_udaf;
 use datafusion_physical_expr::expressions::col;
 use datafusion_physical_expr::{
-    aggregate::AggregateExprBuilder, conjunction, Partitioning, PhysicalExprRef,
+    aggregate::AggregateExprBuilder, conjunction, Partitioning,
 };
 use datafusion_physical_expr_common::physical_expr::fmt_sql;
 use datafusion_physical_optimizer::filter_pushdown::PushdownFilter;
@@ -50,7 +48,6 @@ use datafusion_physical_plan::{
     coalesce_batches::CoalesceBatchesExec,
     filter::FilterExec,
     repartition::RepartitionExec,
-    FilterPushdownResult,
 };
 use datafusion_physical_plan::{
     displayable, metrics::ExecutionPlanMetricsSet, DisplayFormatType, ExecutionPlan,
@@ -154,23 +151,21 @@ impl FileSource for TestSource {
         fd: FilterDescription,
         config: &ConfigOptions,
     ) -> Result<FilterPushdownSupport<Arc<dyn FileSource>>> {
-        if self.support {
-            if config.execution.parquet.pushdown_filters {
-                return Ok(FilterPushdownSupport {
-                    child_filters: vec![],
-                    remaining_filters: FilterDescription { filters: vec![] },
-                    op: Arc::new(TestSource {
-                        support: self.support,
-                        predicate: Some(conjunction(fd.filters)),
-                        statistics: self.statistics.clone(),
-                    }),
-                });
-            }
+        if self.support && config.execution.parquet.pushdown_filters {
+            return Ok(FilterPushdownSupport::Supported {
+                child_filters: vec![],
+                remaining_filters: FilterDescription { filters: vec![] },
+                op: Arc::new(TestSource {
+                    support: self.support,
+                    predicate: Some(conjunction(fd.filters)),
+                    statistics: self.statistics.clone(),
+                }),
+            });
         }
-        Ok(FilterPushdownSupport {
+        Ok(FilterPushdownSupport::Supported {
             child_filters: vec![],
             remaining_filters: fd,
-            op: self,
+            op: Arc::new(self.clone()),
         })
     }
 }

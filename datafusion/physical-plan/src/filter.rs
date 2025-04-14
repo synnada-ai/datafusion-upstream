@@ -52,8 +52,8 @@ use datafusion_physical_expr::expressions::BinaryExpr;
 use datafusion_physical_expr::intervals::utils::check_support;
 use datafusion_physical_expr::utils::collect_columns;
 use datafusion_physical_expr::{
-    analyze, conjunction, split_conjunction, AcrossPartitions, AnalysisContext,
-    ConstExpr, ExprBoundaries, PhysicalExpr, PhysicalExprRef,
+    analyze, split_conjunction, AcrossPartitions, AnalysisContext, ConstExpr,
+    ExprBoundaries, PhysicalExpr,
 };
 
 use datafusion_physical_expr_common::physical_expr::fmt_sql;
