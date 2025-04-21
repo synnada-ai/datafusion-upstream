@@ -92,6 +92,7 @@ pub struct GroupValuesPrimitive<T: ArrowPrimitiveType> {
     values: Vec<T::Native>,
     /// The random state used to generate hashes
     random_state: RandomState,
+    emit_starting_index: usize,
 }
 
 impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
@@ -103,6 +104,7 @@ impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
             values: Vec::with_capacity(128),
             null_group: None,
             random_state: Default::default(),
+            emit_starting_index: 0,
         }
     }
 }
@@ -159,22 +161,75 @@ where
         self.values.len()
     }
 
-    fn emit(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
-        fn build_primitive<T: ArrowPrimitiveType>(
-            values: Vec<T::Native>,
-            null_idx: Option<usize>,
-        ) -> PrimitiveArray<T> {
-            let nulls = null_idx.map(|null_idx| {
-                let mut buffer = NullBufferBuilder::new(values.len());
-                buffer.append_n_non_nulls(null_idx);
-                buffer.append_null();
-                buffer.append_n_non_nulls(values.len() - null_idx - 1);
-                // NOTE: The inner builder must be constructed as there is at least one null
-                buffer.finish().unwrap()
-            });
-            PrimitiveArray::<T>::new(values.into(), nulls)
+    fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>> {
+        if self.emit_starting_index >= self.values.len() {
+            return Ok(vec![]);
         }
 
+        let values = std::mem::take(&mut self.values);
+        let null_idx = self.null_group.take();
+
+        let values_len = values.len();
+        let required_values = values
+            .iter()
+            .skip(self.emit_starting_index)
+            .map(|x| x.clone())
+            .collect::<Vec<_>>();
+        debug_assert_eq!(required_values.len(), values_len - self.emit_starting_index);
+        let required_null_idx = null_idx.and_then(|null_idx| {
+            if null_idx >= self.emit_starting_index {
+                Some(null_idx - self.emit_starting_index)
+            } else {
+                None
+            }
+        });
+        self.emit_starting_index += required_values.len();
+        let array: PrimitiveArray<T> =
+            build_primitive(required_values, required_null_idx);
+
+        self.values = values;
+        self.null_group = null_idx;
+
+        Ok(vec![Arc::new(array.with_data_type(self.data_type.clone()))])
+    }
+
+    fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()> {
+        todo!("not suppported yet");
+        if n == 0 {
+            return Ok(());
+        }
+
+        self.map.retain(|group_idx| {
+            // Decrement group index by n
+            match group_idx.checked_sub(n) {
+                // Group index was >= n, shift value down
+                Some(sub) => {
+                    *group_idx = sub;
+                    true
+                }
+                // Group index was < n, so remove from table
+                None => false,
+            }
+        });
+
+        let _null_group = match &mut self.null_group {
+            Some(v) if *v >= n => {
+                *v -= n;
+                None
+            }
+            Some(_) => self.null_group.take(),
+            None => None,
+        };
+        let mut split = self.values.split_off(n);
+        std::mem::swap(&mut self.values, &mut split);
+
+        debug_assert!(self.emit_starting_index >= n);
+        self.emit_starting_index -= n;
+
+        Ok(())
+    }
+
+    fn emit(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
         let array: PrimitiveArray<T> = match emit_to {
             EmitTo::All => {
                 self.map.clear();
@@ -217,4 +272,19 @@ where
         self.map.clear();
         self.map.shrink_to(count, |_| 0); // hasher does not matter since the map is cleared
     }
+}
+
+fn build_primitive<T: ArrowPrimitiveType>(
+    values: Vec<T::Native>,
+    null_idx: Option<usize>,
+) -> PrimitiveArray<T> {
+    let nulls = null_idx.map(|null_idx| {
+        let mut buffer = NullBufferBuilder::new(values.len());
+        buffer.append_n_non_nulls(null_idx);
+        buffer.append_null();
+        buffer.append_n_non_nulls(values.len() - null_idx - 1);
+        // NOTE: The inner builder must be constructed as there is at least one null
+        buffer.finish().unwrap()
+    });
+    PrimitiveArray::<T>::new(values.into(), nulls)
 }

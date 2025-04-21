@@ -1071,6 +1071,14 @@ impl<const STREAMING: bool> GroupValues for GroupValuesColumn<STREAMING> {
         self.group_values[0].len()
     }
 
+    fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>> {
+        todo!()
+    }
+
+    fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()> {
+        todo!()
+    }
+
     fn emit(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
         let mut output = match emit_to {
             EmitTo::All => {

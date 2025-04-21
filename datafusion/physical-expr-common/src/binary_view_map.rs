@@ -335,6 +335,25 @@ where
         }
     }
 
+    pub fn state(&self) -> ArrayRef {
+        match self.output_type {
+            OutputType::BinaryView => {
+                let array = self.builder.finish_cloned();
+                Arc::new(array)
+            }
+            OutputType::Utf8View => {
+                // SAFETY:
+                // we asserted the input arrays were all the correct type and
+                // thus since all the values that went in were valid (e.g. utf8)
+                // so are all the values that come out
+                let array = self.builder.finish_cloned();
+                let array = unsafe { array.to_string_view_unchecked() };
+                Arc::new(array)
+            }
+            _ => unreachable!("Utf8/Binary should use `ArrowBytesMap`"),
+        }
+    }
+
     /// Total number of entries (including null, if present)
     pub fn len(&self) -> usize {
         self.non_null_len() + self.null.map(|_| 1).unwrap_or(0)

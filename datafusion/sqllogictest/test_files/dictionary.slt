@@ -457,3 +457,16 @@ CREATE TABLE test0 AS VALUES ('foo',1), ('bar',2), ('foo',3);
 
 statement ok
 COPY (SELECT arrow_cast(column1, 'Dictionary(Int32, Utf8)') AS column1, column2 FROM test0) TO 'test_files/scratch/copy/part_dict_test' STORED AS PARQUET PARTITIONED BY (column1);
+
+
+# TODO: Add dictionary type in aggregate fuzz for more test coverage
+# test distinct query for GroupValuesRows
+statement ok
+create table t as select arrow_cast(column1, 'Dictionary(Int32, Utf8)') as a from (values ('a'), ('b'), ('b'), ('c'));
+
+query T
+select distinct(a) as b from t order by b;
+----
+a
+b
+c

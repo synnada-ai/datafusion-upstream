@@ -19,14 +19,17 @@
 //! StringArray / LargeStringArray / BinaryArray / LargeBinaryArray.
 
 use ahash::RandomState;
-use arrow::array::{
-    cast::AsArray,
-    types::{ByteArrayType, GenericBinaryType, GenericStringType},
-    Array, ArrayRef, BufferBuilder, GenericBinaryArray, GenericStringArray,
-    NullBufferBuilder, OffsetSizeTrait,
-};
 use arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::DataType;
+use arrow::{
+    array::{
+        cast::AsArray,
+        types::{ByteArrayType, GenericBinaryType, GenericStringType},
+        Array, ArrayRef, BufferBuilder, GenericBinaryArray, GenericStringArray,
+        NullBufferBuilder, OffsetSizeTrait,
+    },
+    buffer::Buffer,
+};
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::utils::proxy::{HashTableAllocExt, VecAllocExt};
 use std::any::type_name;
@@ -503,6 +506,52 @@ where
         // monotonically increasing, overflows were checked.
         let offsets = unsafe { OffsetBuffer::new_unchecked(ScalarBuffer::from(offsets)) };
         let values = buffer.finish();
+
+        match output_type {
+            OutputType::Binary => {
+                // SAFETY: the offsets were constructed correctly
+                Arc::new(unsafe {
+                    GenericBinaryArray::new_unchecked(offsets, values, nulls)
+                })
+            }
+            OutputType::Utf8 => {
+                // SAFETY:
+                // 1. the offsets were constructed safely
+                //
+                // 2. we asserted the input arrays were all the correct type and
+                // thus since all the values that went in were valid (e.g. utf8)
+                // so are all the values that come out
+                Arc::new(unsafe {
+                    GenericStringArray::new_unchecked(offsets, values, nulls)
+                })
+            }
+            _ => unreachable!("View types should use `ArrowBytesViewMap`"),
+        }
+    }
+
+    pub fn state(&self) -> ArrayRef {
+        let Self {
+            output_type,
+            map: _,
+            map_size: _,
+            offsets,
+            buffer,
+            random_state: _,
+            hashes_buffer: _,
+            null,
+        } = self;
+
+        // Only make a `NullBuffer` if there was a null value
+        let nulls = null.map(|(_payload, null_index)| {
+            let num_values = offsets.len() - 1;
+            single_null_buffer(num_values, null_index)
+        });
+        // SAFETY: the offsets were constructed correctly in `insert_if_new` --
+        // monotonically increasing, overflows were checked.
+        let offsets =
+            unsafe { OffsetBuffer::new_unchecked(ScalarBuffer::from(offsets.clone())) };
+        let buffer_cloned = buffer.as_slice().to_vec();
+        let values = Buffer::from_vec(buffer_cloned);
 
         match output_type {
             OutputType::Binary => {

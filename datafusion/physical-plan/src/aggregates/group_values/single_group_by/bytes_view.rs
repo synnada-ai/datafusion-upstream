@@ -17,6 +17,7 @@
 
 use crate::aggregates::group_values::GroupValues;
 use arrow::array::{Array, ArrayRef, RecordBatch};
+use datafusion_common::Result;
 use datafusion_expr::EmitTo;
 use datafusion_physical_expr::binary_map::OutputType;
 use datafusion_physical_expr_common::binary_view_map::ArrowBytesViewMap;
@@ -31,6 +32,7 @@ pub struct GroupValuesBytesView {
     map: ArrowBytesViewMap<usize>,
     /// The total number of groups so far (used to assign group_index)
     num_groups: usize,
+    emit_starting_index: usize,
 }
 
 impl GroupValuesBytesView {
@@ -38,16 +40,13 @@ impl GroupValuesBytesView {
         Self {
             map: ArrowBytesViewMap::new(output_type),
             num_groups: 0,
+            emit_starting_index: 0,
         }
     }
 }
 
 impl GroupValues for GroupValuesBytesView {
-    fn intern(
-        &mut self,
-        cols: &[ArrayRef],
-        groups: &mut Vec<usize>,
-    ) -> datafusion_common::Result<()> {
+    fn intern(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) -> Result<()> {
         assert_eq!(cols.len(), 1);
 
         // look up / add entries in the table
@@ -86,7 +85,7 @@ impl GroupValues for GroupValuesBytesView {
         self.num_groups
     }
 
-    fn emit(&mut self, emit_to: EmitTo) -> datafusion_common::Result<Vec<ArrayRef>> {
+    fn emit(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
         // Reset the map to default, and convert it into a single array
         let map_contents = self.map.take().into_state();
 
@@ -126,5 +125,43 @@ impl GroupValues for GroupValuesBytesView {
         // in theory we could potentially avoid this reallocation and clear the
         // contents of the maps, but for now we just reset the map from the beginning
         self.map.take();
+    }
+
+    fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>> {
+        if self.map.len() == self.emit_starting_index {
+            // no new groups to emit
+            return Ok(vec![]);
+        }
+
+        let map = self.map.take();
+        // TODO: optimize this, clone only we need
+        let map_contents = map.state();
+
+        let emit_group_values = map_contents.slice(
+            self.emit_starting_index,
+            map_contents.len() - self.emit_starting_index,
+        );
+        self.emit_starting_index = map_contents.len();
+        self.map = map;
+        Ok(vec![emit_group_values])
+    }
+
+    fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()> {
+        let map_contents = self.map.take().into_state();
+        let remaining_group_values = map_contents.slice(n, map_contents.len() - n);
+        self.num_groups = 0;
+        let mut group_indexes = vec![];
+        self.intern(&[remaining_group_values], &mut group_indexes)?;
+        // Verify that the group indexes were assigned in the correct order
+        assert_eq!(0, group_indexes[0]);
+        debug_assert!(
+            self.emit_starting_index >= n,
+            "emit_starting_index: {}, n: {}",
+            self.emit_starting_index,
+            n
+        );
+        self.emit_starting_index -= n;
+
+        Ok(())
     }
 }

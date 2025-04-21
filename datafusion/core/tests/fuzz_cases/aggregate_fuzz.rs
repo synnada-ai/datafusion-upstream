@@ -225,6 +225,25 @@ async fn test_median() {
         .await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_distinct_only_query() {
+    let data_gen_config = baseline_config();
+
+    // Queries like SELECT median(a), median(distinct) FROM fuzz_table GROUP BY b
+    let query_builder = QueryBuilder::new()
+        .with_table_name("fuzz_table")
+        // median only works on numeric columns
+        .with_aggregate_arguments(data_gen_config.all_columns())
+        .set_group_by_columns(data_gen_config.all_columns());
+
+    AggregationFuzzerBuilder::from(data_gen_config)
+        .add_distinct_query(query_builder)
+        // .add_query_builder(query_builder)
+        .build()
+        .run()
+        .await;
+}
+
 /// Return a standard set of columns for testing data generation
 ///
 /// Includes numeric and string types

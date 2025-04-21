@@ -68,6 +68,8 @@ pub struct GroupValuesRows {
     /// [`Row`]: arrow::row::Row
     group_values: Option<Rows>,
 
+    emit_starting_index: usize,
+
     /// reused buffer to store hashes
     hashes_buffer: Vec<u64>,
 
@@ -107,6 +109,7 @@ impl GroupValuesRows {
             hashes_buffer: Default::default(),
             rows_buffer,
             random_state: Default::default(),
+            emit_starting_index: 0,
         })
     }
 }
@@ -192,6 +195,66 @@ impl GroupValues for GroupValuesRows {
             .unwrap_or(0)
     }
 
+    fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>> {
+        let group_values = self
+            .group_values
+            .take()
+            .expect("Can not emit from empty rows");
+
+        let group_rows = group_values.iter().skip(self.emit_starting_index);
+        let mut output = self.row_converter.convert_rows(group_rows)?;
+
+        // TODO: Materialize dictionaries in group keys
+        // https://github.com/apache/datafusion/issues/7647
+        for (field, array) in self.schema.fields.iter().zip(&mut output) {
+            let expected = field.data_type();
+            *array =
+                dictionary_encode_if_necessary(Arc::<dyn Array>::clone(array), expected)?;
+        }
+
+        self.group_values = Some(group_values);
+        self.emit_starting_index += output[0].len();
+        Ok(output)
+    }
+
+    fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+
+        let mut group_values = self
+            .group_values
+            .take()
+            .expect("Can not emit from empty rows");
+
+        // Clear out first n group keys by copying them to a new Rows.
+        // TODO file some ticket in arrow-rs to make this more efficient?
+        let mut new_group_values = self.row_converter.empty_rows(0, 0);
+        for row in group_values.iter().skip(n) {
+            new_group_values.push(row);
+        }
+        std::mem::swap(&mut new_group_values, &mut group_values);
+
+        self.map.retain(|(_exists_hash, group_idx)| {
+            // Decrement group index by n
+            match group_idx.checked_sub(n) {
+                // Group index was >= n, shift value down
+                Some(sub) => {
+                    *group_idx = sub;
+                    true
+                }
+                // Group index was < n, so remove from table
+                None => false,
+            }
+        });
+
+        self.group_values = Some(group_values);
+        debug_assert!(self.emit_starting_index >= n);
+        self.emit_starting_index -= n;
+
+        Ok(())
+    }
+
     fn emit(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
         let mut group_values = self
             .group_values
@@ -202,6 +265,8 @@ impl GroupValues for GroupValuesRows {
             EmitTo::All => {
                 let output = self.row_converter.convert_rows(&group_values)?;
                 group_values.clear();
+
+                // TODO: Add self.map.clear() here
                 output
             }
             EmitTo::First(n) => {

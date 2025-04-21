@@ -63,6 +63,12 @@ impl AggregationFuzzerBuilder {
         }
     }
 
+    pub fn add_distinct_query(mut self, query_builder: QueryBuilder) -> Self {
+        let sql = query_builder.generate_distinct_query();
+        self.candidate_sqls.push(Arc::from(sql));
+        self.table_name(query_builder.table_name())
+    }
+
     /// Adds random SQL queries to the fuzzer along with the table name
     ///
     /// Adds
@@ -225,6 +231,10 @@ impl AggregationFuzzer {
         &self,
         query_groups: Vec<QueryGroup>,
     ) -> Vec<AggregationFuzzTestTask> {
+        let mut query_groups = query_groups;
+        let query_groups = query_groups.swap_remove(0);
+        let query_groups = vec![query_groups];
+
         let mut tasks = Vec::with_capacity(query_groups.len() * CTX_GEN_ROUNDS);
         for QueryGroup { dataset, sql } in query_groups {
             let dataset_ref = Arc::new(dataset);
@@ -238,6 +248,7 @@ impl AggregationFuzzer {
             let baseline_result = run_sql(&sql, &baseline_ctx_with_params.ctx)
                 .await
                 .expect("should success to run baseline sql");
+
             let baseline_result = Arc::new(baseline_result);
             // Generate test tasks
             for _ in 0..CTX_GEN_ROUNDS {
@@ -467,6 +478,15 @@ impl QueryBuilder {
         query
     }
 
+    // select distinct(col) from table;
+    pub fn generate_distinct_query(&self) -> String {
+        format!(
+            "SELECT DISTINCT({}) as r FROM {} ORDER BY r",
+            self.random_argument(),
+            self.table_name
+        )
+    }
+
     /// Generate a some random aggregate function invocations (potentially repeating).
     ///
     /// Each aggregate function invocation is of the form
@@ -519,6 +539,8 @@ impl QueryBuilder {
             );
             aggregate_functions.push(function);
         }
+
+        println!("aggregate_functions: {:?}", aggregate_functions);
         aggregate_functions
     }
 
