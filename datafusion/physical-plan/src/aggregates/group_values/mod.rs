@@ -111,7 +111,7 @@ pub(crate) trait GroupValues: Send {
     /// Emit for no aggregate case, emit but don't cleanup the internal state
     /// return vec![] if nothing to emit
     fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>>;
-    
+
     /// cleanup the internal state
     fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()>;
 
