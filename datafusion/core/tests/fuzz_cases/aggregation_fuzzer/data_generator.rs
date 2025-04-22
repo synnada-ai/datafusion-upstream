@@ -67,11 +67,6 @@ impl DatasetGeneratorConfig {
         self.columns
             .iter()
             .filter_map(|d| {
-                // if matches!(d.column_type, DataType::Int8) {
-                //     Some(d.name.as_str())
-                // } else {
-                //     None
-                // }
                 if d.column_type.is_numeric()
                     && !matches!(d.column_type, DataType::Float32 | DataType::Float64)
                 {
@@ -147,7 +142,7 @@ impl DatasetGenerator {
         let base_batch = self.batch_generator.generate()?;
         let batches = stagger_batch(base_batch.clone());
         let dataset = Dataset::new(batches, Vec::new());
-        // datasets.push(dataset);
+        datasets.push(dataset);
 
         // Generate the related sorted batches
         let schema = base_batch.schema_ref();

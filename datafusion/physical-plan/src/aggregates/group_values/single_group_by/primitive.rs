@@ -170,11 +170,10 @@ where
         let null_idx = self.null_group.take();
 
         let values_len = values.len();
-        // TODO: avoid this clone?
         let required_values = values
             .iter()
             .skip(self.emit_starting_index)
-            .map(|x| x.clone())
+            .copied()
             .collect::<Vec<_>>();
         debug_assert_eq!(required_values.len(), values_len - self.emit_starting_index);
         let required_null_idx = null_idx.and_then(|null_idx| {

@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use crate::fuzz_cases::aggregation_fuzzer::{
-    AggregationFuzzerBuilder, ColumnDescr, DatasetGeneratorConfig, QueryBuilder,
+    AggregationFuzzerBuilder, DatasetGeneratorConfig, QueryBuilder,
 };
 
 use arrow::array::{

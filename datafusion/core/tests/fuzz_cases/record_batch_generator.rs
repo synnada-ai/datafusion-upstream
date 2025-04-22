@@ -17,10 +17,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{
-    ArrayRef, AsArray, DictionaryArray, PrimitiveArray, RecordBatch,
-    StringDictionaryBuilder,
-};
+use arrow::array::{ArrayRef, AsArray, RecordBatch, StringDictionaryBuilder};
 use arrow::datatypes::{
     BooleanType, DataType, Date32Type, Date64Type, Decimal128Type, Decimal256Type, Field,
     Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,

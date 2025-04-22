@@ -551,7 +551,6 @@ impl QueryBuilder {
             aggregate_functions.push(function);
         }
 
-        println!("aggregate_functions: {:?}", aggregate_functions);
         aggregate_functions
     }
 
