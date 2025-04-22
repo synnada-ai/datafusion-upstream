@@ -1069,7 +1069,6 @@ impl GroupedHashAggregateStream {
     /// Create an output RecordBatch with the group keys and
     /// accumulator states/values specified in emit_to
     fn emit(&mut self, emit_to: EmitTo, spilling: bool) -> Result<Option<RecordBatch>> {
-        // println!("input_values: {:?}", input_values);
         let schema = if spilling {
             Arc::clone(&self.spill_state.spill_schema)
         } else {

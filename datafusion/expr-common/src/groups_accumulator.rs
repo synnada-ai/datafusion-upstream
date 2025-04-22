@@ -33,24 +33,6 @@ pub enum EmitTo {
     First(usize),
 }
 
-pub enum RemoveTo {
-    /// Remove all groups
-    All,
-    /// Remove only the first `n` groups and shift all existing group
-    /// indexes down by `n`.
-    ///
-    /// For example, if `n=10`, group_index `0, 1, ... 9` are removed
-    /// and group indexes `10, 11, 12, ...` become `0, 1, 2, ...`.
-    First(usize),
-}
-
-// emit start from, remove start from
-//
-// 1. Emit All, Remove All
-// 2. Emit First(10), Remove First(10)
-// 3. Emit start from N, remove 0 ~ Emit All with internal state maintained
-// 4. Emit start from N, remove start from M ~ Emit All with internal state maintained + Remove First(M)
-
 impl EmitTo {
     /// Removes the number of rows from `v` required to emit the right
     /// number of rows, returning a `Vec` with elements taken, and the
