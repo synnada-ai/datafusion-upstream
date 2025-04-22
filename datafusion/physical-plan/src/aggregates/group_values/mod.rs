@@ -105,11 +105,14 @@ pub(crate) trait GroupValues: Send {
     /// The number of values (distinct group values) stored in this [`GroupValues`]
     fn len(&self) -> usize;
 
-    /// Emits the group values
+    /// Emits the group values and cleanup the internal state
     fn emit(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>>;
 
-    // return vec![] if nothing to emit
+    /// Emit for no aggregate case, emit but don't cleanup the internal state
+    /// return vec![] if nothing to emit
     fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>>;
+    
+    /// cleanup the internal state
     fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()>;
 
     /// Clear the contents and shrink the capacity to the size of the batch (free up memory usage)
