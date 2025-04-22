@@ -89,12 +89,15 @@ impl<O: OffsetSizeTrait> GroupValues for GroupValuesByes<O> {
             // no new groups to emit
             return Ok(vec![]);
         }
-        
+
         let map = self.map.take();
         // TODO: optimize this, clone only we need
         let map_contents = map.state();
 
-        let emit_group_values = map_contents.slice(self.emit_starting_index, map_contents.len() - self.emit_starting_index);
+        let emit_group_values = map_contents.slice(
+            self.emit_starting_index,
+            map_contents.len() - self.emit_starting_index,
+        );
         self.emit_starting_index = map_contents.len();
         self.map = map;
         Ok(vec![emit_group_values])
@@ -102,8 +105,7 @@ impl<O: OffsetSizeTrait> GroupValues for GroupValuesByes<O> {
 
     fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()> {
         let map_contents = self.map.take().into_state();
-        let remaining_group_values =
-                    map_contents.slice(n, map_contents.len() - n);
+        let remaining_group_values = map_contents.slice(n, map_contents.len() - n);
         self.num_groups = 0;
         let mut group_indexes = vec![];
         self.intern(&[remaining_group_values], &mut group_indexes)?;

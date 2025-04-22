@@ -202,6 +202,11 @@ impl GroupValues for GroupValuesRows {
             .expect("Can not emit from empty rows");
 
         let group_rows = group_values.iter().skip(self.emit_starting_index);
+        if group_rows.len() == 0 {
+            self.group_values = Some(group_values);
+            return Ok(vec![]);
+        }
+
         let mut output = self.row_converter.convert_rows(group_rows)?;
 
         // TODO: Materialize dictionaries in group keys

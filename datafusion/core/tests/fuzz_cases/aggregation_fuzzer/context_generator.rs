@@ -132,19 +132,21 @@ impl SessionContextGenerator {
         let skip_partial_params =
             self.candidate_skip_partial_params[skip_partial_params_idx];
 
-        let (provider, sort_hint) =
-            if rng.gen_bool(0.5) && !self.dataset.sort_keys.is_empty() {
-                // Sort keys exist and random to push down
-                let sort_exprs = self
-                    .dataset
-                    .sort_keys
-                    .iter()
-                    .map(|key| col(key).sort(true, true))
-                    .collect::<Vec<_>>();
-                (provider.with_sort_order(vec![sort_exprs]), true)
-            } else {
-                (provider, false)
-            };
+        // println!("self.dataset.sort_keys123.:{:?}", self.dataset.sort_keys);
+
+        let (provider, sort_hint) = if !self.dataset.sort_keys.is_empty() {
+            // if rng.gen_bool(0.5) && !self.dataset.sort_keys.is_empty() {
+            // Sort keys exist and random to push down
+            let sort_exprs = self
+                .dataset
+                .sort_keys
+                .iter()
+                .map(|key| col(key).sort(true, true))
+                .collect::<Vec<_>>();
+            (provider.with_sort_order(vec![sort_exprs]), true)
+        } else {
+            (provider, false)
+        };
 
         let builder = GeneratedSessionContextBuilder {
             batch_size,

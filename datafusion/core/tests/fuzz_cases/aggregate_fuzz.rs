@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use crate::fuzz_cases::aggregation_fuzzer::{
-    AggregationFuzzerBuilder, DatasetGeneratorConfig, QueryBuilder,
+    AggregationFuzzerBuilder, ColumnDescr, DatasetGeneratorConfig, QueryBuilder,
 };
 
 use arrow::array::{
@@ -237,11 +237,41 @@ async fn test_distinct_only_query() {
         .set_group_by_columns(data_gen_config.all_columns());
 
     AggregationFuzzerBuilder::from(data_gen_config)
-        .add_distinct_query(query_builder)
-        // .add_query_builder(query_builder)
+        .add_distinct_query(&query_builder)
+        .add_multi_group_query(&query_builder)
         .build()
         .run()
         .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_distinct_only_ordering_query() {
+    let mut rng = thread_rng();
+    let rows_num_range = (512, 1024);
+
+    let columns = get_supported_types_columns(rng.gen());
+
+    for column in columns {
+        let sort_key = column.name.to_string();
+        let data_gen_config = DatasetGeneratorConfig {
+            columns: vec![column],
+            rows_num_range,
+            sort_keys_set: vec![vec![sort_key]],
+        };
+
+        // Queries like SELECT median(a), median(distinct) FROM fuzz_table GROUP BY b
+        let query_builder = QueryBuilder::new()
+            .with_table_name("fuzz_table")
+            // median only works on numeric columns
+            .with_aggregate_arguments(data_gen_config.all_columns())
+            .set_group_by_columns(data_gen_config.all_columns());
+
+        AggregationFuzzerBuilder::from(data_gen_config)
+            .add_distinct_query(&query_builder)
+            .build()
+            .run()
+            .await;
+    }
 }
 
 /// Return a standard set of columns for testing data generation

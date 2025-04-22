@@ -1075,7 +1075,7 @@ impl<const STREAMING: bool> GroupValues for GroupValuesColumn<STREAMING> {
         todo!()
     }
 
-    fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()> {
+    fn remove_for_no_aggregate_case(&mut self, _n: usize) -> Result<()> {
         todo!()
     }
 

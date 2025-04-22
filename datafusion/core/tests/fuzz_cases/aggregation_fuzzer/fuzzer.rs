@@ -63,8 +63,14 @@ impl AggregationFuzzerBuilder {
         }
     }
 
-    pub fn add_distinct_query(mut self, query_builder: QueryBuilder) -> Self {
+    pub fn add_distinct_query(mut self, query_builder: &QueryBuilder) -> Self {
         let sql = query_builder.generate_distinct_query();
+        self.candidate_sqls.push(Arc::from(sql));
+        self.table_name(query_builder.table_name())
+    }
+
+    pub fn add_multi_group_query(mut self, query_builder: &QueryBuilder) -> Self {
+        let sql = query_builder.generate_multi_group_query();
         self.candidate_sqls.push(Arc::from(sql));
         self.table_name(query_builder.table_name())
     }
@@ -231,10 +237,6 @@ impl AggregationFuzzer {
         &self,
         query_groups: Vec<QueryGroup>,
     ) -> Vec<AggregationFuzzTestTask> {
-        let mut query_groups = query_groups;
-        let query_groups = query_groups.swap_remove(0);
-        let query_groups = vec![query_groups];
-
         let mut tasks = Vec::with_capacity(query_groups.len() * CTX_GEN_ROUNDS);
         for QueryGroup { dataset, sql } in query_groups {
             let dataset_ref = Arc::new(dataset);
@@ -462,7 +464,7 @@ impl QueryBuilder {
     }
 
     pub fn generate_query(&self) -> String {
-        let group_by = self.random_group_by();
+        let group_by = self.random_group_by(None);
         let mut query = String::from("SELECT ");
         query.push_str(&group_by.join(", "));
         if !group_by.is_empty() {
@@ -484,6 +486,15 @@ impl QueryBuilder {
             "SELECT DISTINCT({}) as r FROM {} ORDER BY r",
             self.random_argument(),
             self.table_name
+        )
+    }
+
+    // select a from table group by a, b;
+    pub fn generate_multi_group_query(&self) -> String {
+        let group_by_cols = self.random_group_by(Some(2));
+        format!(
+            "SELECT {} as r FROM {} GROUP BY {}, {} ORDER BY r",
+            group_by_cols[0], self.table_name, group_by_cols[0], group_by_cols[1]
         )
     }
 
@@ -588,11 +599,16 @@ impl QueryBuilder {
     ///
     /// Limited to 3 group by columns to ensure coverage for large groups. With
     /// larger numbers of columns, each group has many fewer values.
-    fn random_group_by(&self) -> Vec<String> {
+    fn random_group_by(&self, min_groups: Option<usize>) -> Vec<String> {
         let mut rng = thread_rng();
         const MAX_GROUPS: usize = 3;
         let max_groups = self.group_by_columns.len().max(MAX_GROUPS);
-        let num_group_by = rng.gen_range(1..max_groups);
+        let mut num_group_by = rng.gen_range(1..max_groups);
+        if let Some(min_groups) = min_groups {
+            if num_group_by < min_groups {
+                num_group_by = min_groups;
+            }
+        }
 
         let mut already_used = HashSet::new();
         let mut group_by = vec![];

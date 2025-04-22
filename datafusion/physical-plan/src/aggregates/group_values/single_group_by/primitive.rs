@@ -170,6 +170,7 @@ where
         let null_idx = self.null_group.take();
 
         let values_len = values.len();
+        // TODO: avoid this clone?
         let required_values = values
             .iter()
             .skip(self.emit_starting_index)
@@ -194,7 +195,6 @@ where
     }
 
     fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()> {
-        todo!("not suppported yet");
         if n == 0 {
             return Ok(());
         }

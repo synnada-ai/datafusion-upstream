@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::vec;
 
-use crate::aggregates::group_values::{new_group_values, GroupValues};
+use crate::aggregates::group_values::{multi_group_by, new_group_values, GroupValues};
 use crate::aggregates::order::GroupOrderingFull;
 use crate::aggregates::{
     create_schema, evaluate_group_by, evaluate_many, evaluate_optional, AggregateMode,
@@ -463,7 +463,6 @@ impl GroupedHashAggregateStream {
             &agg.mode,
             agg_group_by.num_group_exprs(),
         )?;
-        let has_no_aggregate_expression = aggregate_arguments.is_empty();
         // arguments for aggregating spilled data is the same as the one for final aggregation
         let merging_aggregate_arguments = aggregates::aggregate_expressions(
             &agg.aggr_expr,
@@ -545,6 +544,10 @@ impl GroupedHashAggregateStream {
             &agg.input_order_mode,
             ordering.as_ref(),
         )?;
+        let multi_group_mode = group_schema.fields().len() > 1
+            && multi_group_by::supported_schema(&group_schema);
+        let has_no_aggregate_expression =
+            aggregate_arguments.is_empty() && !multi_group_mode;
 
         let group_values = new_group_values(group_schema, &group_ordering)?;
         timer.done();
@@ -811,7 +814,6 @@ impl GroupedHashAggregateStream {
                                 continue;
                             }
 
-                            // println!("batch4: {:?}", batch);
                             let timer = elapsed_compute.timer();
 
                             // Do the grouping

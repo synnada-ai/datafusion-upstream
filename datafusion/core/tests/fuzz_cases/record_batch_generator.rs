@@ -17,7 +17,10 @@
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, RecordBatch};
+use arrow::array::{
+    ArrayRef, AsArray, DictionaryArray, PrimitiveArray, RecordBatch,
+    StringDictionaryBuilder,
+};
 use arrow::datatypes::{
     BooleanType, DataType, Date32Type, Date64Type, Decimal128Type, Decimal256Type, Field,
     Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
@@ -108,6 +111,10 @@ pub fn get_supported_types_columns(rng_seed: u64) -> Vec<ColumnDescr> {
         ColumnDescr::new("binary", DataType::Binary),
         ColumnDescr::new("large_binary", DataType::LargeBinary),
         ColumnDescr::new("binaryview", DataType::BinaryView),
+        ColumnDescr::new(
+            "dict_i32_utf8",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+        ),
     ]
 }
 
@@ -293,7 +300,7 @@ impl RecordBatchGenerator {
             .map(|max| num_distinct.min(max))
             .unwrap_or(num_distinct);
 
-        match col.column_type {
+        match &col.column_type {
             DataType::Int8 => {
                 generate_primitive_array!(
                     self,
@@ -567,6 +574,9 @@ impl RecordBatchGenerator {
                 }
             }
             DataType::Decimal128(precision, scale) => {
+                let precision = precision.to_owned();
+                let scale = scale.to_owned();
+
                 generate_decimal_array!(
                     self,
                     num_rows,
@@ -579,6 +589,9 @@ impl RecordBatchGenerator {
                 )
             }
             DataType::Decimal256(precision, scale) => {
+                let precision = precision.to_owned();
+                let scale = scale.to_owned();
+
                 generate_decimal_array!(
                     self,
                     num_rows,
@@ -599,6 +612,36 @@ impl RecordBatchGenerator {
                     array_gen_rng,
                     BooleanType
                 }
+            }
+            // TODO: support other types in general way
+            DataType::Dictionary(k, v)
+                if matches!(k.as_ref(), &DataType::Int32)
+                    && matches!(v.as_ref(), &DataType::Utf8) =>
+            {
+                let value_col = ColumnDescr {
+                    name: "value".to_string(),
+                    column_type: DataType::Utf8,
+                    max_num_distinct: col.max_num_distinct,
+                };
+                let value_array = self.generate_array_of_type(
+                    &value_col,
+                    num_rows,
+                    batch_gen_rng,
+                    array_gen_rng,
+                );
+                let value_array = value_array.as_string::<i32>();
+
+                let mut builder = StringDictionaryBuilder::<Int32Type>::new();
+                for v in value_array {
+                    if let Some(v) = v {
+                        builder.append_value(v);
+                    } else {
+                        builder.append_null();
+                    }
+                }
+
+                let array = builder.finish();
+                Arc::new(array)
             }
             _ => {
                 panic!("Unsupported data generator type: {}", col.column_type)

@@ -147,7 +147,7 @@ impl DatasetGenerator {
         let base_batch = self.batch_generator.generate()?;
         let batches = stagger_batch(base_batch.clone());
         let dataset = Dataset::new(batches, Vec::new());
-        datasets.push(dataset);
+        // datasets.push(dataset);
 
         // Generate the related sorted batches
         let schema = base_batch.schema_ref();
