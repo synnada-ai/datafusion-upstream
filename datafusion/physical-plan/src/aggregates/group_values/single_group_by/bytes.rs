@@ -110,7 +110,7 @@ impl<O: OffsetSizeTrait> GroupValues for GroupValuesByes<O> {
         let mut group_indexes = vec![];
         self.intern(&[remaining_group_values], &mut group_indexes)?;
         // Verify that the group indexes were assigned in the correct order
-        assert_eq!(0, group_indexes[0]);
+        debug_assert_eq!(0, group_indexes[0]);
         self.emit_starting_index -= n;
         Ok(())
     }
@@ -142,7 +142,7 @@ impl<O: OffsetSizeTrait> GroupValues for GroupValuesByes<O> {
                 self.intern(&[remaining_group_values], &mut group_indexes)?;
 
                 // Verify that the group indexes were assigned in the correct order
-                assert_eq!(0, group_indexes[0]);
+                debug_assert_eq!(0, group_indexes[0]);
 
                 emit_group_values
             }

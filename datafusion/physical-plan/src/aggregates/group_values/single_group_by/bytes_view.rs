@@ -112,7 +112,7 @@ impl GroupValues for GroupValuesBytesView {
                 self.intern(&[remaining_group_values], &mut group_indexes)?;
 
                 // Verify that the group indexes were assigned in the correct order
-                assert_eq!(0, group_indexes[0]);
+                debug_assert_eq!(0, group_indexes[0]);
 
                 emit_group_values
             }
@@ -134,7 +134,6 @@ impl GroupValues for GroupValuesBytesView {
         }
 
         let map = self.map.take();
-        // TODO: optimize this, clone only we need
         let map_contents = map.state();
 
         let emit_group_values = map_contents.slice(
@@ -153,7 +152,7 @@ impl GroupValues for GroupValuesBytesView {
         let mut group_indexes = vec![];
         self.intern(&[remaining_group_values], &mut group_indexes)?;
         // Verify that the group indexes were assigned in the correct order
-        assert_eq!(0, group_indexes[0]);
+        debug_assert_eq!(0, group_indexes[0]);
         debug_assert!(
             self.emit_starting_index >= n,
             "emit_starting_index: {}, n: {}",
