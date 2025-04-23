@@ -19,7 +19,9 @@
 //! StringArray / LargeStringArray / BinaryArray / LargeBinaryArray.
 
 use ahash::RandomState;
+use arrow::array::BooleanArray;
 use arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
+use arrow::compute::filter;
 use arrow::datatypes::DataType;
 use arrow::{
     array::{
@@ -32,6 +34,8 @@ use arrow::{
 };
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::utils::proxy::{HashTableAllocExt, VecAllocExt};
+use datafusion_common::DataFusionError;
+use datafusion_common::{arrow_datafusion_err, Result};
 use std::any::type_name;
 use std::fmt::Debug;
 use std::mem::{size_of, swap};
@@ -330,6 +334,44 @@ where
         };
     }
 
+    pub fn insert_if_new_for_deduplication_query<MP, OP>(
+        &mut self,
+        values: &ArrayRef,
+        make_payload_fn: MP,
+        observe_payload_fn: OP,
+    ) -> Result<ArrayRef>
+    where
+        MP: FnMut(Option<&[u8]>) -> V,
+        OP: FnMut(V),
+    {
+        // Sanity array type
+        match self.output_type {
+            OutputType::Binary => {
+                assert!(matches!(
+                    values.data_type(),
+                    DataType::Binary | DataType::LargeBinary
+                ));
+                self.insert_if_new_inner_for_deduplication_query::<MP, OP, GenericBinaryType<O>>(
+                    values,
+                    make_payload_fn,
+                    observe_payload_fn,
+                )
+            }
+            OutputType::Utf8 => {
+                assert!(matches!(
+                    values.data_type(),
+                    DataType::Utf8 | DataType::LargeUtf8
+                ));
+                self.insert_if_new_inner_for_deduplication_query::<MP, OP, GenericStringType<O>>(
+                    values,
+                    make_payload_fn,
+                    observe_payload_fn,
+                )
+            }
+            _ => unreachable!("View types should use `ArrowBytesViewMap`"),
+        }
+    }
+
     /// Generic version of [`Self::insert_if_new`] that handles `ByteArrayType`
     /// (both String and Binary)
     ///
@@ -477,6 +519,162 @@ where
                 type_name::<O>()
             );
         }
+    }
+
+    fn insert_if_new_inner_for_deduplication_query<MP, OP, B>(
+        &mut self,
+        values: &ArrayRef,
+        mut make_payload_fn: MP,
+        mut observe_payload_fn: OP,
+    ) -> Result<ArrayRef>
+    where
+        MP: FnMut(Option<&[u8]>) -> V,
+        OP: FnMut(V),
+        B: ByteArrayType,
+    {
+        // step 1: compute hashes
+        let batch_hashes = &mut self.hashes_buffer;
+        batch_hashes.clear();
+        batch_hashes.resize(values.len(), 0);
+        create_hashes(&[Arc::clone(values)], &self.random_state, batch_hashes)
+            // hash is supported for all types and create_hashes only
+            // returns errors for unsupported types
+            .unwrap();
+
+        // step 2: insert each value into the set, if not already present
+        let values = values.as_bytes::<B>();
+
+        // Ensure lengths are equivalent
+        debug_assert_eq!(values.len(), batch_hashes.len());
+
+        let mut new_keys = Vec::with_capacity(values.len());
+
+        for (value, &hash) in values.iter().zip(batch_hashes.iter()) {
+            // handle null value
+            let Some(value) = value else {
+                let payload = if let Some(&(payload, _offset)) = self.null.as_ref() {
+                    new_keys.push(false);
+                    payload
+                } else {
+                    new_keys.push(true);
+                    let payload = make_payload_fn(None);
+                    let null_index = self.offsets.len() - 1;
+                    // nulls need a zero length in the offset buffer
+                    let offset = self.buffer.len();
+                    self.offsets.push(O::usize_as(offset));
+                    self.null = Some((payload, null_index));
+                    payload
+                };
+                observe_payload_fn(payload);
+                continue;
+            };
+
+            // get the value as bytes
+            let value: &[u8] = value.as_ref();
+            let value_len = O::usize_as(value.len());
+
+            // value is "small"
+            let payload = if value.len() <= SHORT_VALUE_LEN {
+                let inline = value.iter().fold(0usize, |acc, &x| (acc << 8) | x as usize);
+
+                // is value is already present in the set?
+                let entry = self.map.find_mut(hash, |header| {
+                    // compare value if hashes match
+                    if header.len != value_len {
+                        return false;
+                    }
+                    // value is stored inline so no need to consult buffer
+                    // (this is the "small string optimization")
+                    inline == header.offset_or_inline
+                });
+
+                if let Some(entry) = entry {
+                    new_keys.push(false);
+                    entry.payload
+                }
+                // if no existing entry, make a new one
+                else {
+                    new_keys.push(true);
+
+                    // Put the small values into buffer and offsets so it appears
+                    // the output array, but store the actual bytes inline for
+                    // comparison
+                    self.buffer.append_slice(value);
+                    self.offsets.push(O::usize_as(self.buffer.len()));
+                    let payload = make_payload_fn(Some(value));
+                    let new_header = Entry {
+                        hash,
+                        len: value_len,
+                        offset_or_inline: inline,
+                        payload,
+                    };
+                    self.map.insert_accounted(
+                        new_header,
+                        |header| header.hash,
+                        &mut self.map_size,
+                    );
+                    payload
+                }
+            }
+            // value is not "small"
+            else {
+                // Check if the value is already present in the set
+                let entry = self.map.find_mut(hash, |header| {
+                    // compare value if hashes match
+                    if header.len != value_len {
+                        return false;
+                    }
+                    // Need to compare the bytes in the buffer
+                    // SAFETY: buffer is only appended to, and we correctly inserted values and offsets
+                    let existing_value =
+                        unsafe { self.buffer.as_slice().get_unchecked(header.range()) };
+                    value == existing_value
+                });
+
+                if let Some(entry) = entry {
+                    new_keys.push(false);
+                    entry.payload
+                }
+                // if no existing entry, make a new one
+                else {
+                    new_keys.push(true);
+
+                    // Put the small values into buffer and offsets so it
+                    // appears the output array, and store that offset
+                    // so the bytes can be compared if needed
+                    let offset = self.buffer.len(); // offset of start for data
+                    self.buffer.append_slice(value);
+                    self.offsets.push(O::usize_as(self.buffer.len()));
+
+                    let payload = make_payload_fn(Some(value));
+                    let new_header = Entry {
+                        hash,
+                        len: value_len,
+                        offset_or_inline: offset,
+                        payload,
+                    };
+                    self.map.insert_accounted(
+                        new_header,
+                        |header| header.hash,
+                        &mut self.map_size,
+                    );
+                    payload
+                }
+            };
+            observe_payload_fn(payload);
+        }
+        // Check for overflow in offsets (if more data was sent than can be represented)
+        if O::from_usize(self.buffer.len()).is_none() {
+            panic!(
+                "Put {} bytes in buffer, more than can be represented by a {}",
+                self.buffer.len(),
+                type_name::<O>()
+            );
+        }
+
+        debug_assert_eq!(new_keys.len(), values.len());
+        let predicate = BooleanArray::from(new_keys);
+        filter(values, &predicate).map_err(|e| arrow_datafusion_err!(e))
     }
 
     /// Converts this set into a `StringArray`, `LargeStringArray`,

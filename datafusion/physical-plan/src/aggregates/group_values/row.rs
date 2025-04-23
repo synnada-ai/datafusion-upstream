@@ -17,12 +17,13 @@
 
 use crate::aggregates::group_values::GroupValues;
 use ahash::RandomState;
-use arrow::array::{Array, ArrayRef, ListArray, RecordBatch, StructArray};
-use arrow::compute::cast;
+use arrow::array::{Array, ArrayRef, BooleanArray, ListArray, RecordBatch, StructArray};
+use arrow::compute::{cast, filter};
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::row::{RowConverter, Rows, SortField};
+use datafusion_common::DataFusionError;
 use datafusion_common::hash_utils::create_hashes;
-use datafusion_common::Result;
+use datafusion_common::{arrow_datafusion_err, Result};
 use datafusion_execution::memory_pool::proxy::{HashTableAllocExt, VecAllocExt};
 use datafusion_expr::EmitTo;
 use hashbrown::hash_table::HashTable;
@@ -68,8 +69,6 @@ pub struct GroupValuesRows {
     /// [`Row`]: arrow::row::Row
     group_values: Option<Rows>,
 
-    emit_starting_index: usize,
-
     /// reused buffer to store hashes
     hashes_buffer: Vec<u64>,
 
@@ -109,7 +108,6 @@ impl GroupValuesRows {
             hashes_buffer: Default::default(),
             rows_buffer,
             random_state: Default::default(),
-            emit_starting_index: 0,
         })
     }
 }
@@ -175,6 +173,78 @@ impl GroupValues for GroupValuesRows {
         Ok(())
     }
 
+
+    fn intern_for_deduplication_query(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) -> Result<ArrayRef> {
+        // Convert the group keys into the row format
+        let group_rows = &mut self.rows_buffer;
+        group_rows.clear();
+        self.row_converter.append(group_rows, cols)?;
+        let n_rows = group_rows.num_rows();
+
+        let mut group_values = match self.group_values.take() {
+            Some(group_values) => group_values,
+            None => self.row_converter.empty_rows(0, 0),
+        };
+
+        // tracks to which group each of the input rows belongs
+        groups.clear();
+
+        // 1.1 Calculate the group keys for the group values
+        let batch_hashes = &mut self.hashes_buffer;
+        batch_hashes.clear();
+        batch_hashes.resize(n_rows, 0);
+        create_hashes(cols, &self.random_state, batch_hashes)?;
+
+        debug_assert_eq!(cols.len(), 1);
+        debug_assert_eq!(cols[0].len(), n_rows);
+        debug_assert_eq!(batch_hashes.len(), n_rows);
+        let mut new_keys = Vec::with_capacity(n_rows);
+
+        for (row, &target_hash) in batch_hashes.iter().enumerate() {
+            let entry = self.map.find_mut(target_hash, |(exist_hash, group_idx)| {
+                // Somewhat surprisingly, this closure can be called even if the
+                // hash doesn't match, so check the hash first with an integer
+                // comparison first avoid the more expensive comparison with
+                // group value. https://github.com/apache/datafusion/pull/11718
+                target_hash == *exist_hash
+                    // verify that the group that we are inserting with hash is
+                    // actually the same key value as the group in
+                    // existing_idx  (aka group_values @ row)
+                    && group_rows.row(row) == group_values.row(*group_idx)
+            });
+
+            let group_idx = match entry {
+                // Existing group_index for this group value
+                Some((_hash, group_idx)) => {
+                    new_keys.push(false);
+                    *group_idx
+                }
+                //  1.2 Need to create new entry for the group
+                None => {
+                    new_keys.push(true);
+                    // Add new entry to aggr_state and save newly created index
+                    let group_idx = group_values.num_rows();
+                    group_values.push(group_rows.row(row));
+
+                    // for hasher function, use precomputed hash value
+                    self.map.insert_accounted(
+                        (target_hash, group_idx),
+                        |(hash, _group_index)| *hash,
+                        &mut self.map_size,
+                    );
+                    group_idx
+                }
+            };
+            groups.push(group_idx);
+        }
+
+        self.group_values = Some(group_values);
+
+        debug_assert_eq!(new_keys.len(), n_rows);
+        let predicate = BooleanArray::from(new_keys);
+        filter(&cols[0], &predicate).map_err(|e| arrow_datafusion_err!(e))
+    }
+
     fn size(&self) -> usize {
         let group_values_size = self.group_values.as_ref().map(|v| v.size()).unwrap_or(0);
         self.row_converter.size()
@@ -195,32 +265,32 @@ impl GroupValues for GroupValuesRows {
             .unwrap_or(0)
     }
 
-    fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>> {
-        let group_values = self
-            .group_values
-            .take()
-            .expect("Can not emit from empty rows");
+    // fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>> {
+    //     let group_values = self
+    //         .group_values
+    //         .take()
+    //         .expect("Can not emit from empty rows");
 
-        let group_rows = group_values.iter().skip(self.emit_starting_index);
-        if group_rows.len() == 0 {
-            self.group_values = Some(group_values);
-            return Ok(vec![]);
-        }
+    //     let group_rows = group_values.iter().skip(self.emit_starting_index);
+    //     if group_rows.len() == 0 {
+    //         self.group_values = Some(group_values);
+    //         return Ok(vec![]);
+    //     }
 
-        let mut output = self.row_converter.convert_rows(group_rows)?;
+    //     let mut output = self.row_converter.convert_rows(group_rows)?;
 
-        // TODO: Materialize dictionaries in group keys
-        // https://github.com/apache/datafusion/issues/7647
-        for (field, array) in self.schema.fields.iter().zip(&mut output) {
-            let expected = field.data_type();
-            *array =
-                dictionary_encode_if_necessary(Arc::<dyn Array>::clone(array), expected)?;
-        }
+    //     // TODO: Materialize dictionaries in group keys
+    //     // https://github.com/apache/datafusion/issues/7647
+    //     for (field, array) in self.schema.fields.iter().zip(&mut output) {
+    //         let expected = field.data_type();
+    //         *array =
+    //             dictionary_encode_if_necessary(Arc::<dyn Array>::clone(array), expected)?;
+    //     }
 
-        self.group_values = Some(group_values);
-        self.emit_starting_index += output[0].len();
-        Ok(output)
-    }
+    //     self.group_values = Some(group_values);
+    //     self.emit_starting_index += output[0].len();
+    //     Ok(output)
+    // }
 
     fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()> {
         if n == 0 {
@@ -254,8 +324,6 @@ impl GroupValues for GroupValuesRows {
         });
 
         self.group_values = Some(group_values);
-        debug_assert!(self.emit_starting_index >= n);
-        self.emit_starting_index -= n;
 
         Ok(())
     }

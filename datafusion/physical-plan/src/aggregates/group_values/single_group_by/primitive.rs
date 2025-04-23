@@ -18,13 +18,16 @@
 use crate::aggregates::group_values::GroupValues;
 use ahash::RandomState;
 use arrow::array::types::{IntervalDayTime, IntervalMonthDayNano};
+use arrow::array::BooleanArray;
 use arrow::array::{
     cast::AsArray, ArrayRef, ArrowNativeTypeOp, ArrowPrimitiveType, NullBufferBuilder,
     PrimitiveArray,
 };
+use arrow::compute::filter;
 use arrow::datatypes::{i256, DataType};
 use arrow::record_batch::RecordBatch;
-use datafusion_common::Result;
+use datafusion_common::DataFusionError;
+use datafusion_common::{arrow_datafusion_err, Result};
 use datafusion_execution::memory_pool::proxy::VecAllocExt;
 use datafusion_expr::EmitTo;
 use half::f16;
@@ -92,7 +95,6 @@ pub struct GroupValuesPrimitive<T: ArrowPrimitiveType> {
     values: Vec<T::Native>,
     /// The random state used to generate hashes
     random_state: RandomState,
-    emit_starting_index: usize,
 }
 
 impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
@@ -104,7 +106,6 @@ impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
             values: Vec::with_capacity(128),
             null_group: None,
             random_state: Default::default(),
-            emit_starting_index: 0,
         }
     }
 }
@@ -149,6 +150,61 @@ where
         Ok(())
     }
 
+    fn intern_for_deduplication_query(
+        &mut self,
+        cols: &[ArrayRef],
+        groups: &mut Vec<usize>,
+    ) -> Result<ArrayRef> {
+        assert_eq!(cols.len(), 1);
+        groups.clear();
+
+        let n_rows = cols[0].len();
+        let mut new_keys = Vec::with_capacity(n_rows);
+        for v in cols[0].as_primitive::<T>() {
+            let group_id = match v {
+                None => {
+                    if let Some(null_group) = self.null_group {
+                        new_keys.push(false);
+                        null_group
+                    } else {
+                        new_keys.push(true);
+                        let group_id = self.values.len();
+                        self.values.push(Default::default());
+                        group_id
+                    }
+                }
+                Some(key) => {
+                    let state = &self.random_state;
+                    let hash = key.hash(state);
+                    let insert = self.map.entry(
+                        hash,
+                        |g| unsafe { self.values.get_unchecked(*g).is_eq(key) },
+                        |g| unsafe { self.values.get_unchecked(*g).hash(state) },
+                    );
+
+                    match insert {
+                        hashbrown::hash_table::Entry::Occupied(o) => {
+                            new_keys.push(false);
+                            *o.get()
+                        }
+                        hashbrown::hash_table::Entry::Vacant(v) => {
+                            new_keys.push(true);
+                            let g = self.values.len();
+                            v.insert(g);
+                            self.values.push(key);
+                            g
+                        }
+                    }
+                }
+            };
+            groups.push(group_id)
+        }
+
+        debug_assert_eq!(new_keys.len(), cols[0].len());
+        let predicate = BooleanArray::from(new_keys);
+        filter(&cols[0], &predicate).map_err(|e| arrow_datafusion_err!(e))
+    }
+
     fn size(&self) -> usize {
         self.map.capacity() * size_of::<usize>() + self.values.allocated_size()
     }
@@ -159,38 +215,6 @@ where
 
     fn len(&self) -> usize {
         self.values.len()
-    }
-
-    fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>> {
-        if self.emit_starting_index >= self.values.len() {
-            return Ok(vec![]);
-        }
-
-        let values = std::mem::take(&mut self.values);
-        let null_idx = self.null_group.take();
-
-        let values_len = values.len();
-        let required_values = values
-            .iter()
-            .skip(self.emit_starting_index)
-            .copied()
-            .collect::<Vec<_>>();
-        debug_assert_eq!(required_values.len(), values_len - self.emit_starting_index);
-        let required_null_idx = null_idx.and_then(|null_idx| {
-            if null_idx >= self.emit_starting_index {
-                Some(null_idx - self.emit_starting_index)
-            } else {
-                None
-            }
-        });
-        self.emit_starting_index += required_values.len();
-        let array: PrimitiveArray<T> =
-            build_primitive(required_values, required_null_idx);
-
-        self.values = values;
-        self.null_group = null_idx;
-
-        Ok(vec![Arc::new(array.with_data_type(self.data_type.clone()))])
     }
 
     fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()> {
@@ -221,9 +245,6 @@ where
         };
         let mut split = self.values.split_off(n);
         std::mem::swap(&mut self.values, &mut split);
-
-        debug_assert!(self.emit_starting_index >= n);
-        self.emit_starting_index -= n;
 
         Ok(())
     }

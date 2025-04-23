@@ -38,7 +38,7 @@ use crate::{RecordBatchStream, SendableRecordBatchStream};
 use arrow::array::*;
 use arrow::compute::SortOptions;
 use arrow::datatypes::SchemaRef;
-use datafusion_common::{internal_err, not_impl_err, DataFusionError, Result};
+use datafusion_common::{internal_err, DataFusionError, Result};
 use datafusion_execution::disk_manager::RefCountedTempFile;
 use datafusion_execution::memory_pool::proxy::VecAllocExt;
 use datafusion_execution::memory_pool::{MemoryConsumer, MemoryReservation};
@@ -433,7 +433,8 @@ pub(crate) struct GroupedHashAggregateStream {
     /// Execution metrics
     baseline_metrics: BaselineMetrics,
 
-    has_no_aggregate_expression: bool,
+    /// Is query like SELECT DISTINCT() FROM ...
+    is_deduplication_query: bool,
 }
 
 impl GroupedHashAggregateStream {
@@ -621,7 +622,7 @@ impl GroupedHashAggregateStream {
             spill_state,
             group_values_soft_limit: agg.limit,
             skip_aggregation_probe,
-            has_no_aggregate_expression,
+            is_deduplication_query: has_no_aggregate_expression,
         })
     }
 
@@ -647,7 +648,7 @@ impl GroupedHashAggregateStream {
 
                             // If we can begin emitting rows, do so,
                             // otherwise keep consuming input
-                            assert!(!self.input_done);
+                            debug_assert!(!self.input_done);
 
                             // If the number of group values equals or exceeds the soft limit,
                             // emit all groups and switch to producing output
@@ -796,7 +797,7 @@ impl GroupedHashAggregateStream {
         }
     }
 
-    fn poll_inner_no_aggregate_case(
+    fn poll_inner_deduplication_query_case(
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<RecordBatch>>> {
@@ -807,8 +808,9 @@ impl GroupedHashAggregateStream {
                 ExecutionState::ReadingInput => {
                     match ready!(self.input.poll_next_unpin(cx)) {
                         // New batch to aggregate in partial aggregation operator
-                        Some(Ok(batch)) => {
-                            if batch.num_rows() == 0 {
+                        Some(Ok(batch)) if self.mode == AggregateMode::Partial => {
+                            let input_rows = batch.num_rows();
+                            if input_rows == 0 {
                                 // Empty record batches should not be emitted.
                                 // They need to be treated as  [`Option<RecordBatch>`]es and handled separately
                                 continue;
@@ -817,17 +819,66 @@ impl GroupedHashAggregateStream {
                             let timer = elapsed_compute.timer();
 
                             // Do the grouping
-                            self.group_aggregate_batch(batch)?;
+                            let outputs = self
+                                .group_aggregate_batch_for_deduplication_query(batch)?;
+
+                            self.update_skip_aggregation_probe(input_rows);
 
                             // If we can begin emitting rows, do so,
                             // otherwise keep consuming input
-                            assert!(!self.input_done);
+                            debug_assert!(!self.input_done);
+
+                            // grouping set not supported
+                            debug_assert_eq!(outputs.len(), 1);
+                            let batch = RecordBatch::try_new(self.schema(), outputs)?;
+                            if batch.num_rows() == 0 {
+                                continue;
+                            }
+                            self.exec_state = ExecutionState::ProducingOutput(batch);
 
                             timer.done();
 
-                            if let Some(batch) = self.emit_for_no_aggregate_case()? {
-                                self.exec_state = ExecutionState::ProducingOutput(batch);
+                            if let Some(EmitTo::First(n)) = self.group_ordering.emit_to()
+                            {
+                                self.remove_for_no_aggregate_case(n)?;
                             }
+
+                            self.switch_to_skip_aggregation()?;
+                        }
+
+                        // New batch to aggregate in terminal aggregation operator
+                        // (Final/FinalPartitioned/Single/SinglePartitioned)
+                        Some(Ok(batch)) => {
+                            let input_rows = batch.num_rows();
+                            if input_rows == 0 {
+                                // Empty record batches should not be emitted.
+                                // They need to be treated as  [`Option<RecordBatch>`]es and handled separately
+                                continue;
+                            }
+
+                            let timer = elapsed_compute.timer();
+
+                            // TODO: support spill
+                            // Make sure we have enough capacity for `batch`, otherwise spill
+                            // self.spill_previous_if_necessary(&batch)?;
+
+                            // Do the grouping
+                            let outputs = self
+                                .group_aggregate_batch_for_deduplication_query(batch)?;
+
+                            // If we can begin emitting rows, do so,
+                            // otherwise keep consuming input
+                            debug_assert!(!self.input_done);
+
+                            // grouping set not supported
+                            debug_assert_eq!(outputs.len(), 1);
+                            let batch = RecordBatch::try_new(self.schema(), outputs)?;
+                            if batch.num_rows() == 0 {
+                                continue;
+                            }
+                            self.exec_state = ExecutionState::ProducingOutput(batch);
+
+                            timer.done();
 
                             if let Some(EmitTo::First(n)) = self.group_ordering.emit_to()
                             {
@@ -850,9 +901,26 @@ impl GroupedHashAggregateStream {
                 }
 
                 ExecutionState::SkippingAggregation => {
-                    return Poll::Ready(Some(not_impl_err!(
-                        "Skipping aggregation is not supported for no aggregate case"
-                    )));
+                    match ready!(self.input.poll_next_unpin(cx)) {
+                        Some(Ok(batch)) => {
+                            let _timer = elapsed_compute.timer();
+                            if let Some(probe) = self.skip_aggregation_probe.as_mut() {
+                                probe.record_skipped(&batch);
+                            }
+                            let states = self.transform_to_states(batch)?;
+                            return Poll::Ready(Some(Ok(
+                                states.record_output(&self.baseline_metrics)
+                            )));
+                        }
+                        Some(Err(e)) => {
+                            // inner had error, return to caller
+                            return Poll::Ready(Some(Err(e)));
+                        }
+                        None => {
+                            // inner is done, switching to `Done` state
+                            self.exec_state = ExecutionState::Done;
+                        }
+                    }
                 }
 
                 ExecutionState::ProducingOutput(batch) => {
@@ -923,8 +991,8 @@ impl Stream for GroupedHashAggregateStream {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        if self.has_no_aggregate_expression {
-            self.poll_inner_no_aggregate_case(cx)
+        if self.is_deduplication_query {
+            self.poll_inner_deduplication_query_case(cx)
         } else {
             self.poll_inner_normal_case(cx)
         }
@@ -1029,6 +1097,106 @@ impl GroupedHashAggregateStream {
         }
     }
 
+    fn group_aggregate_batch_for_deduplication_query(
+        &mut self,
+        batch: RecordBatch,
+    ) -> Result<Vec<ArrayRef>> {
+        // Evaluate the grouping expressions
+        let group_by_values = if self.spill_state.is_stream_merging {
+            evaluate_group_by(&self.spill_state.merging_group_by, &batch)?
+        } else {
+            evaluate_group_by(&self.group_by, &batch)?
+        };
+
+        // Evaluate the aggregation expressions.
+        let input_values = if self.spill_state.is_stream_merging {
+            evaluate_many(&self.spill_state.merging_aggregate_arguments, &batch)?
+        } else {
+            evaluate_many(&self.aggregate_arguments, &batch)?
+        };
+
+        // Evaluate the filter expressions, if any, against the inputs
+        let filter_values = if self.spill_state.is_stream_merging {
+            let filter_expressions = vec![None; self.accumulators.len()];
+            evaluate_optional(&filter_expressions, &batch)?
+        } else {
+            evaluate_optional(&self.filter_expressions, &batch)?
+        };
+
+        let mut aggregate_outputs = Vec::with_capacity(group_by_values.len());
+
+        for group_values in &group_by_values {
+            // calculate the group indices for each input row
+            let starting_num_groups = self.group_values.len();
+            let output = self.group_values.intern_for_deduplication_query(
+                group_values,
+                &mut self.current_group_indices,
+            )?;
+            aggregate_outputs.push(output);
+
+            let group_indices = &self.current_group_indices;
+
+            // Update ordering information if necessary
+            let total_num_groups = self.group_values.len();
+            if total_num_groups > starting_num_groups {
+                self.group_ordering.new_groups(
+                    group_values,
+                    group_indices,
+                    total_num_groups,
+                )?;
+            }
+
+            // Gather the inputs to call the actual accumulator
+            let t = self
+                .accumulators
+                .iter_mut()
+                .zip(input_values.iter())
+                .zip(filter_values.iter());
+
+            for ((acc, values), opt_filter) in t {
+                let opt_filter = opt_filter.as_ref().map(|filter| filter.as_boolean());
+
+                // Call the appropriate method on each aggregator with
+                // the entire input row and the relevant group indexes
+                match self.mode {
+                    AggregateMode::Partial
+                    | AggregateMode::Single
+                    | AggregateMode::SinglePartitioned
+                        if !self.spill_state.is_stream_merging =>
+                    {
+                        acc.update_batch(
+                            values,
+                            group_indices,
+                            opt_filter,
+                            total_num_groups,
+                        )?;
+                    }
+                    _ => {
+                        if opt_filter.is_some() {
+                            return internal_err!("aggregate filter should be applied in partial stage, there should be no filter in final stage");
+                        }
+
+                        // if aggregation is over intermediate states,
+                        // use merge
+                        acc.merge_batch(values, group_indices, None, total_num_groups)?;
+                    }
+                }
+            }
+        }
+
+        match self.update_memory_reservation() {
+            // Here we can ignore `insufficient_capacity_err` because we will spill later,
+            // but at least one batch should fit in the memory
+            Err(DataFusionError::ResourcesExhausted(_))
+                if self.group_values.len() >= self.batch_size => {}
+            other => {
+                other?;
+            }
+        }
+
+        Ok(aggregate_outputs)
+    }
+
     fn update_memory_reservation(&mut self) -> Result<()> {
         let acc = self.accumulators.iter().map(|x| x.size()).sum::<usize>();
         let reservation_result = self.reservation.try_resize(
@@ -1044,20 +1212,6 @@ impl GroupedHashAggregateStream {
         }
 
         reservation_result
-    }
-
-    fn emit_for_no_aggregate_case(&mut self) -> Result<Option<RecordBatch>> {
-        if self.group_values.is_empty() {
-            return Ok(None);
-        }
-
-        let output = self.group_values.emit_for_no_aggregate_case()?;
-        if output.is_empty() {
-            return Ok(None);
-        }
-        let batch = RecordBatch::try_new(self.schema(), output)?;
-        debug_assert!(batch.num_rows() > 0);
-        Ok(Some(batch))
     }
 
     fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()> {

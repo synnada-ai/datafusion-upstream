@@ -1054,6 +1054,14 @@ impl<const STREAMING: bool> GroupValues for GroupValuesColumn<STREAMING> {
         }
     }
 
+    fn intern_for_deduplication_query(
+        &mut self,
+        _cols: &[ArrayRef],
+        _groups: &mut Vec<usize>,
+    ) -> Result<ArrayRef> {
+        todo!()
+    }
+
     fn size(&self) -> usize {
         let group_values_size: usize = self.group_values.iter().map(|v| v.size()).sum();
         group_values_size + self.map_size + self.hashes_buffer.allocated_size()
@@ -1069,10 +1077,6 @@ impl<const STREAMING: bool> GroupValues for GroupValuesColumn<STREAMING> {
         }
 
         self.group_values[0].len()
-    }
-
-    fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>> {
-        todo!()
     }
 
     fn remove_for_no_aggregate_case(&mut self, _n: usize) -> Result<()> {

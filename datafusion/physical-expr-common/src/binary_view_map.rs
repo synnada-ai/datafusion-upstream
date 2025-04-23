@@ -21,10 +21,12 @@
 //! [`GenericByteViewBuilder`].
 use ahash::RandomState;
 use arrow::array::cast::AsArray;
-use arrow::array::{Array, ArrayBuilder, ArrayRef, GenericByteViewBuilder};
+use arrow::array::{Array, ArrayBuilder, ArrayRef, BooleanArray, GenericByteViewBuilder};
+use arrow::compute::filter;
 use arrow::datatypes::{BinaryViewType, ByteViewType, DataType, StringViewType};
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::utils::proxy::{HashTableAllocExt, VecAllocExt};
+use datafusion_common::{arrow_datafusion_err, DataFusionError, Result};
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -221,6 +223,38 @@ where
         };
     }
 
+    pub fn insert_if_new_for_deduplication_query<MP, OP>(
+        &mut self,
+        values: &ArrayRef,
+        make_payload_fn: MP,
+        observe_payload_fn: OP,
+    ) -> Result<ArrayRef>
+    where
+        MP: FnMut(Option<&[u8]>) -> V,
+        OP: FnMut(V),
+    {
+        // Sanity check array type
+        match self.output_type {
+            OutputType::BinaryView => {
+                assert!(matches!(values.data_type(), DataType::BinaryView));
+                self.insert_if_new_inner_for_deduplication_query::<MP, OP, BinaryViewType>(
+                    values,
+                    make_payload_fn,
+                    observe_payload_fn,
+                )
+            }
+            OutputType::Utf8View => {
+                assert!(matches!(values.data_type(), DataType::Utf8View));
+                self.insert_if_new_inner_for_deduplication_query::<MP, OP, StringViewType>(
+                    values,
+                    make_payload_fn,
+                    observe_payload_fn,
+                )
+            }
+            _ => unreachable!("Utf8/Binary should use `ArrowBytesSet`"),
+        }
+    }
+
     /// Generic version of [`Self::insert_if_new`] that handles `ByteViewType`
     /// (both StringView and BinaryView)
     ///
@@ -304,6 +338,94 @@ where
             };
             observe_payload_fn(payload);
         }
+    }
+
+    fn insert_if_new_inner_for_deduplication_query<MP, OP, B>(
+        &mut self,
+        values: &ArrayRef,
+        mut make_payload_fn: MP,
+        mut observe_payload_fn: OP,
+    ) -> Result<ArrayRef>
+    where
+        MP: FnMut(Option<&[u8]>) -> V,
+        OP: FnMut(V),
+        B: ByteViewType,
+    {
+        // step 1: compute hashes
+        let batch_hashes = &mut self.hashes_buffer;
+        batch_hashes.clear();
+        batch_hashes.resize(values.len(), 0);
+        create_hashes(&[Arc::clone(values)], &self.random_state, batch_hashes)
+            // hash is supported for all types and create_hashes only
+            // returns errors for unsupported types
+            .unwrap();
+
+        // step 2: insert each value into the set, if not already present
+        let values = values.as_byte_view::<B>();
+
+        // Ensure lengths are equivalent
+        debug_assert_eq!(values.len(), batch_hashes.len());
+
+        let mut new_keys = Vec::with_capacity(values.len());
+
+        for (value, &hash) in values.iter().zip(batch_hashes.iter()) {
+            // handle null value
+            let Some(value) = value else {
+                let payload = if let Some(&(payload, _offset)) = self.null.as_ref() {
+                    new_keys.push(false);
+                    payload
+                } else {
+                    new_keys.push(true);
+                    let payload = make_payload_fn(None);
+                    let null_index = self.builder.len();
+                    self.builder.append_null();
+                    self.null = Some((payload, null_index));
+                    payload
+                };
+                observe_payload_fn(payload);
+                continue;
+            };
+
+            // get the value as bytes
+            let value: &[u8] = value.as_ref();
+
+            let entry = self.map.find_mut(hash, |header| {
+                let v = self.builder.get_value(header.view_idx);
+
+                if v.len() != value.len() {
+                    return false;
+                }
+
+                v == value
+            });
+
+            let payload = if let Some(entry) = entry {
+                new_keys.push(false);
+                entry.payload
+            } else {
+                new_keys.push(true);
+                // no existing value, make a new one.
+                let payload = make_payload_fn(Some(value));
+
+                let inner_view_idx = self.builder.len();
+                let new_header = Entry {
+                    view_idx: inner_view_idx,
+                    hash,
+                    payload,
+                };
+
+                self.builder.append_value(value);
+
+                self.map
+                    .insert_accounted(new_header, |h| h.hash, &mut self.map_size);
+                payload
+            };
+            observe_payload_fn(payload);
+        }
+
+        debug_assert_eq!(new_keys.len(), values.len());
+        let predicate = BooleanArray::from(new_keys);
+        filter(values, &predicate).map_err(|e| arrow_datafusion_err!(e))
     }
 
     /// Converts this set into a `StringViewArray`, or `BinaryViewArray`,

@@ -31,7 +31,6 @@ pub struct GroupValuesByes<O: OffsetSizeTrait> {
     map: ArrowBytesMap<O, usize>,
     /// The total number of groups so far (used to assign group_index)
     num_groups: usize,
-    emit_starting_index: usize,
 }
 
 impl<O: OffsetSizeTrait> GroupValuesByes<O> {
@@ -39,7 +38,6 @@ impl<O: OffsetSizeTrait> GroupValuesByes<O> {
         Self {
             map: ArrowBytesMap::new(output_type),
             num_groups: 0,
-            emit_starting_index: 0,
         }
     }
 }
@@ -72,6 +70,38 @@ impl<O: OffsetSizeTrait> GroupValues for GroupValuesByes<O> {
         Ok(())
     }
 
+    fn intern_for_deduplication_query(
+        &mut self,
+        cols: &[ArrayRef],
+        groups: &mut Vec<usize>,
+    ) -> Result<ArrayRef> {
+        debug_assert_eq!(cols.len(), 1);
+
+        // look up / add entries in the table
+        let arr = &cols[0];
+
+        groups.clear();
+        let output = self.map.insert_if_new_for_deduplication_query(
+            arr,
+            // called for each new group
+            |_value| {
+                // assign new group index on each insert
+                let group_idx = self.num_groups;
+                self.num_groups += 1;
+                group_idx
+            },
+            // called for each group
+            |group_idx| {
+                groups.push(group_idx);
+            },
+        );
+
+        // ensure we assigned a group to for each row
+        debug_assert_eq!(groups.len(), arr.len());
+
+        output
+    }
+
     fn size(&self) -> usize {
         self.map.size() + size_of::<Self>()
     }
@@ -84,25 +114,6 @@ impl<O: OffsetSizeTrait> GroupValues for GroupValuesByes<O> {
         self.num_groups
     }
 
-    fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>> {
-        if self.map.len() == self.emit_starting_index {
-            // no new groups to emit
-            return Ok(vec![]);
-        }
-
-        let map = self.map.take();
-        // TODO: optimize this, clone only we need
-        let map_contents = map.state();
-
-        let emit_group_values = map_contents.slice(
-            self.emit_starting_index,
-            map_contents.len() - self.emit_starting_index,
-        );
-        self.emit_starting_index = map_contents.len();
-        self.map = map;
-        Ok(vec![emit_group_values])
-    }
-
     fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()> {
         let map_contents = self.map.take().into_state();
         let remaining_group_values = map_contents.slice(n, map_contents.len() - n);
@@ -111,7 +122,6 @@ impl<O: OffsetSizeTrait> GroupValues for GroupValuesByes<O> {
         self.intern(&[remaining_group_values], &mut group_indexes)?;
         // Verify that the group indexes were assigned in the correct order
         debug_assert_eq!(0, group_indexes[0]);
-        self.emit_starting_index -= n;
         Ok(())
     }
 

@@ -95,6 +95,11 @@ pub(crate) trait GroupValues: Send {
     /// assigned. If a row has a new value, the next available group id is
     /// assigned.
     fn intern(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) -> Result<()>;
+    fn intern_for_deduplication_query(
+        &mut self,
+        cols: &[ArrayRef],
+        groups: &mut Vec<usize>,
+    ) -> Result<ArrayRef>;
 
     /// Returns the number of bytes of memory used by this [`GroupValues`]
     fn size(&self) -> usize;
@@ -107,10 +112,6 @@ pub(crate) trait GroupValues: Send {
 
     /// Emits the group values and cleanup the internal state
     fn emit(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>>;
-
-    /// Emit for no aggregate case, emit but don't cleanup the internal state
-    /// return vec![] if nothing to emit
-    fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>>;
 
     /// cleanup the internal state
     fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()>;
