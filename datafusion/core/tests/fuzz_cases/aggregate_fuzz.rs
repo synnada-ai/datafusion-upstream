@@ -285,8 +285,8 @@ fn baseline_config() -> DatasetGeneratorConfig {
     let mut rng = thread_rng();
     let columns = get_supported_types_columns(rng.gen());
 
-    let min_num_rows = 512;
-    let max_num_rows = 1024;
+    let min_num_rows = 10;
+    let max_num_rows = 20;
 
     DatasetGeneratorConfig {
         columns,

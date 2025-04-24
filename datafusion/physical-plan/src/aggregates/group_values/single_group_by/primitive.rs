@@ -154,8 +154,8 @@ where
         &mut self,
         cols: &[ArrayRef],
         groups: &mut Vec<usize>,
-    ) -> Result<ArrayRef> {
-        assert_eq!(cols.len(), 1);
+    ) -> Result<Vec<ArrayRef>> {
+        debug_assert_eq!(cols.len(), 1);
         groups.clear();
 
         let n_rows = cols[0].len();
@@ -170,6 +170,7 @@ where
                         new_keys.push(true);
                         let group_id = self.values.len();
                         self.values.push(Default::default());
+                        self.null_group = Some(group_id);
                         group_id
                     }
                 }
@@ -202,7 +203,9 @@ where
 
         debug_assert_eq!(new_keys.len(), cols[0].len());
         let predicate = BooleanArray::from(new_keys);
-        filter(&cols[0], &predicate).map_err(|e| arrow_datafusion_err!(e))
+        Ok(vec![
+            filter(&cols[0], &predicate).map_err(|e| arrow_datafusion_err!(e))?
+        ])
     }
 
     fn size(&self) -> usize {

@@ -75,7 +75,7 @@ impl GroupValues for GroupValuesBytesView {
         &mut self,
         cols: &[ArrayRef],
         groups: &mut Vec<usize>,
-    ) -> Result<ArrayRef> {
+    ) -> Result<Vec<ArrayRef>> {
         debug_assert_eq!(cols.len(), 1);
 
         // look up / add entries in the table
@@ -95,12 +95,12 @@ impl GroupValues for GroupValuesBytesView {
             |group_idx| {
                 groups.push(group_idx);
             },
-        );
+        )?;
 
         // ensure we assigned a group to for each row
         debug_assert_eq!(groups.len(), arr.len());
 
-        output
+        Ok(vec![output])
     }
 
     fn size(&self) -> usize {

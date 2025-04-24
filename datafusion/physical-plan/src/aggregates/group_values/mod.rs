@@ -99,7 +99,7 @@ pub(crate) trait GroupValues: Send {
         &mut self,
         cols: &[ArrayRef],
         groups: &mut Vec<usize>,
-    ) -> Result<ArrayRef>;
+    ) -> Result<Vec<ArrayRef>>;
 
     /// Returns the number of bytes of memory used by this [`GroupValues`]
     fn size(&self) -> usize;

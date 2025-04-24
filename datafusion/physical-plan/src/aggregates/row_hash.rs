@@ -819,7 +819,7 @@ impl GroupedHashAggregateStream {
                             let timer = elapsed_compute.timer();
 
                             // Do the grouping
-                            let outputs = self
+                            let mut outputs = self
                                 .group_aggregate_batch_for_deduplication_query(batch)?;
 
                             self.update_skip_aggregation_probe(input_rows);
@@ -830,6 +830,7 @@ impl GroupedHashAggregateStream {
 
                             // grouping set not supported
                             debug_assert_eq!(outputs.len(), 1);
+                            let outputs = outputs.swap_remove(0);
                             let batch = RecordBatch::try_new(self.schema(), outputs)?;
                             if batch.num_rows() == 0 {
                                 continue;
@@ -863,7 +864,7 @@ impl GroupedHashAggregateStream {
                             // self.spill_previous_if_necessary(&batch)?;
 
                             // Do the grouping
-                            let outputs = self
+                            let mut outputs = self
                                 .group_aggregate_batch_for_deduplication_query(batch)?;
 
                             // If we can begin emitting rows, do so,
@@ -872,6 +873,7 @@ impl GroupedHashAggregateStream {
 
                             // grouping set not supported
                             debug_assert_eq!(outputs.len(), 1);
+                            let outputs = outputs.swap_remove(0);
                             let batch = RecordBatch::try_new(self.schema(), outputs)?;
                             if batch.num_rows() == 0 {
                                 continue;
@@ -1100,7 +1102,7 @@ impl GroupedHashAggregateStream {
     fn group_aggregate_batch_for_deduplication_query(
         &mut self,
         batch: RecordBatch,
-    ) -> Result<Vec<ArrayRef>> {
+    ) -> Result<Vec<Vec<ArrayRef>>> {
         // Evaluate the grouping expressions
         let group_by_values = if self.spill_state.is_stream_merging {
             evaluate_group_by(&self.spill_state.merging_group_by, &batch)?

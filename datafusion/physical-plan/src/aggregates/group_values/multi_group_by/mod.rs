@@ -1058,7 +1058,7 @@ impl<const STREAMING: bool> GroupValues for GroupValuesColumn<STREAMING> {
         &mut self,
         _cols: &[ArrayRef],
         _groups: &mut Vec<usize>,
-    ) -> Result<ArrayRef> {
+    ) -> Result<Vec<ArrayRef>> {
         todo!()
     }
 

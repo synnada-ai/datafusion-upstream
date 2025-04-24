@@ -21,8 +21,8 @@ use arrow::array::{Array, ArrayRef, BooleanArray, ListArray, RecordBatch, Struct
 use arrow::compute::{cast, filter};
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::row::{RowConverter, Rows, SortField};
-use datafusion_common::DataFusionError;
 use datafusion_common::hash_utils::create_hashes;
+use datafusion_common::DataFusionError;
 use datafusion_common::{arrow_datafusion_err, Result};
 use datafusion_execution::memory_pool::proxy::{HashTableAllocExt, VecAllocExt};
 use datafusion_expr::EmitTo;
@@ -173,8 +173,11 @@ impl GroupValues for GroupValuesRows {
         Ok(())
     }
 
-
-    fn intern_for_deduplication_query(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) -> Result<ArrayRef> {
+    fn intern_for_deduplication_query(
+        &mut self,
+        cols: &[ArrayRef],
+        groups: &mut Vec<usize>,
+    ) -> Result<Vec<ArrayRef>> {
         // Convert the group keys into the row format
         let group_rows = &mut self.rows_buffer;
         group_rows.clear();
@@ -195,7 +198,6 @@ impl GroupValues for GroupValuesRows {
         batch_hashes.resize(n_rows, 0);
         create_hashes(cols, &self.random_state, batch_hashes)?;
 
-        debug_assert_eq!(cols.len(), 1);
         debug_assert_eq!(cols[0].len(), n_rows);
         debug_assert_eq!(batch_hashes.len(), n_rows);
         let mut new_keys = Vec::with_capacity(n_rows);
@@ -241,8 +243,11 @@ impl GroupValues for GroupValuesRows {
         self.group_values = Some(group_values);
 
         debug_assert_eq!(new_keys.len(), n_rows);
+
         let predicate = BooleanArray::from(new_keys);
-        filter(&cols[0], &predicate).map_err(|e| arrow_datafusion_err!(e))
+        cols.into_iter()
+            .map(|col| filter(col, &predicate).map_err(|e| arrow_datafusion_err!(e)))
+            .collect::<Result<Vec<_>>>()
     }
 
     fn size(&self) -> usize {
