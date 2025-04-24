@@ -240,3 +240,7 @@ name = "dataframe"
 [[bench]]
 harness = false
 name = "spm"
+
+[[bench]]
+harness = false
+name = "prefer_existing_sort"

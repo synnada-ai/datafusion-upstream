@@ -26,10 +26,7 @@ use std::sync::Arc;
 
 use crate::optimizer::PhysicalOptimizerRule;
 use crate::output_requirements::OutputRequirementExec;
-use crate::utils::{
-    add_sort_above_with_check, is_coalesce_partitions, is_repartition,
-    is_sort_preserving_merge,
-};
+use crate::utils::{is_coalesce_partitions, is_repartition, is_sort_preserving_merge};
 
 use arrow::compute::SortOptions;
 use datafusion_common::config::ConfigOptions;
@@ -46,7 +43,6 @@ use datafusion_physical_plan::aggregates::{
     AggregateExec, AggregateMode, PhysicalGroupBy,
 };
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion_physical_plan::execution_plan::EmissionType;
 use datafusion_physical_plan::joins::{
     CrossJoinExec, HashJoinExec, PartitionMode, SortMergeJoinExec,
 };
@@ -850,10 +846,8 @@ fn add_roundrobin_on_top(
     if input.plan.output_partitioning().partition_count() < n_target {
         // When there is an existing ordering, we preserve ordering
         // during repartition. This will be un-done in the future
-        // If any of the following conditions is true
+        // If the following condition is true
         // - Preserving ordering is not helpful in terms of satisfying ordering requirements
-        // - Usage of order preserving variants is not desirable
-        // (determined by flag `config.optimizer.prefer_existing_sort`)
         let partitioning = Partitioning::RoundRobinBatch(n_target);
         let repartition =
             RepartitionExec::try_new(Arc::clone(&input.plan), partitioning)?
@@ -907,12 +901,10 @@ fn add_hash_on_top(
     // - We can increase parallelism by adding hash partitioning.
     if !satisfied || n_target > input.plan.output_partitioning().partition_count() {
         // When there is an existing ordering, we preserve ordering during
-        // repartition. This will be rolled back in the future if any of the
-        // following conditions is true:
+        // repartition. This will be rolled back in the future if the
+        // following condition is true:
         // - Preserving ordering is not helpful in terms of satisfying ordering
         //   requirements.
-        // - Usage of order preserving variants is not desirable (per the flag
-        //   `config.optimizer.prefer_existing_sort`).
         let partitioning = dist.create_partitioning(n_target);
         let repartition =
             RepartitionExec::try_new(Arc::clone(&input.plan), partitioning)?
@@ -941,10 +933,7 @@ fn add_spm_on_top(input: DistributionContext) -> DistributionContext {
     if input.plan.output_partitioning().partition_count() > 1 {
         // When there is an existing ordering, we preserve ordering
         // when decreasing partitions. This will be un-done in the future
-        // if any of the following conditions is true
-        // - Preserving ordering is not helpful in terms of satisfying ordering requirements
-        // - Usage of order preserving variants is not desirable
-        // (determined by flag `config.optimizer.prefer_existing_sort`)
+        // if preserving ordering is not helpful in terms of satisfying ordering requirements
         let new_plan = if let Some(ordering) = input.plan.output_ordering() {
             Arc::new(SortPreservingMergeExec::new(
                 ordering.clone(),
@@ -1169,17 +1158,6 @@ pub fn ensure_distribution(
     let should_use_estimates = config
         .execution
         .use_row_number_estimates_to_optimize_partitioning;
-    let unbounded_and_pipeline_friendly = dist_context.plan.boundedness().is_unbounded()
-        && matches!(
-            dist_context.plan.pipeline_behavior(),
-            EmissionType::Incremental | EmissionType::Both
-        );
-    // Use order preserving variants either of the conditions true
-    // - it is desired according to config
-    // - when plan is unbounded
-    // - when it is pipeline friendly (can incrementally produce results)
-    let order_preserving_variants_desirable =
-        unbounded_and_pipeline_friendly || config.optimizer.prefer_existing_sort;
 
     // Remove unnecessary repartition from the physical plan if any
     let DistributionContext {
@@ -1285,23 +1263,8 @@ pub fn ensure_distribution(
                     .equivalence_properties()
                     .ordering_satisfy_requirement(sort_req.clone());
 
-                if (!ordering_satisfied || !order_preserving_variants_desirable)
-                    && child.data
-                {
+                if !ordering_satisfied && child.data {
                     child = replace_order_preserving_variants(child)?;
-                    // If ordering requirements were satisfied before repartitioning,
-                    // make sure ordering requirements are still satisfied after.
-                    if ordering_satisfied {
-                        // Make sure to satisfy ordering requirement:
-                        child = add_sort_above_with_check(
-                            child,
-                            sort_req,
-                            plan.as_any()
-                                .downcast_ref::<OutputRequirementExec>()
-                                .map(|output| output.fetch())
-                                .unwrap_or(None),
-                        );
-                    }
                 }
                 // Stop tracking distribution changing operators
                 child.data = false;

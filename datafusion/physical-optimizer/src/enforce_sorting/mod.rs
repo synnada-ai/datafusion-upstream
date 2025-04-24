@@ -230,12 +230,7 @@ impl PhysicalOptimizerRule for EnforceSorting {
         let plan_with_pipeline_fixer = OrderPreservationContext::new_default(new_plan);
         let updated_plan = plan_with_pipeline_fixer
             .transform_up(|plan_with_pipeline_fixer| {
-                replace_with_order_preserving_variants(
-                    plan_with_pipeline_fixer,
-                    false,
-                    true,
-                    config,
-                )
+                replace_with_order_preserving_variants(plan_with_pipeline_fixer, true)
             })
             .data()?;
         // Execute a top-down traversal to exploit sort push-down opportunities
