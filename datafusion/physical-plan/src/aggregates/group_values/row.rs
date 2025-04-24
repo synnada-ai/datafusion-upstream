@@ -245,7 +245,7 @@ impl GroupValues for GroupValuesRows {
         debug_assert_eq!(new_keys.len(), n_rows);
 
         let predicate = BooleanArray::from(new_keys);
-        cols.into_iter()
+        cols.iter()
             .map(|col| filter(col, &predicate).map_err(|e| arrow_datafusion_err!(e)))
             .collect::<Result<Vec<_>>>()
     }
