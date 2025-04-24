@@ -270,33 +270,6 @@ impl GroupValues for GroupValuesRows {
             .unwrap_or(0)
     }
 
-    // fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>> {
-    //     let group_values = self
-    //         .group_values
-    //         .take()
-    //         .expect("Can not emit from empty rows");
-
-    //     let group_rows = group_values.iter().skip(self.emit_starting_index);
-    //     if group_rows.len() == 0 {
-    //         self.group_values = Some(group_values);
-    //         return Ok(vec![]);
-    //     }
-
-    //     let mut output = self.row_converter.convert_rows(group_rows)?;
-
-    //     // TODO: Materialize dictionaries in group keys
-    //     // https://github.com/apache/datafusion/issues/7647
-    //     for (field, array) in self.schema.fields.iter().zip(&mut output) {
-    //         let expected = field.data_type();
-    //         *array =
-    //             dictionary_encode_if_necessary(Arc::<dyn Array>::clone(array), expected)?;
-    //     }
-
-    //     self.group_values = Some(group_values);
-    //     self.emit_starting_index += output[0].len();
-    //     Ok(output)
-    // }
-
     fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()> {
         if n == 0 {
             return Ok(());

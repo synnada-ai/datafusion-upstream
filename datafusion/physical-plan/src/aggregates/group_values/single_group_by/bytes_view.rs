@@ -157,24 +157,6 @@ impl GroupValues for GroupValuesBytesView {
         self.map.take();
     }
 
-    // fn emit_for_no_aggregate_case(&mut self) -> Result<Vec<ArrayRef>> {
-    //     if self.map.len() == self.emit_starting_index {
-    //         // no new groups to emit
-    //         return Ok(vec![]);
-    //     }
-
-    //     let map = self.map.take();
-    //     let map_contents = map.state();
-
-    //     let emit_group_values = map_contents.slice(
-    //         self.emit_starting_index,
-    //         map_contents.len() - self.emit_starting_index,
-    //     );
-    //     self.emit_starting_index = map_contents.len();
-    //     self.map = map;
-    //     Ok(vec![emit_group_values])
-    // }
-
     fn remove_for_no_aggregate_case(&mut self, n: usize) -> Result<()> {
         let map_contents = self.map.take().into_state();
         let remaining_group_values = map_contents.slice(n, map_contents.len() - n);
@@ -183,14 +165,6 @@ impl GroupValues for GroupValuesBytesView {
         self.intern(&[remaining_group_values], &mut group_indexes)?;
         // Verify that the group indexes were assigned in the correct order
         debug_assert_eq!(0, group_indexes[0]);
-        // debug_assert!(
-        //     self.emit_starting_index >= n,
-        //     "emit_starting_index: {}, n: {}",
-        //     self.emit_starting_index,
-        //     n
-        // );
-        // self.emit_starting_index -= n;
-
         Ok(())
     }
 }
