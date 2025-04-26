@@ -127,9 +127,7 @@ macro_rules! assert_optimized {
                 .transform_up(|plan_with_pipeline_fixer| {
                     replace_with_order_preserving_variants(
                         plan_with_pipeline_fixer,
-                        false,
                         true,
-                        &config,
                     )
                 })
                 .data()
@@ -1428,15 +1426,13 @@ async fn test_with_lost_ordering_bounded() -> Result<()> {
         "  CoalescePartitionsExec",
         "    RepartitionExec: partitioning=Hash([c@2], 10), input_partitions=10",
         "      RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1",
-        "        DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=csv, has_header=false",
-    ];
+        "        DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=csv, has_header=false"];
     let expected_optimized = [
         "SortPreservingMergeExec: [a@0 ASC]",
-        "  SortExec: expr=[a@0 ASC], preserve_partitioning=[true]",
-        "    RepartitionExec: partitioning=Hash([c@2], 10), input_partitions=10",
-        "      RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1",
-        "        DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=csv, has_header=false",
-    ];
+        "  RepartitionExec: partitioning=Hash([c@2], 10), input_partitions=10, preserve_order=true, sort_exprs=a@0 ASC",
+        "    RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1",
+        "      DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=csv, has_header=false",
+        ];
     assert_optimized!(expected_input, expected_optimized, physical_plan, true);
 
     Ok(())
@@ -1479,7 +1475,7 @@ async fn test_with_lost_ordering_unbounded_bounded(
         "        DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=csv, has_header=false",
     ];
 
-    // Expected unbounded result (same for with and without flag)
+    // Expected unbounded result
     let expected_optimized_unbounded = vec![
         "SortPreservingMergeExec: [a@0 ASC]",
         "  RepartitionExec: partitioning=Hash([c@2], 10), input_partitions=10, preserve_order=true, sort_exprs=a@0 ASC",
@@ -1487,20 +1483,12 @@ async fn test_with_lost_ordering_unbounded_bounded(
         "      StreamingTableExec: partition_sizes=1, projection=[a, b, c, d, e], infinite_source=true, output_ordering=[a@0 ASC]",
     ];
 
-    // Expected bounded results with and without flag
+    // Expected bounded results
     let expected_optimized_bounded = vec![
-        "SortExec: expr=[a@0 ASC], preserve_partitioning=[false]",
-        "  CoalescePartitionsExec",
-        "    RepartitionExec: partitioning=Hash([c@2], 10), input_partitions=10",
-        "      RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1",
-        "        DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=csv, has_header=false",
-    ];
-    let expected_optimized_bounded_parallelize_sort = vec![
         "SortPreservingMergeExec: [a@0 ASC]",
-        "  SortExec: expr=[a@0 ASC], preserve_partitioning=[true]",
-        "    RepartitionExec: partitioning=Hash([c@2], 10), input_partitions=10",
-        "      RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1",
-        "        DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=csv, has_header=false",
+        "  RepartitionExec: partitioning=Hash([c@2], 10), input_partitions=10, preserve_order=true, sort_exprs=a@0 ASC",
+        "    RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1",
+        "      DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=csv, has_header=false",
     ];
     let (expected_input, expected_optimized, expected_optimized_sort_parallelize) =
         if source_unbounded {
@@ -1512,8 +1500,8 @@ async fn test_with_lost_ordering_unbounded_bounded(
         } else {
             (
                 expected_input_bounded,
+                expected_optimized_bounded.clone(),
                 expected_optimized_bounded,
-                expected_optimized_bounded_parallelize_sort,
             )
         };
     assert_optimized!(
@@ -1688,9 +1676,7 @@ macro_rules! assert_optimized {
                 .transform_up(|plan_with_pipeline_fixer| {
                     replace_with_order_preserving_variants(
                         plan_with_pipeline_fixer,
-                        false,
                         true,
-                        &config,
                     )
                 })
                 .data()

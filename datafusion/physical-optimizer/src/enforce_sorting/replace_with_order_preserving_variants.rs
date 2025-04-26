@@ -25,11 +25,9 @@ use crate::utils::{
     is_coalesce_partitions, is_repartition, is_sort, is_sort_preserving_merge,
 };
 
-use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::Transformed;
 use datafusion_common::Result;
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion_physical_plan::execution_plan::EmissionType;
 use datafusion_physical_plan::repartition::RepartitionExec;
 use datafusion_physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion_physical_plan::tree_node::PlanContext;
@@ -94,9 +92,6 @@ pub fn update_order_preservation_ctx_children_data(opc: &mut OrderPreservationCo
 /// depending on whether it helps us remove a `SortExec`.
 fn plan_with_order_preserving_variants(
     mut sort_input: OrderPreservationContext,
-    // Flag indicating that it is desirable to replace `RepartitionExec`s with
-    // `SortPreservingRepartitionExec`s:
-    is_spr_better: bool,
     // Flag indicating that it is desirable to replace `CoalescePartitionsExec`s
     // with `SortPreservingMergeExec`s:
     is_spm_better: bool,
@@ -108,12 +103,7 @@ fn plan_with_order_preserving_variants(
         .map(|node| {
             // Update descendants in the given tree if there is a connection:
             if node.data {
-                plan_with_order_preserving_variants(
-                    node,
-                    is_spr_better,
-                    is_spm_better,
-                    fetch,
-                )
+                plan_with_order_preserving_variants(node, is_spm_better, fetch)
             } else {
                 Ok(node)
             }
@@ -121,10 +111,7 @@ fn plan_with_order_preserving_variants(
         .collect::<Result<_>>()?;
     sort_input.data = false;
 
-    if is_repartition(&sort_input.plan)
-        && !sort_input.plan.maintains_input_order()[0]
-        && is_spr_better
-    {
+    if is_repartition(&sort_input.plan) && !sort_input.plan.maintains_input_order()[0] {
         // When a `RepartitionExec` doesn't preserve ordering, replace it with
         // a sort-preserving variant if appropriate:
         let child = Arc::clone(&sort_input.children[0].plan);
@@ -209,10 +196,6 @@ fn plan_with_order_breaking_variants(
 /// If this replacement is helpful for removing a `SortExec`, it updates the plan.
 /// Otherwise, it leaves the plan unchanged.
 ///
-/// NOTE: This optimizer sub-rule will only produce sort-preserving `RepartitionExec`s
-/// if the query is bounded or if the config option `prefer_existing_sort` is
-/// set to `true`.
-///
 /// The algorithm flow is simply like this:
 /// 1. Visit nodes of the physical plan bottom-up and look for `SortExec` nodes.
 ///    During the traversal, keep track of operators that maintain ordering (or
@@ -231,34 +214,21 @@ fn plan_with_order_breaking_variants(
 ///    traversal is complete.
 pub fn replace_with_order_preserving_variants(
     mut requirements: OrderPreservationContext,
-    // A flag indicating that replacing `RepartitionExec`s with sort-preserving
-    // variants is desirable when it helps to remove a `SortExec` from the plan.
-    // If this flag is `false`, this replacement should only be made to fix the
-    // pipeline (streaming).
-    is_spr_better: bool,
     // A flag indicating that replacing `CoalescePartitionsExec`s with
     // `SortPreservingMergeExec`s is desirable when it helps to remove a
     // `SortExec` from the plan. If this flag is `false`, this replacement
     // should only be made to fix the pipeline (streaming).
     is_spm_better: bool,
-    config: &ConfigOptions,
 ) -> Result<Transformed<OrderPreservationContext>> {
     update_order_preservation_ctx_children_data(&mut requirements);
     if !(is_sort(&requirements.plan) && requirements.children[0].data) {
         return Ok(Transformed::no(requirements));
     }
 
-    // For unbounded cases, we replace with the order-preserving variant in any
-    // case, as doing so helps fix the pipeline. Also replace if config allows.
-    let use_order_preserving_variant = config.optimizer.prefer_existing_sort
-        || (requirements.plan.boundedness().is_unbounded()
-            && requirements.plan.pipeline_behavior() == EmissionType::Final);
-
     // Create an alternate plan with order-preserving variants:
     let mut alternate_plan = plan_with_order_preserving_variants(
         requirements.children.swap_remove(0),
-        is_spr_better || use_order_preserving_variant,
-        is_spm_better || use_order_preserving_variant,
+        is_spm_better,
         requirements.plan.fetch(),
     )?;
 

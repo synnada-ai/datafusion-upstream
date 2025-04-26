@@ -30,7 +30,6 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::tree_node::{TransformedResult, TreeNode};
 use datafusion_common::Result;
-use datafusion_common::config::ConfigOptions;
 use datafusion_datasource::source::DataSourceExec;
 use datafusion_execution::TaskContext;
 use datafusion_expr::{JoinType, Operator};
@@ -54,39 +53,6 @@ use rstest::rstest;
 use url::Url;
 
 /// Runs the `replace_with_order_preserving_variants` sub-rule and asserts
-/// the plan against the original and expected plans.
-///
-/// # Parameters
-///
-/// * `$EXPECTED_PLAN_LINES`: Expected input plan.
-/// * `EXPECTED_OPTIMIZED_PLAN_LINES`: Optimized plan when the flag
-///   `prefer_existing_sort` is `false`.
-/// * `EXPECTED_PREFER_SORT_ON_OPTIMIZED_PLAN_LINES`: Optimized plan when
-///   the flag `prefer_existing_sort` is `true`.
-/// * `$PLAN`: The plan to optimize.
-macro_rules! assert_optimized_prefer_sort_on_off {
-    ($EXPECTED_PLAN_LINES: expr, $EXPECTED_OPTIMIZED_PLAN_LINES: expr, $EXPECTED_PREFER_SORT_ON_OPTIMIZED_PLAN_LINES: expr, $PLAN: expr, $PREFER_EXISTING_SORT: expr, $SOURCE_UNBOUNDED: expr) => {
-        if $PREFER_EXISTING_SORT {
-            assert_optimized!(
-                $EXPECTED_PLAN_LINES,
-                $EXPECTED_PREFER_SORT_ON_OPTIMIZED_PLAN_LINES,
-                $PLAN,
-                $PREFER_EXISTING_SORT,
-                $SOURCE_UNBOUNDED
-            );
-        } else {
-            assert_optimized!(
-                $EXPECTED_PLAN_LINES,
-                $EXPECTED_OPTIMIZED_PLAN_LINES,
-                $PLAN,
-                $PREFER_EXISTING_SORT,
-                $SOURCE_UNBOUNDED
-            );
-        }
-    };
-}
-
-/// Runs the `replace_with_order_preserving_variants` sub-rule and asserts
 /// the plan against the original and expected plans for both bounded and
 /// unbounded cases.
 ///
@@ -94,32 +60,23 @@ macro_rules! assert_optimized_prefer_sort_on_off {
 ///
 /// * `EXPECTED_UNBOUNDED_PLAN_LINES`: Expected input unbounded plan.
 /// * `EXPECTED_BOUNDED_PLAN_LINES`: Expected input bounded plan.
-/// * `EXPECTED_UNBOUNDED_OPTIMIZED_PLAN_LINES`: Optimized plan, which is
-///   the same regardless of the value of the `prefer_existing_sort` flag.
-/// * `EXPECTED_BOUNDED_OPTIMIZED_PLAN_LINES`: Optimized plan when the flag
-///   `prefer_existing_sort` is `false` for bounded cases.
-/// * `EXPECTED_BOUNDED_PREFER_SORT_ON_OPTIMIZED_PLAN_LINES`: Optimized plan
-///   when the flag `prefer_existing_sort` is `true` for bounded cases.
+/// * `EXPECTED_UNBOUNDED_OPTIMIZED_PLAN_LINES`: Optimized unbounded plan
 /// * `$PLAN`: The plan to optimize.
 /// * `$SOURCE_UNBOUNDED`: Whether the given plan contains an unbounded source.
 macro_rules! assert_optimized_in_all_boundedness_situations {
-    ($EXPECTED_UNBOUNDED_PLAN_LINES: expr,  $EXPECTED_BOUNDED_PLAN_LINES: expr, $EXPECTED_UNBOUNDED_OPTIMIZED_PLAN_LINES: expr, $EXPECTED_BOUNDED_OPTIMIZED_PLAN_LINES: expr, $EXPECTED_BOUNDED_PREFER_SORT_ON_OPTIMIZED_PLAN_LINES: expr, $PLAN: expr, $SOURCE_UNBOUNDED: expr, $PREFER_EXISTING_SORT: expr) => {
+    ($EXPECTED_UNBOUNDED_PLAN_LINES: expr,  $EXPECTED_BOUNDED_PLAN_LINES: expr, $EXPECTED_UNBOUNDED_OPTIMIZED_PLAN_LINES: expr, $EXPECTED_BOUNDED_OPTIMIZED_PLAN_LINES: expr, $PLAN: expr, $SOURCE_UNBOUNDED: expr) => {
         if $SOURCE_UNBOUNDED {
-            assert_optimized_prefer_sort_on_off!(
+            assert_optimized!(
                 $EXPECTED_UNBOUNDED_PLAN_LINES,
                 $EXPECTED_UNBOUNDED_OPTIMIZED_PLAN_LINES,
-                $EXPECTED_UNBOUNDED_OPTIMIZED_PLAN_LINES,
                 $PLAN,
-                $PREFER_EXISTING_SORT,
                 $SOURCE_UNBOUNDED
             );
         } else {
-            assert_optimized_prefer_sort_on_off!(
+            assert_optimized!(
                 $EXPECTED_BOUNDED_PLAN_LINES,
                 $EXPECTED_BOUNDED_OPTIMIZED_PLAN_LINES,
-                $EXPECTED_BOUNDED_PREFER_SORT_ON_OPTIMIZED_PLAN_LINES,
                 $PLAN,
-                $PREFER_EXISTING_SORT,
                 $SOURCE_UNBOUNDED
             );
         }
@@ -134,10 +91,9 @@ macro_rules! assert_optimized_in_all_boundedness_situations {
 /// * `$EXPECTED_PLAN_LINES`: Expected input plan.
 /// * `$EXPECTED_OPTIMIZED_PLAN_LINES`: Expected optimized plan.
 /// * `$PLAN`: The plan to optimize.
-/// * `$PREFER_EXISTING_SORT`: Value of the `prefer_existing_sort` flag.
 #[macro_export]
 macro_rules! assert_optimized {
-        ($EXPECTED_PLAN_LINES: expr, $EXPECTED_OPTIMIZED_PLAN_LINES: expr, $PLAN: expr, $PREFER_EXISTING_SORT: expr, $SOURCE_UNBOUNDED: expr) => {
+        ($EXPECTED_PLAN_LINES: expr, $EXPECTED_OPTIMIZED_PLAN_LINES: expr, $PLAN: expr, $SOURCE_UNBOUNDED: expr) => {
             let physical_plan = $PLAN;
             let formatted = displayable(physical_plan.as_ref()).indent(true).to_string();
             let actual: Vec<&str> = formatted.trim().lines().collect();
@@ -153,10 +109,8 @@ macro_rules! assert_optimized {
             let expected_optimized_lines: Vec<&str> = $EXPECTED_OPTIMIZED_PLAN_LINES.iter().map(|s| *s).collect();
 
             // Run the rule top-down
-            let mut config = ConfigOptions::new();
-            config.optimizer.prefer_existing_sort=$PREFER_EXISTING_SORT;
             let plan_with_pipeline_fixer = OrderPreservationContext::new_default(physical_plan);
-            let parallel = plan_with_pipeline_fixer.transform_up(|plan_with_pipeline_fixer| replace_with_order_preserving_variants(plan_with_pipeline_fixer, false, false, &config)).data().and_then(check_integrity)?;
+            let parallel = plan_with_pipeline_fixer.transform_up(|plan_with_pipeline_fixer| replace_with_order_preserving_variants(plan_with_pipeline_fixer, true)).data().and_then(check_integrity)?;
             let optimized_physical_plan = parallel.plan;
 
             // Get string representation of the plan
@@ -186,7 +140,6 @@ macro_rules! assert_optimized {
 // Searches for a simple sort and a repartition just after it, the second repartition with 1 input partition should not be affected
 async fn test_replace_multiple_input_repartition_1(
     #[values(false, true)] source_unbounded: bool,
-    #[values(false, true)] prefer_existing_sort: bool,
 ) -> Result<()> {
     let schema = create_test_schema()?;
     let sort_exprs: LexOrdering = [sort_expr("a", &schema)].into();
@@ -215,7 +168,6 @@ async fn test_replace_multiple_input_repartition_1(
             "        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
         ];
 
-    // Expected unbounded result (same for with and without flag)
     let expected_optimized_unbounded = [
             "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
             "  RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8, preserve_order=true, sort_exprs=a@0 ASC NULLS LAST",
@@ -226,13 +178,6 @@ async fn test_replace_multiple_input_repartition_1(
     // Expected bounded results with and without flag
     let expected_optimized_bounded = [
             "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
-            "  SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]",
-            "    RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8",
-            "      RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
-            "        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
-        ];
-    let expected_optimized_bounded_sort_preserve = [
-            "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
             "  RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8, preserve_order=true, sort_exprs=a@0 ASC NULLS LAST",
             "    RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
             "      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
@@ -242,10 +187,8 @@ async fn test_replace_multiple_input_repartition_1(
         expected_input_bounded,
         expected_optimized_unbounded,
         expected_optimized_bounded,
-        expected_optimized_bounded_sort_preserve,
         physical_plan,
-        source_unbounded,
-        prefer_existing_sort
+        source_unbounded
     );
     Ok(())
 }
@@ -254,7 +197,6 @@ async fn test_replace_multiple_input_repartition_1(
 #[tokio::test]
 async fn test_with_inter_children_change_only(
     #[values(false, true)] source_unbounded: bool,
-    #[values(false, true)] prefer_existing_sort: bool,
 ) -> Result<()> {
     let schema = create_test_schema()?;
     let ordering: LexOrdering = [sort_expr_default("a", &schema)].into();
@@ -300,7 +242,7 @@ async fn test_with_inter_children_change_only(
             "                  DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC",
         ];
 
-    // Expected unbounded result (same for with and without flag)
+    // Expected unbounded result
     let expected_optimized_unbounded = [
             "SortPreservingMergeExec: [a@0 ASC]",
             "  FilterExec: c@1 > 3",
@@ -315,18 +257,6 @@ async fn test_with_inter_children_change_only(
     // Expected bounded results with and without flag
     let expected_optimized_bounded = [
             "SortPreservingMergeExec: [a@0 ASC]",
-            "  SortExec: expr=[a@0 ASC], preserve_partitioning=[true]",
-            "    FilterExec: c@1 > 3",
-            "      RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8",
-            "        RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
-            "          SortExec: expr=[a@0 ASC], preserve_partitioning=[false]",
-            "            CoalescePartitionsExec",
-            "              RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8",
-            "                RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
-            "                  DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC",
-        ];
-    let expected_optimized_bounded_sort_preserve = [
-            "SortPreservingMergeExec: [a@0 ASC]",
             "  FilterExec: c@1 > 3",
             "    RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8, preserve_order=true, sort_exprs=a@0 ASC",
             "      RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
@@ -340,10 +270,8 @@ async fn test_with_inter_children_change_only(
         expected_input_bounded,
         expected_optimized_unbounded,
         expected_optimized_bounded,
-        expected_optimized_bounded_sort_preserve,
         physical_plan,
-        source_unbounded,
-        prefer_existing_sort
+        source_unbounded
     );
     Ok(())
 }
@@ -352,7 +280,6 @@ async fn test_with_inter_children_change_only(
 #[tokio::test]
 async fn test_replace_multiple_input_repartition_2(
     #[values(false, true)] source_unbounded: bool,
-    #[values(false, true)] prefer_existing_sort: bool,
 ) -> Result<()> {
     let schema = create_test_schema()?;
     let ordering: LexOrdering = [sort_expr("a", &schema)].into();
@@ -385,7 +312,7 @@ async fn test_replace_multiple_input_repartition_2(
             "          DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
         ];
 
-    // Expected unbounded result (same for with and without flag)
+    // Expected unbounded result
     let expected_optimized_unbounded =  [
             "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
             "  RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8, preserve_order=true, sort_exprs=a@0 ASC NULLS LAST",
@@ -397,14 +324,6 @@ async fn test_replace_multiple_input_repartition_2(
     // Expected bounded results with and without flag
     let expected_optimized_bounded =  [
             "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
-            "  SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]",
-            "    RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8",
-            "      FilterExec: c@1 > 3",
-            "        RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
-            "          DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
-        ];
-    let expected_optimized_bounded_sort_preserve = [
-            "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
             "  RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8, preserve_order=true, sort_exprs=a@0 ASC NULLS LAST",
             "    FilterExec: c@1 > 3",
             "      RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
@@ -415,10 +334,8 @@ async fn test_replace_multiple_input_repartition_2(
         expected_input_bounded,
         expected_optimized_unbounded,
         expected_optimized_bounded,
-        expected_optimized_bounded_sort_preserve,
         physical_plan,
-        source_unbounded,
-        prefer_existing_sort
+        source_unbounded
     );
     Ok(())
 }
@@ -427,7 +344,6 @@ async fn test_replace_multiple_input_repartition_2(
 #[tokio::test]
 async fn test_replace_multiple_input_repartition_with_extra_steps(
     #[values(false, true)] source_unbounded: bool,
-    #[values(false, true)] prefer_existing_sort: bool,
 ) -> Result<()> {
     let schema = create_test_schema()?;
     let ordering: LexOrdering = [sort_expr("a", &schema)].into();
@@ -464,7 +380,7 @@ async fn test_replace_multiple_input_repartition_with_extra_steps(
             "            DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
         ];
 
-    // Expected unbounded result (same for with and without flag)
+    // Expected unbounded result
     let expected_optimized_unbounded = [
             "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
             "  CoalesceBatchesExec: target_batch_size=8192",
@@ -477,30 +393,19 @@ async fn test_replace_multiple_input_repartition_with_extra_steps(
     // Expected bounded results with and without flag
     let expected_optimized_bounded = [
             "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
-            "  SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]",
-            "    CoalesceBatchesExec: target_batch_size=8192",
-            "      FilterExec: c@1 > 3",
-            "        RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8",
-            "          RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
-            "            DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
-        ];
-    let expected_optimized_bounded_sort_preserve = [
-            "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
             "  CoalesceBatchesExec: target_batch_size=8192",
             "    FilterExec: c@1 > 3",
             "      RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8, preserve_order=true, sort_exprs=a@0 ASC NULLS LAST",
             "        RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
             "          DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
-        ];
+    ];
     assert_optimized_in_all_boundedness_situations!(
         expected_input_unbounded,
         expected_input_bounded,
         expected_optimized_unbounded,
         expected_optimized_bounded,
-        expected_optimized_bounded_sort_preserve,
         physical_plan,
-        source_unbounded,
-        prefer_existing_sort
+        source_unbounded
     );
     Ok(())
 }
@@ -509,7 +414,6 @@ async fn test_replace_multiple_input_repartition_with_extra_steps(
 #[tokio::test]
 async fn test_replace_multiple_input_repartition_with_extra_steps_2(
     #[values(false, true)] source_unbounded: bool,
-    #[values(false, true)] prefer_existing_sort: bool,
 ) -> Result<()> {
     let schema = create_test_schema()?;
     let ordering: LexOrdering = [sort_expr("a", &schema)].into();
@@ -549,7 +453,7 @@ async fn test_replace_multiple_input_repartition_with_extra_steps_2(
             "              DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
         ];
 
-    // Expected unbounded result (same for with and without flag)
+    // Expected unbounded result
     let expected_optimized_unbounded = [
             "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
             "  CoalesceBatchesExec: target_batch_size=8192",
@@ -563,32 +467,20 @@ async fn test_replace_multiple_input_repartition_with_extra_steps_2(
     // Expected bounded results with and without flag
     let expected_optimized_bounded = [
             "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
-            "  SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]",
-            "    CoalesceBatchesExec: target_batch_size=8192",
-            "      FilterExec: c@1 > 3",
-            "        RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8",
-            "          CoalesceBatchesExec: target_batch_size=8192",
-            "            RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
-            "              DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
-        ];
-    let expected_optimized_bounded_sort_preserve = [
-            "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
             "  CoalesceBatchesExec: target_batch_size=8192",
             "    FilterExec: c@1 > 3",
             "      RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8, preserve_order=true, sort_exprs=a@0 ASC NULLS LAST",
             "        CoalesceBatchesExec: target_batch_size=8192",
             "          RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
             "            DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
-        ];
+    ];
     assert_optimized_in_all_boundedness_situations!(
         expected_input_unbounded,
         expected_input_bounded,
         expected_optimized_unbounded,
         expected_optimized_bounded,
-        expected_optimized_bounded_sort_preserve,
         physical_plan,
-        source_unbounded,
-        prefer_existing_sort
+        source_unbounded
     );
     Ok(())
 }
@@ -597,7 +489,6 @@ async fn test_replace_multiple_input_repartition_with_extra_steps_2(
 #[tokio::test]
 async fn test_not_replacing_when_no_need_to_preserve_sorting(
     #[values(false, true)] source_unbounded: bool,
-    #[values(false, true)] prefer_existing_sort: bool,
 ) -> Result<()> {
     let schema = create_test_schema()?;
     let ordering: LexOrdering = [sort_expr("a", &schema)].into();
@@ -630,7 +521,7 @@ async fn test_not_replacing_when_no_need_to_preserve_sorting(
             "          DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
         ];
 
-    // Expected unbounded result (same for with and without flag)
+    // Expected unbounded result
     let expected_optimized_unbounded = [
             "CoalescePartitionsExec",
             "  CoalesceBatchesExec: target_batch_size=8192",
@@ -649,17 +540,14 @@ async fn test_not_replacing_when_no_need_to_preserve_sorting(
             "        RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
             "          DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
         ];
-    let expected_optimized_bounded_sort_preserve = expected_optimized_bounded;
 
     assert_optimized_in_all_boundedness_situations!(
         expected_input_unbounded,
         expected_input_bounded,
         expected_optimized_unbounded,
         expected_optimized_bounded,
-        expected_optimized_bounded_sort_preserve,
         physical_plan,
-        source_unbounded,
-        prefer_existing_sort
+        source_unbounded
     );
     Ok(())
 }
@@ -668,7 +556,6 @@ async fn test_not_replacing_when_no_need_to_preserve_sorting(
 #[tokio::test]
 async fn test_with_multiple_replacable_repartitions(
     #[values(false, true)] source_unbounded: bool,
-    #[values(false, true)] prefer_existing_sort: bool,
 ) -> Result<()> {
     let schema = create_test_schema()?;
     let ordering: LexOrdering = [sort_expr("a", &schema)].into();
@@ -707,7 +594,7 @@ async fn test_with_multiple_replacable_repartitions(
             "              DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
         ];
 
-    // Expected unbounded result (same for with and without flag)
+    // Expected unbounded result
     let expected_optimized_unbounded = [
             "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
             "  RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8, preserve_order=true, sort_exprs=a@0 ASC NULLS LAST",
@@ -721,16 +608,6 @@ async fn test_with_multiple_replacable_repartitions(
     // Expected bounded results with and without flag
     let expected_optimized_bounded = [
             "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
-            "  SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]",
-            "    RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8",
-            "      CoalesceBatchesExec: target_batch_size=8192",
-            "        FilterExec: c@1 > 3",
-            "          RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8",
-            "            RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
-            "              DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
-        ];
-    let expected_optimized_bounded_sort_preserve = [
-            "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
             "  RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8, preserve_order=true, sort_exprs=a@0 ASC NULLS LAST",
             "    CoalesceBatchesExec: target_batch_size=8192",
             "      FilterExec: c@1 > 3",
@@ -743,10 +620,8 @@ async fn test_with_multiple_replacable_repartitions(
         expected_input_bounded,
         expected_optimized_unbounded,
         expected_optimized_bounded,
-        expected_optimized_bounded_sort_preserve,
         physical_plan,
-        source_unbounded,
-        prefer_existing_sort
+        source_unbounded
     );
     Ok(())
 }
@@ -755,7 +630,6 @@ async fn test_with_multiple_replacable_repartitions(
 #[tokio::test]
 async fn test_not_replace_with_different_orderings(
     #[values(false, true)] source_unbounded: bool,
-    #[values(false, true)] prefer_existing_sort: bool,
 ) -> Result<()> {
     use datafusion_physical_expr::LexOrdering;
 
@@ -789,7 +663,7 @@ async fn test_not_replace_with_different_orderings(
             "        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
         ];
 
-    // Expected unbounded result (same for with and without flag)
+    // Expected unbounded result
     let expected_optimized_unbounded = [
             "SortPreservingMergeExec: [c@1 ASC]",
             "  SortExec: expr=[c@1 ASC], preserve_partitioning=[true]",
@@ -806,17 +680,14 @@ async fn test_not_replace_with_different_orderings(
             "      RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
             "        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
         ];
-    let expected_optimized_bounded_sort_preserve = expected_optimized_bounded;
 
     assert_optimized_in_all_boundedness_situations!(
         expected_input_unbounded,
         expected_input_bounded,
         expected_optimized_unbounded,
         expected_optimized_bounded,
-        expected_optimized_bounded_sort_preserve,
         physical_plan,
-        source_unbounded,
-        prefer_existing_sort
+        source_unbounded
     );
     Ok(())
 }
@@ -825,7 +696,6 @@ async fn test_not_replace_with_different_orderings(
 #[tokio::test]
 async fn test_with_lost_ordering(
     #[values(false, true)] source_unbounded: bool,
-    #[values(false, true)] prefer_existing_sort: bool,
 ) -> Result<()> {
     let schema = create_test_schema()?;
     let ordering: LexOrdering = [sort_expr("a", &schema)].into();
@@ -855,7 +725,7 @@ async fn test_with_lost_ordering(
             "        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
         ];
 
-    // Expected unbounded result (same for with and without flag)
+    // Expected unbounded result
     let expected_optimized_unbounded = [
             "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
             "  RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8, preserve_order=true, sort_exprs=a@0 ASC NULLS LAST",
@@ -865,13 +735,6 @@ async fn test_with_lost_ordering(
 
     // Expected bounded results with and without flag
     let expected_optimized_bounded = [
-            "SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[false]",
-            "  CoalescePartitionsExec",
-            "    RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8",
-            "      RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
-            "        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
-        ];
-    let expected_optimized_bounded_sort_preserve = [
             "SortPreservingMergeExec: [a@0 ASC NULLS LAST]",
             "  RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8, preserve_order=true, sort_exprs=a@0 ASC NULLS LAST",
             "    RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
@@ -882,10 +745,8 @@ async fn test_with_lost_ordering(
         expected_input_bounded,
         expected_optimized_unbounded,
         expected_optimized_bounded,
-        expected_optimized_bounded_sort_preserve,
         physical_plan,
-        source_unbounded,
-        prefer_existing_sort
+        source_unbounded
     );
     Ok(())
 }
@@ -894,7 +755,6 @@ async fn test_with_lost_ordering(
 #[tokio::test]
 async fn test_with_lost_and_kept_ordering(
     #[values(false, true)] source_unbounded: bool,
-    #[values(false, true)] prefer_existing_sort: bool,
 ) -> Result<()> {
     use datafusion_physical_expr::LexOrdering;
 
@@ -943,7 +803,7 @@ async fn test_with_lost_and_kept_ordering(
             "                  DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
         ];
 
-    // Expected unbounded result (same for with and without flag)
+    // Expected unbounded result
     let expected_optimized_unbounded = [
             "SortPreservingMergeExec: [c@1 ASC]",
             "  FilterExec: c@1 > 3",
@@ -959,18 +819,6 @@ async fn test_with_lost_and_kept_ordering(
     // Expected bounded results with and without flag
     let expected_optimized_bounded = [
             "SortPreservingMergeExec: [c@1 ASC]",
-            "  SortExec: expr=[c@1 ASC], preserve_partitioning=[true]",
-            "    FilterExec: c@1 > 3",
-            "      RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8",
-            "        RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
-            "          SortExec: expr=[c@1 ASC], preserve_partitioning=[false]",
-            "            CoalescePartitionsExec",
-            "              RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8",
-            "                RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
-            "                  DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
-        ];
-    let expected_optimized_bounded_sort_preserve = [
-            "SortPreservingMergeExec: [c@1 ASC]",
             "  FilterExec: c@1 > 3",
             "    RepartitionExec: partitioning=Hash([c@1], 8), input_partitions=8, preserve_order=true, sort_exprs=c@1 ASC",
             "      RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
@@ -985,10 +833,8 @@ async fn test_with_lost_and_kept_ordering(
         expected_input_bounded,
         expected_optimized_unbounded,
         expected_optimized_bounded,
-        expected_optimized_bounded_sort_preserve,
         physical_plan,
-        source_unbounded,
-        prefer_existing_sort
+        source_unbounded
     );
     Ok(())
 }
@@ -997,7 +843,6 @@ async fn test_with_lost_and_kept_ordering(
 #[tokio::test]
 async fn test_with_multiple_child_trees(
     #[values(false, true)] source_unbounded: bool,
-    #[values(false, true)] prefer_existing_sort: bool,
 ) -> Result<()> {
     let schema = create_test_schema()?;
 
@@ -1057,7 +902,7 @@ async fn test_with_multiple_child_trees(
             "            DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
         ];
 
-    // Expected unbounded result (same for with and without flag)
+    // Expected unbounded result
     let expected_optimized_unbounded = [
             "SortPreservingMergeExec: [a@0 ASC]",
             "  SortExec: expr=[a@0 ASC], preserve_partitioning=[true]",
@@ -1087,17 +932,14 @@ async fn test_with_multiple_child_trees(
             "          RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=1",
             "            DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=a@0 ASC NULLS LAST",
         ];
-    let expected_optimized_bounded_sort_preserve = expected_optimized_bounded;
 
     assert_optimized_in_all_boundedness_situations!(
         expected_input_unbounded,
         expected_input_bounded,
         expected_optimized_unbounded,
         expected_optimized_bounded,
-        expected_optimized_bounded_sort_preserve,
         physical_plan,
-        source_unbounded,
-        prefer_existing_sort
+        source_unbounded
     );
     Ok(())
 }

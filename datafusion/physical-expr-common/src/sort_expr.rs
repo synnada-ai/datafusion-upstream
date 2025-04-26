@@ -635,6 +635,14 @@ impl OrderingRequirements {
             Self::Hard(alts) | Self::Soft(alts) => &alts[0],
         }
     }
+
+    /// Returns if the OrderingRequirement has hard alternatives
+    pub fn is_hard_and_not_empty(&self) -> bool {
+        match self {
+            Self::Soft(_) => false,
+            Self::Hard(alts) => !alts.is_empty() && !alts[0].is_empty(),
+        }
+    }
 }
 
 impl From<LexRequirement> for OrderingRequirements {
