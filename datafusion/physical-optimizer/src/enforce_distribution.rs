@@ -1255,7 +1255,7 @@ pub fn ensure_distribution(
             // Satisfy the distribution requirement if it is unmet.
             match &requirement {
                 Distribution::SinglePartition => {
-                    child = add_spm_on_top(child);
+                    child = add_merge_on_top(child);
                 }
                 Distribution::HashPartitioned(exprs) => {
                     if add_roundrobin {

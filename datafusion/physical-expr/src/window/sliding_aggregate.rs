@@ -22,7 +22,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::aggregate::AggregateFunctionExpr;
-use crate::window::window_expr::AggregateWindowExpr;
+use crate::window::window_expr::{AggregateWindowExpr, WindowFn};
 use crate::window::{
     PartitionBatches, PartitionWindowAggStates, PlainAggregateWindowExpr, WindowExpr,
 };

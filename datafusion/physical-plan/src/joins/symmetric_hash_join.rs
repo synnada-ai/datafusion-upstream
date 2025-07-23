@@ -726,7 +726,7 @@ fn determine_prune_length(
     buffer: &RecordBatch,
     build_side_filter_expr: &SortedFilterExpr,
 ) -> Result<usize> {
-    let origin_sorted_expr = build_side_filter_expr.origin_sorted_expr();
+    let origin_sorted_expr = build_side_filter_expr.filter_expr();
     let interval = build_side_filter_expr.interval();
     // Evaluate the build side filter expression and convert it into an array
     let batch_arr = origin_sorted_expr

@@ -557,7 +557,7 @@ pub fn update_filter_expr_interval(
 ) -> Result<()> {
     // Evaluate the filter expression and convert the result to an array:
     let array = sorted_expr
-        .origin_sorted_expr()
+        .filter_expr()
         .expr
         .evaluate(batch)?
         .into_array(1)?;
@@ -566,7 +566,7 @@ pub fn update_filter_expr_interval(
     // Create a ScalarValue representing positive or negative infinity for the same data type:
     let inf = ScalarValue::try_from(value.data_type())?;
     // Update the interval with lower and upper bounds based on the sort option:
-    let interval = if sorted_expr.origin_sorted_expr().options.descending {
+    let interval = if sorted_expr.filter_expr().options.descending {
         Interval::try_new(inf, value)?
     } else {
         Interval::try_new(value, inf)?
@@ -758,7 +758,7 @@ fn update_sorted_exprs_with_node_indices(
     // Extract filter expressions from the sorted expressions:
     let filter_exprs = sorted_exprs
         .iter()
-        .map(|expr| Arc::clone(expr.filter_expr()))
+        .map(|expr| Arc::clone(&expr.intermediate_batch_filter_expr()))
         .collect::<Vec<_>>();
 
     // Gather corresponding node indices for the extracted filter expressions from the graph:
@@ -930,9 +930,9 @@ pub mod tests {
         assert!(right_child_sort_expr.eq(right_sort_filter_expr.filter_expr()));
 
         // Assert that adjusted (left) filter expression matches with `left_child_sort_expr`:
-        assert!(filter_left.eq(left_sort_filter_expr.filter_expr()));
+        assert!(filter_left.eq(&left_sort_filter_expr.intermediate_batch_filter_expr()));
         // Assert that adjusted (right) filter expression matches with `right_child_sort_expr`:
-        assert!(filter_right.eq(right_sort_filter_expr.filter_expr()));
+        assert!(filter_right.eq(&right_sort_filter_expr.intermediate_batch_filter_expr()));
         Ok(())
     }
 
