@@ -1023,6 +1023,25 @@ fn is_expr_trivial(expr: &Arc<dyn PhysicalExpr>) -> bool {
         || expr.as_any().downcast_ref::<Literal>().is_some()
 }
 
+/// [`PhysicalSortExpr`] handler version of update_expr() function.
+pub fn update_sort_expr(
+    sort_exprs: &LexOrdering,
+    projected_exprs: &[(Arc<dyn PhysicalExpr>, String)],
+) -> Result<Option<LexOrdering>> {
+    let mut new_sort_exprs = vec![];
+    for sort_expr in sort_exprs {
+        let Some(updated_expr) = update_expr(&sort_expr.expr, projected_exprs, false)?
+        else {
+            return Ok(None);
+        };
+        new_sort_exprs.push(PhysicalSortExpr {
+            expr: updated_expr,
+            options: sort_expr.options,
+        })
+    }
+    Ok(LexOrdering::new(new_sort_exprs))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

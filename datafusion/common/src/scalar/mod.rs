@@ -1364,6 +1364,108 @@ impl ScalarValue {
         })
     }
 
+    /// Returns a default value for the given `DataType`. This is useful when
+    /// initializing values of columns in a non-nullable schema.
+    pub fn new_default(datatype: &DataType) -> Result<ScalarValue> {
+        match datatype {
+            // Null type
+            DataType::Null => Ok(ScalarValue::Null),
+
+            // Numeric types
+            DataType::Boolean
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float16
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Decimal128(_, _)
+            | DataType::Decimal256(_, _)
+            | DataType::Timestamp(_, _)
+            | DataType::Time32(_)
+            | DataType::Time64(_)
+            | DataType::Interval(_)
+            | DataType::Duration(_)
+            | DataType::Date32
+            | DataType::Date64 => ScalarValue::new_zero(datatype),
+
+            // String types
+            DataType::Utf8 => Ok(ScalarValue::Utf8(Some("".to_string()))),
+            DataType::LargeUtf8 => Ok(ScalarValue::LargeUtf8(Some("".to_string()))),
+            DataType::Utf8View => Ok(ScalarValue::Utf8View(Some("".to_string()))),
+
+            // Binary types
+            DataType::Binary => Ok(ScalarValue::Binary(Some(vec![]))),
+            DataType::LargeBinary => Ok(ScalarValue::LargeBinary(Some(vec![]))),
+            DataType::BinaryView => Ok(ScalarValue::BinaryView(Some(vec![]))),
+
+            // Fixed-size binary
+            DataType::FixedSizeBinary(size) => Ok(ScalarValue::FixedSizeBinary(
+                *size,
+                Some(vec![0; *size as usize]),
+            )),
+
+            // List types
+            DataType::List(field) => {
+                let list =
+                    ScalarValue::new_list(&[], field.data_type(), field.is_nullable());
+                Ok(ScalarValue::List(list))
+            }
+            DataType::FixedSizeList(field, _size) => {
+                let empty_arr = new_empty_array(field.data_type());
+                let values = Arc::new(
+                    SingleRowListArrayBuilder::new(empty_arr)
+                        .with_nullable(field.is_nullable())
+                        .build_fixed_size_list_array(0),
+                );
+                Ok(ScalarValue::FixedSizeList(values))
+            }
+            DataType::LargeList(field) => {
+                let list = ScalarValue::new_large_list(&[], field.data_type());
+                Ok(ScalarValue::LargeList(list))
+            }
+
+            // Struct types
+            DataType::Struct(fields) => {
+                let values = fields
+                    .iter()
+                    .map(|f| ScalarValue::new_default(f.data_type()))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(ScalarValue::Struct(Arc::new(StructArray::new(
+                    fields.clone(),
+                    values
+                        .into_iter()
+                        .map(|v| v.to_array())
+                        .collect::<Result<_>>()?,
+                    None,
+                ))))
+            }
+
+            // Dictionary types
+            DataType::Dictionary(key_type, value_type) => Ok(ScalarValue::Dictionary(
+                key_type.clone(),
+                Box::new(ScalarValue::new_default(value_type)?),
+            )),
+
+            // Map types
+            DataType::Map(field, _) => Ok(ScalarValue::Map(Arc::new(MapArray::from(
+                ArrayData::new_empty(field.data_type()),
+            )))),
+
+            // Unsupported types for now
+            _ => {
+                _not_impl_err!(
+                    "Default value for data_type \"{datatype:?}\" is not implemented yet"
+                )
+            }
+        }
+    }
+
     /// Create an one value in the given type.
     pub fn new_one(datatype: &DataType) -> Result<ScalarValue> {
         Ok(match datatype {
@@ -3520,6 +3622,48 @@ impl ScalarValue {
         self.compact();
         self
     }
+
+    pub fn min(datatype: &DataType) -> Option<ScalarValue> {
+        match datatype {
+            DataType::Int8 => Some(ScalarValue::Int8(Some(i8::MIN))),
+            DataType::Int16 => Some(ScalarValue::Int16(Some(i16::MIN))),
+            DataType::Int32 => Some(ScalarValue::Int32(Some(i32::MIN))),
+            DataType::Int64 => Some(ScalarValue::Int64(Some(i64::MIN))),
+            DataType::UInt8 => Some(ScalarValue::UInt8(Some(u8::MIN))),
+            DataType::UInt16 => Some(ScalarValue::UInt16(Some(u16::MIN))),
+            DataType::UInt32 => Some(ScalarValue::UInt32(Some(u32::MIN))),
+            DataType::UInt64 => Some(ScalarValue::UInt64(Some(u64::MIN))),
+            DataType::Float32 => Some(ScalarValue::Float32(Some(f32::MIN))),
+            DataType::Float64 => Some(ScalarValue::Float64(Some(f64::MIN))),
+            DataType::Date32 => Some(ScalarValue::Date32(Some(i32::MIN))),
+            DataType::Date64 => Some(ScalarValue::Date64(Some(i64::MIN))),
+            DataType::Timestamp(_, _) => {
+                Some(ScalarValue::TimestampNanosecond(Some(i64::MIN), None))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn max(datatype: &DataType) -> Option<ScalarValue> {
+        match datatype {
+            DataType::Int8 => Some(ScalarValue::Int8(Some(i8::MAX))),
+            DataType::Int16 => Some(ScalarValue::Int16(Some(i16::MAX))),
+            DataType::Int32 => Some(ScalarValue::Int32(Some(i32::MAX))),
+            DataType::Int64 => Some(ScalarValue::Int64(Some(i64::MAX))),
+            DataType::UInt8 => Some(ScalarValue::UInt8(Some(u8::MAX))),
+            DataType::UInt16 => Some(ScalarValue::UInt16(Some(u16::MAX))),
+            DataType::UInt32 => Some(ScalarValue::UInt32(Some(u32::MAX))),
+            DataType::UInt64 => Some(ScalarValue::UInt64(Some(u64::MAX))),
+            DataType::Float32 => Some(ScalarValue::Float32(Some(f32::MAX))),
+            DataType::Float64 => Some(ScalarValue::Float64(Some(f64::MAX))),
+            DataType::Date32 => Some(ScalarValue::Date32(Some(i32::MAX))),
+            DataType::Date64 => Some(ScalarValue::Date64(Some(i64::MAX))),
+            DataType::Timestamp(_, _) => {
+                Some(ScalarValue::TimestampNanosecond(Some(i64::MAX), None))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Compacts the data of an `ArrayData` into a new `ArrayData`.
@@ -4142,6 +4286,52 @@ impl ScalarType<i32> for Date32Type {
     fn scalar(r: Option<i32>) -> ScalarValue {
         ScalarValue::Date32(r)
     }
+}
+
+/// Converts the `StructArray` inside `values`, which should be a
+/// `ScalarValue::List`, into a `Vec<Vec<ScalarValue>>`.
+pub fn unnest_ordering_values(
+    ordering_values: ScalarValue,
+    n_row: usize,
+    n_col: usize,
+) -> Result<Vec<Vec<ScalarValue>>> {
+    // Ordering Values
+    let ScalarValue::List(list_arr) = ordering_values else {
+        return _exec_err!(
+            "Expects to receive ScalarValue::List, but got: {ordering_values}"
+        );
+    };
+    let Some(ordering_array) = list_arr.values().as_any().downcast_ref::<StructArray>()
+    else {
+        return _exec_err!("Expects to receive StructArray");
+    };
+    let column_wise_ordering_values = ordering_array.columns();
+
+    debug_assert_eq!(column_wise_ordering_values.len(), n_col);
+    (0..n_row)
+        .map(|row_idx| {
+            (0..n_col)
+                .map(|col_idx| {
+                    ScalarValue::try_from_array(
+                        &column_wise_ordering_values[col_idx],
+                        row_idx,
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Converts the array inside `values`, which should be a `ScalarValue::List`,
+/// into a `Vec<ScalarValue>`.
+pub fn unnest_arg_values(values: ScalarValue) -> Result<Vec<ScalarValue>> {
+    let ScalarValue::List(list_arr) = values else {
+        return _exec_err!("Expects to receive ScalarValue::List, but got: {values}");
+    };
+    let values = list_arr.values();
+    (0..values.len())
+        .map(|idx| ScalarValue::try_from_array(values, idx))
+        .collect()
 }
 
 #[cfg(test)]

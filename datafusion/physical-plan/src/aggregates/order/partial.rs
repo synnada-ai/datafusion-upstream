@@ -265,6 +265,11 @@ impl GroupOrderingPartial {
     pub(crate) fn size(&self) -> usize {
         size_of::<Self>() + self.order_indices.allocated_size() + self.state.size()
     }
+
+    /// Gets indices of the ordered section among group by values.
+    pub(crate) fn order_indices(&self) -> &[usize] {
+        &self.order_indices
+    }
 }
 
 #[cfg(test)]

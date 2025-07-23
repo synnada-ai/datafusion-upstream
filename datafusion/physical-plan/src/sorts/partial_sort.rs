@@ -64,9 +64,11 @@ use crate::{
     Partitioning, PlanProperties, SendableRecordBatchStream, Statistics,
 };
 
+use arrow::array::ArrayRef;
 use arrow::compute::concat_batches;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
+use arrow::row::{RowConverter, Rows, SortField};
 use datafusion_common::utils::evaluate_partition_ranges;
 use datafusion_common::Result;
 use datafusion_execution::{RecordBatchStream, TaskContext};
@@ -305,10 +307,11 @@ impl ExecutionPlan for PartialSortExec {
             input,
             expr: self.expr.clone(),
             common_prefix_length: self.common_prefix_length,
-            in_mem_batches: vec![],
+            in_mem_batch: RecordBatch::new_empty(Arc::clone(&self.schema())),
             fetch: self.fetch,
             is_closed: false,
             baseline_metrics: BaselineMetrics::new(&self.metrics_set, partition),
+            top1_tracker: Top1RowTracker::try_new(self.expr.clone(), &self.schema())?,
         }))
     }
 
@@ -334,13 +337,15 @@ struct PartialSortStream {
     /// should be more than 0 otherwise PartialSort is not applicable
     common_prefix_length: usize,
     /// Used as a buffer for part of the input not ready for sort
-    in_mem_batches: Vec<RecordBatch>,
+    in_mem_batch: RecordBatch,
     /// Fetch top N results
     fetch: Option<usize>,
     /// Whether the stream has finished returning all of its data or not
     is_closed: bool,
     /// Execution metrics
     baseline_metrics: BaselineMetrics,
+    /// Keeps track of RECEIVED max (or max) row batch
+    top1_tracker: Top1RowTracker,
 }
 
 impl Stream for PartialSortStream {
@@ -377,32 +382,40 @@ impl PartialSortStream {
         loop {
             return Poll::Ready(match ready!(self.input.poll_next_unpin(cx)) {
                 Some(Ok(batch)) => {
-                    if let Some(slice_point) =
-                        self.get_slice_point(self.common_prefix_length, &batch)?
-                    {
-                        self.in_mem_batches.push(batch.slice(0, slice_point));
-                        let remaining_batch =
-                            batch.slice(slice_point, batch.num_rows() - slice_point);
-                        // Extract the sorted batch
-                        let sorted_batch = self.sort_in_mem_batches();
-                        // Refill with the remaining batch
-                        self.in_mem_batches.push(remaining_batch);
+                    // Update the top row tracker
+                    self.top1_tracker.try_update(&batch)?;
 
-                        debug_assert!(sorted_batch
-                            .as_ref()
-                            .map(|batch| batch.num_rows() > 0)
-                            .unwrap_or(true));
-                        Some(sorted_batch)
+                    // Merge new batch into in_mem_batch
+                    self.in_mem_batch = concat_batches(
+                        &self.schema(),
+                        &[self.in_mem_batch.clone(), batch],
+                    )?;
+
+                    // Check if we have a slice point, otherwise keep accumulating in `self.in_mem_batch`.
+                    if let Some(slice_point) = self
+                        .get_slice_point(self.common_prefix_length, &self.in_mem_batch)?
+                    {
+                        let sorted = self.in_mem_batch.slice(0, slice_point);
+                        self.in_mem_batch = self.in_mem_batch.slice(
+                            slice_point,
+                            self.in_mem_batch.num_rows() - slice_point,
+                        );
+                        let sorted_batch = sort_batch(&sorted, &self.expr, self.fetch)?;
+                        if let Some(fetch) = self.fetch.as_mut() {
+                            *fetch -= sorted_batch.num_rows();
+                        }
+
+                        debug_assert!(sorted_batch.num_rows() > 0);
+                        Some(Ok(sorted_batch))
                     } else {
-                        self.in_mem_batches.push(batch);
                         continue;
                     }
                 }
                 Some(Err(e)) => Some(Err(e)),
                 None => {
                     self.is_closed = true;
-                    // once input is consumed, sort the rest of the inserted batches
-                    let remaining_batch = self.sort_in_mem_batches()?;
+                    // Once input is consumed, sort the rest of the inserted batches
+                    let remaining_batch = self.sort_in_mem_batch()?;
                     if remaining_batch.num_rows() > 0 {
                         Some(Ok(remaining_batch))
                     } else {
@@ -415,11 +428,11 @@ impl PartialSortStream {
 
     /// Returns a sorted RecordBatch from in_mem_batches and clears in_mem_batches
     ///
-    /// If fetch is specified for PartialSortStream `sort_in_mem_batches` will limit
+    /// If fetch is specified for PartialSortStream `sort_in_mem_batch` will limit
     /// the last RecordBatch returned and will mark the stream as closed
-    fn sort_in_mem_batches(self: &mut Pin<&mut Self>) -> Result<RecordBatch> {
-        let input_batch = concat_batches(&self.schema(), &self.in_mem_batches)?;
-        self.in_mem_batches.clear();
+    fn sort_in_mem_batch(self: &mut Pin<&mut Self>) -> Result<RecordBatch> {
+        let input_batch = self.in_mem_batch.clone();
+        self.in_mem_batch = RecordBatch::new_empty(self.schema());
         let result = sort_batch(&input_batch, &self.expr, self.fetch)?;
         if let Some(remaining_fetch) = self.fetch {
             // remaining_fetch - result.num_rows() is always be >= 0
@@ -457,6 +470,90 @@ impl PartialSortStream {
         } else {
             Ok(None)
         }
+    }
+}
+
+/// Tracks the top row seen so far based on a `LexOrdering`.
+///
+/// Correctly handles ascending/descending order and NULLs positioning,
+/// by relying on `RowConverter` to encode sort semantics.
+pub struct Top1RowTracker {
+    expr: LexOrdering,
+    row_converter: RowConverter,
+    scratch_rows: Rows,
+    current_top: Option<(Vec<u8>, RecordBatch, usize)>,
+}
+
+impl Top1RowTracker {
+    /// Create a new tracker from a `LexOrdering` and input schema.
+    pub fn try_new(expr: LexOrdering, schema: &SchemaRef) -> Result<Self> {
+        let sort_fields = expr
+            .iter()
+            .map(|e| {
+                let dt = e.expr.data_type(schema)?;
+                Ok(SortField::new_with_options(dt, e.options))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let row_converter = RowConverter::new(sort_fields)?;
+        let scratch_rows = row_converter.empty_rows(0, 0);
+
+        Ok(Self {
+            expr,
+            row_converter,
+            scratch_rows,
+            current_top: None,
+        })
+    }
+
+    /// Scans the input `batch`, updates the internal top row if necessary.
+    ///
+    /// This works regardless of the sort direction or NULLs behavior.
+    pub fn try_update(&mut self, batch: &RecordBatch) -> Result<()> {
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+
+        let sort_columns: Vec<ArrayRef> = self
+            .expr
+            .iter()
+            .map(|e| e.expr.evaluate(batch)?.into_array(batch.num_rows()))
+            .collect::<Result<_>>()?;
+
+        self.scratch_rows.clear();
+        self.row_converter
+            .append(&mut self.scratch_rows, &sort_columns)?;
+
+        for row_idx in 0..batch.num_rows() {
+            let row_bytes = self.scratch_rows.row(row_idx).as_ref().to_vec();
+
+            match &self.current_top {
+                None => {
+                    self.current_top = Some((row_bytes, batch.clone(), row_idx));
+                }
+                Some((max_bytes, _, _)) if row_bytes > *max_bytes => {
+                    self.current_top = Some((row_bytes, batch.clone(), row_idx));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns the top (maximum in sort order) row seen so far.
+    pub fn get_top_row(&self) -> Option<RecordBatch> {
+        self.current_top
+            .as_ref()
+            .map(|(_, batch, row_idx)| batch.slice(*row_idx, 1))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.current_top.is_none()
+    }
+
+    pub fn sort_expr(&self) -> &LexOrdering {
+        &self.expr
     }
 }
 

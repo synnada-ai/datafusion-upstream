@@ -82,6 +82,18 @@ impl<R: 'static> SpawnedTask<R> {
             }
         })
     }
+
+    /// Joins the task using a mutable reference and unwinds the panic if it happens.
+    pub async fn join_unwind_mut(&mut self) -> Result<R, JoinError> {
+        self.await.map_err(|e| {
+            if e.is_panic() {
+                std::panic::resume_unwind(e.into_panic());
+            } else {
+                log::warn!("SpawnedTask was polled during shutdown");
+                e
+            }
+        })
+    }
 }
 
 impl<R> Future for SpawnedTask<R> {

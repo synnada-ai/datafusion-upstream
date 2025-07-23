@@ -222,6 +222,16 @@ impl Time {
     pub fn value(&self) -> usize {
         self.nanos.load(Ordering::Relaxed)
     }
+
+    /// Return a scoped guard that adds the amount of time elapsed between its
+    /// creation and its drop (or the call to `stop`) to the underlying metric
+    /// according to the given instant.
+    pub fn timer_with(&self, now: Instant) -> ScopedTimerGuard<'_> {
+        ScopedTimerGuard {
+            inner: self,
+            start: Some(now),
+        }
+    }
 }
 
 /// Stores a single timestamp, stored as the number of nanoseconds
@@ -330,6 +340,20 @@ impl ScopedTimerGuard<'_> {
     /// Stop the timer, record the time taken and consume self
     pub fn done(mut self) {
         self.stop()
+    }
+
+    /// Stop the timer timing and record the time taken with the given endpoint.
+    pub fn stop_with(&mut self, end_time: Instant) {
+        if let Some(start) = self.start.take() {
+            let elapsed = end_time - start;
+            self.inner.add_duration(elapsed)
+        }
+    }
+
+    /// Stop the timer, record the time taken with the given endpoint, and
+    /// consume self.
+    pub fn done_with(mut self, end_time: Instant) {
+        self.stop_with(end_time)
     }
 }
 

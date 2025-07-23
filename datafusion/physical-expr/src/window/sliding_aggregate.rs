@@ -175,6 +175,10 @@ impl WindowExpr for SlidingAggregateWindowExpr {
             window_frame: Arc::clone(&self.window_frame),
         }))
     }
+
+    fn create_window_fn(&self) -> Result<WindowFn> {
+        Ok(WindowFn::Aggregate(self.get_accumulator()?))
+    }
 }
 
 impl AggregateWindowExpr for SlidingAggregateWindowExpr {

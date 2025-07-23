@@ -130,6 +130,8 @@ pub trait WindowExpr: Send + Sync + Debug {
     /// Get the reverse expression of this [WindowExpr].
     fn get_reverse_expr(&self) -> Option<Arc<dyn WindowExpr>>;
 
+    fn create_window_fn(&self) -> Result<WindowFn>;
+
     /// Returns all expressions used in the [`WindowExpr`].
     /// These expressions are (1) function arguments, (2) partition by expressions, (3) order by expressions.
     fn all_expressions(&self) -> WindowPhysicalExpressions {

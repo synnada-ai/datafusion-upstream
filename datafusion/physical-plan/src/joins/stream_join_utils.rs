@@ -372,22 +372,43 @@ fn convert_filter_columns(
     })
 }
 
-/// The [SortedFilterExpr] object represents a sorted filter expression. It
-/// contains the following information: The origin expression, the filter
-/// expression, an interval encapsulating expression bounds, and a stable
-/// index identifying the expression in the expression DAG.
+/// Represents an ordered expression within a filter expression.
 ///
-/// Physical schema of a [JoinFilter]'s intermediate batch combines two sides
-/// and uses new column names. In this process, a column exchange is done so
-/// we can utilize sorting information while traversing the filter expression
-/// DAG for interval calculations. When evaluating the inner buffer, we use
-/// `origin_sorted_expr`.
+/// `SortedFilterExpr` is used to manage details related to ordered expressions
+/// within filter expressions during a join operation. It consists of four main
+/// components:
+///
+/// 1. `filter_expr`: Represents the ordered expression within the filter. This
+///    is represented as a `PhysicalSortExpr` which specifies the column and the
+///    corresponding column index that are part of the expression, as well as any
+///    options associated with sorting.
+/// 2. `intermediate_batch_filter_expr`: This is an intermediate representation
+///    of the build-side expression that is derived from the original filter
+///    expression. The build-side expression is the version of the expression
+///    that is used to evaluate intermediate batches of data during the join
+///    operation. It specifies the column and the corresponding column index
+///    within the intermediate batch.
+/// 3. `interval`: This stores the interval associated with the filter expression.
+/// 4. `node_index`: This stores the node index of the filter expression within
+///    the `ExprIntervalGraph`.
+///
+/// It is important to note that the column index in `filter_expr` is based on
+/// the original schema, while the column index in `intermediate_batch_filter_expr`
+/// is based on the intermediate batch schema, which can differ from the original
+/// schema. The intermediate batch is created during the join operation, containing
+/// columns only from one side of the join. As a result, the column indexes in the
+/// intermediate batch may differ from those in the original schema.
+///
+/// This distinction is crucial because it ensures that the correct columns are
+/// referenced during the join operation, and that the intermediate batch
+/// correctly reflects the structure of the data at that stage of the join process.
 #[derive(Debug, Clone)]
 pub struct SortedFilterExpr {
-    /// Sorted expression from a join side (i.e. a child of the join)
-    origin_sorted_expr: PhysicalSortExpr,
-    /// Expression adjusted for filter schema.
-    filter_expr: Arc<dyn PhysicalExpr>,
+    /// Ordered filter expression
+    filter_expr: PhysicalSortExpr,
+    /// Expression adjusted for filter schema projected by build side.
+    /// Only the column indexes are changed.
+    intermediate_batch_filter_expr: Arc<dyn PhysicalExpr>,
     /// Interval containing expression bounds
     interval: Interval,
     /// Node index in the expression DAG
@@ -397,26 +418,26 @@ pub struct SortedFilterExpr {
 impl SortedFilterExpr {
     /// Constructor
     pub fn try_new(
-        origin_sorted_expr: PhysicalSortExpr,
-        filter_expr: Arc<dyn PhysicalExpr>,
+        filter_expr: PhysicalSortExpr,
+        intermediate_batch_filter_expr: Arc<dyn PhysicalExpr>,
         filter_schema: &Schema,
     ) -> Result<Self> {
-        let dt = filter_expr.data_type(filter_schema)?;
+        let dt = filter_expr.expr.data_type(filter_schema)?;
         Ok(Self {
-            origin_sorted_expr,
             filter_expr,
+            intermediate_batch_filter_expr,
             interval: Interval::make_unbounded(&dt)?,
             node_index: 0,
         })
     }
 
-    /// Get origin expr information
-    pub fn origin_sorted_expr(&self) -> &PhysicalSortExpr {
-        &self.origin_sorted_expr
+    /// Get intermediate_batch_filter_expr
+    pub fn intermediate_batch_filter_expr(&self) -> Arc<dyn PhysicalExpr> {
+        Arc::clone(&self.intermediate_batch_filter_expr)
     }
 
     /// Get filter expr information
-    pub fn filter_expr(&self) -> &Arc<dyn PhysicalExpr> {
+    pub fn filter_expr(&self) -> &PhysicalSortExpr {
         &self.filter_expr
     }
 
@@ -897,7 +918,7 @@ pub mod tests {
             &left_child_sort_expr,
         )?
         .unwrap();
-        assert!(left_child_sort_expr.eq(left_sort_filter_expr.origin_sorted_expr()));
+        assert!(left_child_sort_expr.eq(left_sort_filter_expr.filter_expr()));
 
         let right_sort_filter_expr = build_filter_input_order(
             JoinSide::Right,
@@ -906,7 +927,7 @@ pub mod tests {
             &right_child_sort_expr,
         )?
         .unwrap();
-        assert!(right_child_sort_expr.eq(right_sort_filter_expr.origin_sorted_expr()));
+        assert!(right_child_sort_expr.eq(right_sort_filter_expr.filter_expr()));
 
         // Assert that adjusted (left) filter expression matches with `left_child_sort_expr`:
         assert!(filter_left.eq(left_sort_filter_expr.filter_expr()));
