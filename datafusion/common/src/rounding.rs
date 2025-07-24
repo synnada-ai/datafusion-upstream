@@ -77,6 +77,7 @@ pub trait FloatBits {
 
     /// The integer value 0, used in bitwise operations.
     const ZERO: Self::Item;
+    const NEG_ZERO: Self::Item;
 
     /// Converts the floating-point value to its bitwise representation.
     fn to_bits(self) -> Self::Item;
@@ -101,6 +102,7 @@ impl FloatBits for f32 {
     const CLEAR_SIGN_MASK: u32 = 0x7fff_ffff;
     const ONE: Self::Item = 1;
     const ZERO: Self::Item = 0;
+    const NEG_ZERO: Self::Item = 0x8000_0000;
 
     fn to_bits(self) -> Self::Item {
         self.to_bits()
@@ -130,6 +132,7 @@ impl FloatBits for f64 {
     const CLEAR_SIGN_MASK: u64 = 0x7fff_ffff_ffff_ffff;
     const ONE: Self::Item = 1;
     const ZERO: Self::Item = 0;
+    const NEG_ZERO: Self::Item = 0x8000_0000_0000_0000;
 
     fn to_bits(self) -> Self::Item {
         self.to_bits()
@@ -175,8 +178,10 @@ pub fn next_up<F: FloatBits + Copy>(float: F) -> F {
     }
 
     let abs = bits & F::CLEAR_SIGN_MASK;
-    let next_bits = if abs == F::ZERO {
+    let next_bits = if bits == F::ZERO {
         F::TINY_BITS
+    } else if abs == F::ZERO {
+        F::ZERO
     } else if bits == abs {
         bits + F::ONE
     } else {
@@ -207,7 +212,9 @@ pub fn next_down<F: FloatBits + Copy>(float: F) -> F {
         return float;
     }
     let abs = bits & F::CLEAR_SIGN_MASK;
-    let next_bits = if abs == F::ZERO {
+    let next_bits = if bits == F::ZERO {
+        F::NEG_ZERO
+    } else if abs == F::ZERO {
         F::NEG_TINY_BITS
     } else if bits == abs {
         bits - F::ONE
