@@ -23,7 +23,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use datafusion_expr::registry::FunctionRegistry;
 use datafusion_expr::{assert_expected_schema, InvariantLevel};
-use log::{debug, warn};
+use log::{debug, error, warn};
 
 use datafusion_common::alias::AliasGenerator;
 use datafusion_common::config::ConfigOptions;
@@ -55,6 +55,7 @@ use crate::replace_distinct_aggregate::ReplaceDistinctWithAggregate;
 use crate::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use crate::simplify_expressions::SimplifyExpressions;
 use crate::single_distinct_to_groupby::SingleDistinctToGroupBy;
+use crate::transform_linear_aggregation::TransformLinearAggregation;
 use crate::utils::log_plan;
 
 /// `OptimizerRule`s transforms one [`LogicalPlan`] into another which
@@ -247,6 +248,8 @@ impl Optimizer {
             // The previous optimizations added expressions and projections,
             // that might benefit from the following rules
             Arc::new(EliminateGroupByConstant::new()),
+            // Try to transform linear udaf to reduce computation
+            Arc::new(TransformLinearAggregation::new()),
             Arc::new(CommonSubexprEliminate::new()),
             Arc::new(OptimizeProjections::new()),
         ];
@@ -403,6 +406,7 @@ impl Optimizer {
                     }
                     // OptimizerRule was unsuccessful, but skipped failed rules is off, return error
                     (Err(e), None) => {
+                        debug!("Optimizer rule '{}' failed, error:{e}", rule.name());
                         return Err(e.context(format!(
                             "Optimizer rule '{}' failed",
                             rule.name()

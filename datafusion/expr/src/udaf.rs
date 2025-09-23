@@ -334,6 +334,11 @@ impl AggregateUDF {
         self.inner.is_ordered_set_aggregate()
     }
 
+    /// See [`AggregateUDFImpl::is_linear`] for more details.
+    pub fn is_linear(&self) -> bool {
+        self.inner.is_linear()
+    }
+
     /// Returns the documentation for this Aggregate UDF.
     ///
     /// Documentation can be accessed programmatically as well as
@@ -757,6 +762,21 @@ pub trait AggregateUDFImpl: Debug + DynEq + DynHash + Send + Sync {
     /// function. See [`SetMonotonicity`] for details.
     fn set_monotonicity(&self, _data_type: &DataType) -> SetMonotonicity {
         SetMonotonicity::NotMonotonic
+    }
+
+    /// If this function is a linear function, return true
+    /// If the function is not, return false
+    ///
+    /// The Linear aggregation function will satisfy such transforming:
+    ///
+    /// ```text
+    ///   f(3x + y) = 3 * f(x) + f(y)
+    ///
+    ///   NOTICE: both `x` and `y` should be non-nullable
+    /// ```
+    ///
+    fn is_linear(&self) -> bool {
+        false
     }
 }
 

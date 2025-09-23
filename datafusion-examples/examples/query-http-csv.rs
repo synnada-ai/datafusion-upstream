@@ -39,18 +39,30 @@ async fn main() -> Result<()> {
     // register csv file with the execution context
     ctx.register_csv(
         "aggregate_test_100",
-        "https://github.com/apache/arrow-testing/raw/master/data/csv/aggregate_test_100.csv",
+        "/Users/kamille/Desktop/github/datafusion/testing/data/csv/aggregate_test_100.csv",
         CsvReadOptions::new(),
     )
     .await?;
 
     // execute the query
+    // let df = ctx
+    //     .sql("SELECT c1, c2, MIN(c3) + SUM(c3) + 4 FROM aggregate_test_100 GROUP BY c1, c2 LIMIT 1")
+    //     .await?;
     let df = ctx
-        .sql("SELECT c1,c2,c3 FROM aggregate_test_100 LIMIT 5")
+        .sql("SELECT c1, c2, MIN(c3) + 3 FROM aggregate_test_100 GROUP BY c1, c2 LIMIT 1")
         .await?;
 
+    let plan = df.logical_plan();
+    println!("{plan}");
     // print the results
     df.show().await?;
+
+    // let df = ctx
+    // .sql("SELECT c1, c2, MIN(c3) FROM aggregate_test_100 GROUP BY GROUPING SETS ((c1,c2),(c1),(c2)) LIMIT 1")
+    // .await?;
+
+    // // print the results
+    // df.show().await?;
 
     Ok(())
 }

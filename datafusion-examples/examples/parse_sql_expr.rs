@@ -101,7 +101,7 @@ async fn query_parquet_demo() -> Result<()> {
         )
         .await?;
 
-    let df = df
+    let df: datafusion::prelude::DataFrame = df
         .clone()
         .select(vec![
             df.parse_sql_expr("int_col")?,
